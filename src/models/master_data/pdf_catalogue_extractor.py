@@ -99,8 +99,18 @@ _COPYRIGHT_PAT = re.compile(r'\s*No part of this Publication.*', re.IGNORECASE)
 # Page-type skips — these page formats are not FIG parts tables
 # KITS pages: "KITS-5YY6", "KITS 5YY6" — kit assembly lists
 _KITS_PAGE_PAT = re.compile(r'\bKITS[-\s]\S', re.IGNORECASE)
-# Cross-reference index pages: "PART NO PART NO PART NO…" repeated 3+ times as column headers
-_XREF_PAGE_PAT = re.compile(r'(?:PART\s+NO[\s.]*){3}', re.IGNORECASE)
+# Cross-reference index pages: "PART NO." appears 3+ times, NOT necessarily consecutive —
+# the numerical index layout is "PART NO. | REF. NO. | PART NO. | REF. NO. | …" so the
+# old consecutive pattern never matched (REF. NO. broke the run).
+_XREF_PAGE_PAT = re.compile(
+    r'PART\s+NO.{0,60}PART\s+NO.{0,60}PART\s+NO',
+    re.IGNORECASE | re.DOTALL,
+)
+# Index-page title guard: catches "NUMERICAL INDEX", "ALPHABETICAL INDEX", etc.
+_INDEX_PAGE_PAT = re.compile(
+    r'(?:NUMERICAL|ALPHABETICAL|COLOUR|GENERAL)\s+INDEX',
+    re.IGNORECASE,
+)
 # CID glyph fallback artifact from pdfplumber font decoding (e.g. "(cid:2)")
 _CID_PAT = re.compile(r'\s*\(cid:\d+\)', re.IGNORECASE)
 
@@ -278,12 +288,16 @@ class YamahaCatalogueExtractor:
 
                     word_rows = self._group_by_y(words)
 
-                    # Skip KITS pages and cross-reference index pages
+                    # Skip KITS pages, cross-reference index pages, and named index pages
                     page_header = " ".join(
                         " ".join(w["text"] for w in ws)
                         for _, ws in word_rows[:8]
                     )
-                    if _KITS_PAGE_PAT.search(page_header) or _XREF_PAGE_PAT.search(page_header):
+                    if (
+                        _KITS_PAGE_PAT.search(page_header)
+                        or _XREF_PAGE_PAT.search(page_header)
+                        or _INDEX_PAGE_PAT.search(page_header)
+                    ):
                         continue
 
                     # Collect variant codes from column-header rows on this page
@@ -1016,9 +1030,13 @@ class YamahaCatalogueExtractor:
                 for page in pdf.pages[: self.max_pages]:
                     text = page.extract_text() or ""
 
-                    # Skip KITS pages and cross-reference index pages
+                    # Skip KITS pages, cross-reference index pages, and named index pages
                     page_head = text[:400]
-                    if _KITS_PAGE_PAT.search(page_head) or _XREF_PAGE_PAT.search(page_head):
+                    if (
+                        _KITS_PAGE_PAT.search(page_head)
+                        or _XREF_PAGE_PAT.search(page_head)
+                        or _INDEX_PAGE_PAT.search(page_head)
+                    ):
                         continue
 
                     for line in text.split("\n"):
