@@ -1,0 +1,356 @@
+"""Catalog endpoints — browse and serve PDF parts catalogues from data/raw/pdf_catalogues."""
+
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
+
+from src.api.deps import get_catalog_parts
+from src.api.schemas import (
+    CatalogCoverageResponse, CatalogCoverageRow,
+    CatalogFile, CatalogModel, CatalogPartRow, CatalogResponse,
+)
+from src.models.master_data.pdf_catalogue_extractor import (
+    DISPLAY_HEADERS, YamahaCatalogueExtractor,
+)
+
+PDF_ROOT = Path("data/raw/pdf_catalogues").resolve()
+PDF_EXTS  = {".pdf", ".PDF"}
+RAW_ROOT  = Path("data/raw").resolve()
+XLSX_EXTS = {".xlsx", ".xls"}
+
+router = APIRouter(prefix="/catalog", tags=["Catalog"])
+
+
+@router.get("", response_model=CatalogResponse)
+def list_catalog() -> CatalogResponse:
+    models: list[CatalogModel] = []
+    total = 0
+
+    if not PDF_ROOT.exists():
+        return CatalogResponse(models=[], total_pdfs=0)
+
+    for folder in sorted(PDF_ROOT.iterdir(), key=lambda p: p.name.upper()):
+        if not folder.is_dir():
+            continue
+        files: list[CatalogFile] = []
+        for pdf in sorted(folder.rglob("*"), key=lambda p: p.name.upper()):
+            if pdf.suffix in PDF_EXTS and pdf.is_file():
+                rel = pdf.relative_to(PDF_ROOT)
+                files.append(CatalogFile(
+                    filename=pdf.name,
+                    rel_path=rel.as_posix(),
+                    size_kb=round(pdf.stat().st_size / 1024, 1),
+                ))
+        if files:
+            total += len(files)
+            models.append(CatalogModel(model=folder.name, pdf_count=len(files), files=files))
+
+    return CatalogResponse(models=models, total_pdfs=total)
+
+
+@router.get("/file/{file_path:path}")
+def serve_pdf(file_path: str) -> FileResponse:
+    target = (PDF_ROOT / file_path).resolve()
+    # Path traversal guard
+    if not str(target).startswith(str(PDF_ROOT)):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not target.exists() or target.suffix not in PDF_EXTS:
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(str(target), media_type="application/pdf", headers={"Content-Disposition": "inline"})
+
+
+@router.get("/folders")
+def list_folders() -> list[str]:
+    """Return all folder names inside pdf_catalogues (for the upload folder picker)."""
+    if not PDF_ROOT.exists():
+        return []
+    return sorted(f.name for f in PDF_ROOT.iterdir() if f.is_dir())
+
+
+@router.post("/upload")
+async def upload_pdf(
+    file: UploadFile = File(...),
+    folder: str = Form(...),
+) -> dict[str, str]:
+    """Upload a PDF catalogue into pdf_catalogues/{folder}/. Creates the folder if needed."""
+    if not file.filename or Path(file.filename).suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+
+    folder_clean = folder.strip().strip("/\\")
+    if not folder_clean or ".." in folder_clean or "/" in folder_clean or "\\" in folder_clean:
+        raise HTTPException(status_code=400, detail="Invalid folder name")
+
+    target_dir = (PDF_ROOT / folder_clean).resolve()
+    if not str(target_dir).startswith(str(PDF_ROOT)):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    dest = target_dir / Path(file.filename).name
+
+    with dest.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    return {
+        "rel_path": dest.relative_to(PDF_ROOT).as_posix(),
+        "filename": dest.name,
+        "folder":   folder_clean,
+    }
+
+
+_EXTRACTOR = YamahaCatalogueExtractor(max_pages=500)
+_INTERIM   = Path("data/interim")
+_PARTS_OUT = _INTERIM / "catalog_parts.parquet"
+_EXTRACT_STATUS: dict[str, Any] = {"running": False, "last_result": None}
+
+
+@router.get("/tables/{file_path:path}")
+def extract_pdf_tables(
+    file_path: str,
+    max_pages: int = Query(200, le=500),
+) -> dict[str, Any]:
+    """Extract parts from one Yamaha PDF using YamahaCatalogueExtractor.
+
+    Returns the same seven-column layout as GPD155D-A_Parts_Catalogue.xlsx:
+        Section | Fig. No. | Ref. No. | Part No. | Description | Q'ty | Remarks
+    """
+    target = (PDF_ROOT / file_path).resolve()
+    if not str(target).startswith(str(PDF_ROOT)):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not target.exists() or target.suffix not in PDF_EXTS:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    ex = YamahaCatalogueExtractor(max_pages=max_pages)
+    result = ex.extract(target)
+
+    if result.error:
+        raise HTTPException(status_code=500, detail=result.error)
+
+    rows = [[r[c] for c in ["section", "ref_no", "part_no", "description", "qty", "remarks"]]
+            for r in result.rows]
+    sections = sorted({r[0] for r in rows if r[0]})
+
+    return {
+        "headers":     DISPLAY_HEADERS,
+        "rows":        rows,
+        "total":       len(rows),
+        "sections":    sections,
+        "variants":    result.variants,
+        "colour_codes": result.colour_codes,
+        "pages_scanned":  result.pages_scanned,
+        "sections_found": result.sections_found,
+        "ocr_flagged":    result.ocr_flagged,
+        "warnings":       result.warnings,
+    }
+
+
+@router.post("/run-extraction")
+def run_batch_extraction(background_tasks: BackgroundTasks) -> dict[str, Any]:
+    """Trigger batch extraction of all PDF catalogues → data/interim/catalog_parts.parquet.
+
+    Runs in the background so the request returns immediately.
+    Poll GET /catalog/extraction-status for progress.
+    """
+    if _EXTRACT_STATUS["running"]:
+        return {"queued": False, "message": "Extraction already running"}
+
+    def _run() -> None:
+        _EXTRACT_STATUS["running"] = True
+        _EXTRACT_STATUS["last_result"] = None
+        try:
+            _INTERIM.mkdir(parents=True, exist_ok=True)
+            df = _EXTRACTOR.extract_all(PDF_ROOT, save_path=_PARTS_OUT)
+            _EXTRACT_STATUS["last_result"] = {
+                "ok": True,
+                "total_rows":      len(df),
+                "distinct_parts":  int(df["part_no"].nunique()) if not df.empty else 0,
+                "models":          int(df["model"].nunique()) if not df.empty else 0,
+                "parquet":         str(_PARTS_OUT),
+            }
+        except Exception as exc:  # noqa: BLE001
+            _EXTRACT_STATUS["last_result"] = {"ok": False, "error": str(exc)}
+        finally:
+            _EXTRACT_STATUS["running"] = False
+
+    background_tasks.add_task(_run)
+    return {"queued": True, "message": "Extraction started in background"}
+
+
+@router.get("/extraction-status")
+def get_extraction_status() -> dict[str, Any]:
+    """Return current state of the batch extraction job."""
+    return {
+        "running":     _EXTRACT_STATUS["running"],
+        "last_result": _EXTRACT_STATUS["last_result"],
+        "parquet_exists": _PARTS_OUT.exists(),
+        "parquet_size_kb": (
+            round(_PARTS_OUT.stat().st_size / 1024, 1) if _PARTS_OUT.exists() else 0
+        ),
+    }
+
+
+@router.get("/coverage", response_model=CatalogCoverageResponse)
+def get_catalog_coverage() -> CatalogCoverageResponse:
+    """Stage 6.1 — Parts extracted from PDF catalogues, grouped by model.
+
+    Returns data from catalog_parts.parquet (written by stage06 run).
+    If the parquet does not exist, returns extracted=False with empty rows.
+    """
+    df = get_catalog_parts()
+
+    if df.empty:
+        return CatalogCoverageResponse(
+            extracted=False, total_part_references=0,
+            distinct_parts=0, distinct_models=0, rows=[],
+        )
+
+    # Count PDFs per model from the live file system (for pdf_count)
+    pdf_counts: dict[str, int] = {}
+    if PDF_ROOT.exists():
+        for folder in PDF_ROOT.iterdir():
+            if folder.is_dir():
+                pdf_counts[folder.name] = sum(
+                    1 for f in folder.rglob("*") if f.suffix in PDF_EXTS
+                )
+
+    pn_col = "part_no" if "part_no" in df.columns else "part_number"
+    rows: list[CatalogCoverageRow] = []
+    if "model" in df.columns and pn_col in df.columns:
+        agg_dict: dict[str, Any] = {"distinct_parts": (pn_col, "nunique")}
+        if "ocr_used" in df.columns:
+            agg_dict["ocr_pages"] = ("ocr_used", "sum")
+        grp = (
+            df.groupby("model")
+            .agg(**agg_dict)
+            .reset_index()
+            .sort_values("distinct_parts", ascending=False)
+        )
+        for _, r in grp.iterrows():
+            model_name = str(r["model"])
+            rows.append(CatalogCoverageRow(
+                model=model_name,
+                pdf_count=pdf_counts.get(model_name, 0),
+                distinct_parts=int(r["distinct_parts"]),
+                ocr_pages=int(r.get("ocr_pages", 0)),
+            ))
+
+    return CatalogCoverageResponse(
+        extracted=True,
+        total_part_references=len(df),
+        distinct_parts=int(df[pn_col].nunique()) if pn_col in df.columns else 0,
+        distinct_models=int(df["model"].nunique()) if "model" in df.columns else 0,
+        rows=rows,
+    )
+
+
+@router.get("/excel")
+def list_excel_catalogues() -> list[dict[str, Any]]:
+    """List all Excel parts-catalogue files found directly in data/raw/."""
+    result = []
+    if RAW_ROOT.exists():
+        for f in sorted(RAW_ROOT.glob("*"), key=lambda p: p.name.upper()):
+            if f.is_file() and f.suffix in XLSX_EXTS and "catalogue" in f.stem.lower():
+                result.append({
+                    "filename": f.name,
+                    "stem":     f.stem,
+                    "size_kb":  round(f.stat().st_size / 1024, 1),
+                })
+    return result
+
+
+@router.get("/excel/{filename}")
+def get_excel_catalogue(
+    filename: str,
+    section: str | None = Query(None),
+    search: str | None  = Query(None),
+) -> dict[str, Any]:
+    """Return all rows from an Excel parts catalogue in data/raw/.
+
+    Optionally filter by section and/or a search string (matched against
+    Part No. and Description columns).
+    """
+    import openpyxl
+
+    target = (RAW_ROOT / filename).resolve()
+    if not str(target).startswith(str(RAW_ROOT)):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not target.exists() or target.suffix not in XLSX_EXTS:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    wb = openpyxl.load_workbook(str(target), read_only=True, data_only=True)
+    ws = wb.active
+
+    headers: list[str] = []
+    rows: list[list[str]] = []
+
+    for i, row in enumerate(ws.iter_rows(values_only=True)):
+        cells = [str(c).strip() if c is not None else "" for c in row]
+        if not any(cells):
+            continue
+        if i == 0:
+            headers = cells
+            continue
+        rows.append(cells)
+
+    # Drop "Fig. No." column
+    if "Fig. No." in headers:
+        drop_idx = headers.index("Fig. No.")
+        headers = [h for j, h in enumerate(headers) if j != drop_idx]
+        rows = [[c for j, c in enumerate(r) if j != drop_idx] for r in rows]
+
+    # Derive column indices for filtering
+    try:
+        sec_idx  = headers.index("Section")
+    except ValueError:
+        sec_idx  = 0
+    try:
+        pn_idx   = headers.index("Part No.")
+    except ValueError:
+        pn_idx   = 2
+    try:
+        desc_idx = headers.index("Description")
+    except ValueError:
+        desc_idx = 3
+
+    if section:
+        rows = [r for r in rows if r[sec_idx].upper() == section.upper()]
+    if search:
+        q = search.lower()
+        rows = [r for r in rows if q in r[pn_idx].lower() or q in r[desc_idx].lower()]
+
+    sections = sorted({r[sec_idx] for r in rows if r[sec_idx]})
+
+    return {
+        "filename": filename,
+        "headers":  headers,
+        "rows":     rows,
+        "total":    len(rows),
+        "sections": sections,
+    }
+
+
+@router.get("/parts/{model}", response_model=list[CatalogPartRow])
+def get_parts_for_model(
+    model: str,
+    limit: int = Query(500, le=5000),
+) -> list[CatalogPartRow]:
+    """Return part numbers extracted from PDF catalogues for a specific model."""
+    df = get_catalog_parts()
+
+    if df.empty or "model" not in df.columns:
+        return []
+
+    sub = df[df["model"].str.lower() == model.lower()].head(limit)
+    pn_col = "part_no" if "part_no" in df.columns else "part_number"
+    result: list[CatalogPartRow] = []
+    for _, r in sub.iterrows():
+        result.append(CatalogPartRow(
+            part_number=str(r.get(pn_col, "")),
+            source_file=str(r.get("source_file", "")),
+            ocr_used=bool(r.get("ocr_used", False)),
+        ))
+    return result

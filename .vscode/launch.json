@@ -1,0 +1,38 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Stage (prompt)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "scripts.run_stage",
+            "args": ["${input:stageNumber}"],
+            "cwd": "${workspaceFolder}",
+            "env": {"PYTHONPATH": "${workspaceFolder}"}
+        },
+        {
+            "name": "Streamlit Dashboard",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "streamlit",
+            "args": ["run", "src/dashboard/app.py"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Pytest (current file)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["${file}", "-v"],
+            "cwd": "${workspaceFolder}"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "stageNumber",
+            "type": "promptString",
+            "description": "Pipeline stage number (1-14)",
+            "default": "1"
+        }
+    ]
+}

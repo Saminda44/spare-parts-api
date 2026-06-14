@@ -1,0 +1,14 @@
+{
+    "recommendations": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-toolsai.jupyter",
+        "ms-toolsai.vscode-jupyter-cell-tags",
+        "mtxr.sqltools",
+        "mtxr.sqltools-driver-pg",
+        "GrapeCity.gc-excelviewer",
+        "eamodio.gitlens",
+        "mikestead.dotenv"
+    ]
+}
