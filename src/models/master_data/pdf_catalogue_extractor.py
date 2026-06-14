@@ -72,8 +72,10 @@ DISPLAY_HEADERS: list[str] = [
 _DASH = r'[-–]'
 _PN_PAT = re.compile(
     r'\b('
-    # 3- or 4-segment: XXX-XXXXX-NN[-XX]  (must match before 2-seg to avoid partial matches)
-    r'[A-Z0-9]{2,5}' + _DASH + r'[A-Z0-9]{3,8}' + _DASH + r'[0-9]{2}(?:' + _DASH + r'[A-Z0-9]{2})?'
+    # 3- or 4-segment: XXX-XXXXX-NN[-XX]
+    # Third segment is [A-Z0-9]{2} (not [0-9]{2}) because Yamaha graphic/decal parts
+    # use letter-prefixed revision codes: B65-F174G-C0, B65-F174H-D0, etc.
+    r'[A-Z0-9]{2,5}' + _DASH + r'[A-Z0-9]{3,8}' + _DASH + r'[A-Z0-9]{2}(?:' + _DASH + r'[A-Z0-9]{2})?'
     # 2-segment with 5-char alphanumeric first segment, 3-8 char alphanumeric second
     # covers: NNNNN-NNNNN, NNNNN-NNNYX, XNNNN-NNNNN, etc.
     r'|[A-Z0-9]{5}' + _DASH + r'[A-Z0-9]{3,8}'
@@ -190,11 +192,12 @@ class ExtractionResult:
     pages_scanned:  int
     sections_found: int
     ocr_flagged:    int    # pages that needed OCR but couldn't be handled
-    variants:       list[str] = field(default_factory=list)  # e.g. ["B65J","B65L","B65M","B65N"]
+    variants:          list[str] = field(default_factory=list)  # e.g. ["B65J","B65L","B65M","B65N"]
     # colour_codes: [{abbreviation, name, code, is_model_colour}] from the PDF's colour table
-    colour_codes:   list[dict] = field(default_factory=list)
-    warnings:       list[str] = field(default_factory=list)
-    error:          str | None = None
+    colour_codes:      list[dict] = field(default_factory=list)
+    manufacture_year:  str | None = None   # e.g. "2019" from ©2019 on the cover page
+    warnings:          list[str] = field(default_factory=list)
+    error:             str | None = None
 
     @property
     def df(self) -> pd.DataFrame:
@@ -340,11 +343,17 @@ class YamahaCatalogueExtractor:
         if colour_codes:
             logger.info(f"{pdf_path.name}: found {len(colour_codes)} colour codes")
 
+        # Extract manufacture year from cover page (©YYYY / "1st edition, May YYYY")
+        manufacture_year = self._extract_manufacture_year(pdf_path)
+        if manufacture_year:
+            logger.info(f"{pdf_path.name}: manufacture year {manufacture_year}")
+
         return ExtractionResult(
             pdf_path=pdf_path, model=model, rows=rows,
             pages_scanned=pages_scanned, sections_found=len(sections_seen),
             ocr_flagged=ocr_flagged, variants=variants,
-            colour_codes=colour_codes, warnings=warnings,
+            colour_codes=colour_codes, manufacture_year=manufacture_year,
+            warnings=warnings,
         )
 
     def extract_all(
@@ -526,6 +535,41 @@ class YamahaCatalogueExtractor:
             vc = [t for t in texts if YamahaCatalogueExtractor._is_variant_code(t)]
             if len(vc) >= 3:
                 counter[tuple(vc)] += 1
+
+    @staticmethod
+    def _extract_manufacture_year(pdf_path: Path) -> str | None:
+        """Extract manufacture / publication year from the PDF cover page.
+
+        Scans the first 3 pages for Yamaha copyright patterns:
+          ©2019 by Yamaha ...
+          1st edition, May 2019
+          PARTS CATALOGUE  2019
+
+        Business meaning: identifies the model year this parts catalogue covers.
+        Returns the 4-digit year string, e.g. "2019", or None if not found.
+        """
+        import pdfplumber as _plumber
+
+        # ©YYYY or ©YYYY (full-width ©)
+        _COPYRIGHT = re.compile(r'[©©]\s*(\d{4})')
+        # "edition, Month YYYY" or "edition YYYY"
+        _EDITION   = re.compile(r'edition[,\s]+\w+\s+(\d{4})', re.IGNORECASE)
+        # Standalone 4-digit year that looks plausible (avoid part numbers etc.)
+        _YEAR_BARE = re.compile(r'\b(19[89]\d|20[012]\d)\b')
+
+        try:
+            with _plumber.open(str(pdf_path)) as pdf:
+                for page in pdf.pages[:3]:
+                    text = page.extract_text() or ""
+                    for pat in (_COPYRIGHT, _EDITION, _YEAR_BARE):
+                        m = pat.search(text)
+                        if m:
+                            yr = int(m.group(1))
+                            if 1990 <= yr <= 2040:
+                                return str(yr)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     @staticmethod
     def _extract_colour_codes(pdf_path: Path) -> list[dict]:

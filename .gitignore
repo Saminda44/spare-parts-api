@@ -50,3 +50,20 @@ Thumbs.db
 # Lock files — DO commit these
 # uv.lock — committed
 # poetry.lock — committed
+
+# Background task log files
+api_err.txt
+api_out.txt
+frontend/api_err.txt
+frontend/api_out.txt
+frontend/dev_err.txt
+frontend/dev_out.txt
+
+# ML training logs
+lightning_logs/
+
+# Built static assets (frontend build output lives in frontend/dist, not static/)
+static/
+
+# Playwright ad-hoc test scripts
+frontend/pw_test.js

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -17,11 +18,13 @@ from src.api.schemas import (
 from src.models.master_data.pdf_catalogue_extractor import (
     DISPLAY_HEADERS, YamahaCatalogueExtractor,
 )
+from src.models.master_data.catalogue_agent import CatalogueAgent
 
-PDF_ROOT = Path("data/raw/pdf_catalogues").resolve()
-PDF_EXTS  = {".pdf", ".PDF"}
-RAW_ROOT  = Path("data/raw").resolve()
-XLSX_EXTS = {".xlsx", ".xls"}
+PDF_ROOT   = Path("data/raw/pdf_catalogues").resolve()
+PDF_EXTS   = {".pdf", ".PDF"}
+RAW_ROOT   = Path("data/raw").resolve()
+XLSX_EXTS  = {".xlsx", ".xls"}
+AGENT_CACHE = Path("data/outputs/agent_builds").resolve()
 
 router = APIRouter(prefix="/catalog", tags=["Catalog"])
 
@@ -140,8 +143,9 @@ def extract_pdf_tables(
         "total":       len(rows),
         "sections":    sections,
         "variants":    result.variants,
-        "colour_codes": result.colour_codes,
-        "pages_scanned":  result.pages_scanned,
+        "colour_codes":    result.colour_codes,
+        "manufacture_year": result.manufacture_year,
+        "pages_scanned":   result.pages_scanned,
         "sections_found": result.sections_found,
         "ocr_flagged":    result.ocr_flagged,
         "warnings":       result.warnings,
@@ -354,3 +358,63 @@ def get_parts_for_model(
             ocr_used=bool(r.get("ocr_used", False)),
         ))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Catalogue Agent endpoints
+# ---------------------------------------------------------------------------
+
+_AGENT = CatalogueAgent(max_pages=500)
+_AGENT_STATUS: dict[str, Any] = {}   # file_path → {running, cached, error}
+
+
+def _cache_path(rel: str) -> Path:
+    """Return the disk-cache path for a given PDF rel_path."""
+    safe = rel.replace("/", "_").replace("\\", "_").replace(" ", "_")
+    return AGENT_CACHE / f"{safe}.json"
+
+
+@router.get("/agent/{file_path:path}")
+def run_agent(
+    file_path: str,
+    refresh: bool = Query(False, description="Force re-run even if cached"),
+) -> dict[str, Any]:
+    """Run the CatalogueAgent on one PDF and return assembled builds.
+
+    Results are cached to data/outputs/agent_builds/ so subsequent calls
+    are instant.  Pass ?refresh=true to force re-extraction.
+
+    Response schema (summary):
+        model, variants[], colour_legend{}, rosters{}, builds[{variant, colour,
+        colour_name, colour_code, part_count, parts[{figure, ref_no, part_no,
+        description, qty, remarks, kind}]}], warnings[]
+    """
+    target = (PDF_ROOT / file_path).resolve()
+    if not str(target).startswith(str(PDF_ROOT)):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not target.exists() or target.suffix not in PDF_EXTS:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    cache = _cache_path(file_path)
+
+    if not refresh and cache.exists():
+        return json.loads(cache.read_text(encoding="utf-8"))
+
+    try:
+        result = _AGENT.run(target)
+        out = result.to_dict()
+        AGENT_CACHE.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        return out
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.delete("/agent/{file_path:path}")
+def clear_agent_cache(file_path: str) -> dict[str, str]:
+    """Delete the cached agent build for a PDF so the next GET re-runs it."""
+    cache = _cache_path(file_path)
+    if cache.exists():
+        cache.unlink()
+        return {"status": "cleared", "path": str(cache)}
+    return {"status": "not_cached"}

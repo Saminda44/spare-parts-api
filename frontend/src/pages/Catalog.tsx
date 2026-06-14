@@ -6,7 +6,9 @@ import {
 import {
   fetchCatalog, fetchPdfTables, catalogFileUrl,
   fetchCatalogFolders, uploadCatalogPdf,
+  fetchAgentBuilds,
   type CatalogData, type CatalogModel, type PdfTableResult, type ColourCode,
+  type AgentResult, type AgentBuild,
 } from "../api/client";
 
 const MODEL_COLORS: Record<string, string> = {
@@ -35,167 +37,268 @@ function variantQty(qty: string, varIdx: number, numVariants: number): string {
   return parts[offset + varIdx] ?? qty;
 }
 
-function CatalogueTable({ data, pdfUrl, meta, variants, colourCodes }: {
+function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, manufactureYear }: {
   data: CatalogueData;
+  relPath: string;
   pdfUrl?: string;
   meta?: { pages: number; sections: number; ocr: number; warnings: string[] };
   variants?: string[];
   colourCodes?: ColourCode[];
+  manufactureYear?: string;
 }) {
-  const [section, setSection]       = useState("");
-  const [search,  setSearch]        = useState("");
-  const [debSearch, setDebSearch]   = useState("");
+  const [section,    setSection]    = useState("");
+  const [search,     setSearch]     = useState("");
+  const [debSearch,  setDebSearch]  = useState("");
   const [selVariant, setSelVariant] = useState<number>(0);
-  const [selColour, setSelColour]   = useState<string>("");   // "" = All colours
+  const [selColour,  setSelColour]  = useState<string>("");
+  // Sub-toggle when colour selected: "build" = agent-assembled, "extracted" = raw remarks-filter
+  const [colourView, setColourView] = useState<"build" | "extracted">("build");
+
+  // Agent state — loaded lazily on first colour selection, persists for the PDF lifetime
+  const [agentResult,  setAgentResult]  = useState<AgentResult | null>(null);
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [agentError,   setAgentError]   = useState<string | null>(null);
+  const agentFetching = useRef(false);
 
   useEffect(() => {
     const t = setTimeout(() => setDebSearch(search), 200);
     return () => clearTimeout(t);
   }, [search]);
 
-  useEffect(() => { setSection(""); setSearch(""); setSelVariant(0); setSelColour(""); }, [data]);
+  // Reset everything when the PDF changes
+  useEffect(() => {
+    setSection(""); setSearch(""); setSelVariant(0); setSelColour(""); setColourView("build");
+    setAgentResult(null); setAgentLoading(false); setAgentError(null);
+    agentFetching.current = false;
+  }, [data]);
 
-  const numVariants = variants?.length ?? 0;
+  // Pre-fetch agent immediately when a PDF with colour codes is opened so the
+  // colour strip can show validated colours without waiting for a click.
+  useEffect(() => {
+    if (!colourCodes || colourCodes.length === 0) return;
+    if (agentResult || agentFetching.current || agentLoading) return;
+    agentFetching.current = true;
+    setAgentLoading(true);
+    setAgentError(null);
+    fetchAgentBuilds(relPath)
+      .then(d  => { setAgentResult(d); setAgentLoading(false); })
+      .catch(e => { setAgentError(e?.message ?? "Agent error"); setAgentLoading(false); agentFetching.current = false; });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [relPath]);
 
-  // Build a fast lookup of all known colour abbreviations for the current PDF
-  const colourAbbrs = new Set((colourCodes ?? []).map(c => c.abbreviation.toUpperCase()));
+  const numVariants    = variants?.length ?? 0;
+  const selVariantCode = variants?.[selVariant] ?? "";
 
-  /**
-   * Extract which colour(s) a row applies to from its remarks string.
-   *
-   * Yamaha remarks encoding:
-   *   "FOR SMX"           → applies only to SMX
-   *   "FOR YB,MS1,RSH"    → applies to YB, MS1 and RSH (comma-separated)
-   *   "YB FOR YB,MS1,RSH" → paint code YB, applies to YB/MS1/RSH (only AFTER "FOR" matters)
-   *   "LLGS6 FOR DBNM8"   → paint LLGS6, applies to DBNM8 (LLGS6 itself is NOT the target)
-   *   "MXR"               → standalone code, applies to MXR
-   *   ""                  → universal part — applies to ALL colours
-   *
-   * Returns null  → universal (no colour restriction).
-   * Returns Set   → restricted to exactly these colour abbreviations.
-   */
-  function applicableColours(remarks: string): Set<string> | null {
-    const upper = remarks.toUpperCase();
-    const forIdx = upper.indexOf(" FOR ");
-    if (forIdx >= 0) {
-      // Only look at codes AFTER "FOR" — what comes before is just the part's paint colour
-      const afterFor = upper.slice(forIdx + 5);
-      const codes = afterFor.split(/[\s,]+/).filter(w => colourAbbrs.has(w));
-      return codes.length > 0 ? new Set(codes) : null;
+  // Clear selected colour when switching variants if it's not in the new variant's roster
+  useEffect(() => {
+    if (!selColour || !agentResult || !selVariantCode) return;
+    const roster = agentResult.rosters?.[selVariantCode];
+    if (roster && !roster.includes(selColour)) {
+      setSelColour("");
+      setSection("");
     }
-    // No "FOR" — any standalone colour code makes this a colour-specific part
-    const codes = upper.split(/[\s,]+/).filter(w => colourAbbrs.has(w));
-    return codes.length > 0 ? new Set(codes) : null;
-  }
+  }, [selVariantCode, agentResult, selColour]);
 
-  const rows = data.rows
+  // The assembled build for the active (variant, colour) selection
+  const agentBuild: AgentBuild | undefined =
+    agentResult && selColour
+      ? agentResult.builds.find(
+          b => b.variant === selVariantCode && b.colour === selColour.toUpperCase(),
+        )
+      : undefined;
+
+  // Active colour name for display
+  const selColourName = colourCodes?.find(c => c.abbreviation === selColour)?.name ?? selColour;
+
+  // ── Rows for "Complete Build" mode ────────────────────────────────────────
+  const buildRows: string[][] = agentBuild
+    ? agentBuild.parts
+        .filter(p => {
+          const q = debSearch.toLowerCase();
+          return (
+            (!section || p.figure === section) &&
+            (!q || p.part_no.toLowerCase().includes(q) || p.description.toLowerCase().includes(q))
+          );
+        })
+        // element[6] = kind ("shared" | "colour_specific") — used for row styling
+        .map(p => [p.figure, p.ref_no, p.part_no, p.description, p.qty, p.remarks, p.kind])
+    : [];
+
+  // ── Rows for "Extracted Table" mode (raw remarks-filter) ─────────────────
+  const extractedRows: string[][] = data.rows
     .filter(row => {
       const okSection = !section || row[0] === section;
       const q = debSearch.toLowerCase();
       const okSearch = !q || row[2]?.toLowerCase().includes(q) || row[3]?.toLowerCase().includes(q);
-      if (!okSection || !okSearch) return false;
-
-      // Colour filter
-      if (selColour && colourAbbrs.size > 0) {
-        const applicable = applicableColours(row[5] ?? "");
-        if (applicable !== null) {
-          // Colour-specific part — only show when selected colour is in the applicable set
-          return applicable.has(selColour.toUpperCase());
-        }
-        // applicable === null → universal part, always shown
-      }
-      return true;
+      return okSection && okSearch;
     })
     .flatMap(row => {
       if (numVariants === 0) return [row];
       const origQty = row[4] ?? "";
       const vQty = variantQty(origQty, selVariant, numVariants);
-      // Hide rows that don't apply to the selected variant.
-      // Only filter when qty encodes per-variant data (contains "/") and
-      // the selected variant's slot is blank — meaning the PDF had an empty
-      // cell there (part doesn't fit this bike model variant).
       if (origQty.includes("/") && vQty === "") return [];
       return [[...row.slice(0, 4), vQty, ...row.slice(5)]];
     });
 
+  // Which rows to show in the table
+  const isColourSelected = !!selColour;
+  const isBuildReady     = !!(agentBuild && colourView === "build");
+  const displayRows      = isBuildReady ? buildRows : extractedRows;
+
+  // Section options
+  const sectionOptions: string[] = isBuildReady && agentBuild
+    ? [...new Set(agentBuild.parts.map(p => p.figure).filter(Boolean))].sort()
+    : data.sections;
+
+  const internalCount = agentBuild ? agentBuild.parts.filter(p => p.kind === "shared").length : 0;
+  const externalCount = agentBuild ? agentBuild.parts.filter(p => p.kind === "colour_specific").length : 0;
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-3">
+      {/* Extraction meta */}
       {meta && (
         <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
           <span className="font-medium text-slate-700">{data.total.toLocaleString()} parts extracted</span>
-          <span>·</span>
-          <span>{meta.sections} sections</span>
-          <span>·</span>
-          <span>{meta.pages} pages scanned</span>
+          <span>·</span><span>{meta.sections} sections</span>
+          <span>·</span><span>{meta.pages} pages scanned</span>
+          {manufactureYear && (
+            <><span>·</span>
+            <span className="font-medium text-blue-600">{manufactureYear} model</span></>
+          )}
           {meta.ocr > 0 && (
-            <>
-              <span>·</span>
-              <span className="text-amber-600 flex items-center gap-1">
-                <AlertTriangle size={11} /> {meta.ocr} image-only pages
-              </span>
-            </>
+            <><span>·</span>
+            <span className="text-amber-600 flex items-center gap-1">
+              <AlertTriangle size={11} /> {meta.ocr} image-only pages
+            </span></>
           )}
           {meta.warnings.length > 0 && (
-            <>
-              <span>·</span>
-              <span className="text-amber-600">{meta.warnings[0]}</span>
-            </>
+            <><span>·</span><span className="text-amber-600">{meta.warnings[0]}</span></>
           )}
         </div>
       )}
 
-      {/* Variant strip — selector for multi-variant PDFs, info chip for single-variant */}
+      {/* Variant strip */}
       {variants && variants.length === 1 && (
         <div className="flex flex-wrap items-center gap-2 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
           <span className="text-xs font-semibold text-blue-700 shrink-0">Model variant:</span>
-          <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-blue-700 text-white select-none">
-            {variants[0]}
-          </span>
+          <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-blue-700 text-white select-none">{variants[0]}</span>
         </div>
       )}
       {variants && variants.length >= 2 && (
         <div className="flex flex-wrap items-center gap-2 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
           <span className="text-xs font-semibold text-blue-700 shrink-0">Model variant:</span>
           {variants.map((v, i) => (
-            <button key={v} onClick={() => setSelVariant(i)}
-              className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors ${selVariant === i ? "bg-blue-700 text-white" : "bg-white text-blue-700 border border-blue-200 hover:bg-blue-100"}`}
-            >
+            <button key={v} onClick={() => { setSelVariant(i); setSection(""); }}
+              className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors ${selVariant === i ? "bg-blue-700 text-white" : "bg-white text-blue-700 border border-blue-200 hover:bg-blue-100"}`}>
               {v}
             </button>
           ))}
         </div>
       )}
 
-      {/* Colour variant strip — shown when PDF has a colour code table */}
+      {/* Colour variant strip — filtered to: web-confirmed + has external parts + in this variant's roster */}
       {colourCodes && colourCodes.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
-          <span className="text-xs font-semibold text-amber-700 shrink-0">Colour:</span>
-          <button
-            onClick={() => setSelColour("")}
-            className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors ${!selColour ? "bg-amber-600 text-white" : "bg-white text-amber-700 border border-amber-200 hover:bg-amber-100"}`}
-          >
-            All
-          </button>
-          {colourCodes.map(c => (
-            <button
-              key={c.abbreviation}
-              onClick={() => setSelColour(selColour === c.abbreviation ? "" : c.abbreviation)}
-              title={`${c.abbreviation} — paint code ${c.code}`}
-              className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors flex items-center gap-1 ${
-                selColour === c.abbreviation
-                  ? "bg-amber-600 text-white"
-                  : "bg-white text-amber-700 border border-amber-200 hover:bg-amber-100"
-              }`}
-            >
-              {c.name}
-              {c.is_model_colour && (
-                <span className={`text-[9px] font-bold ${selColour === c.abbreviation ? "text-amber-200" : "text-amber-500"}`}>★</span>
-              )}
-            </button>
-          ))}
+          <span className="text-xs font-semibold text-amber-700 shrink-0">
+            Colour variant{manufactureYear ? ` (${manufactureYear})` : ""}:
+          </span>
+          {agentLoading && !agentResult ? (
+            <span className="flex items-center gap-1.5 text-xs text-amber-600 italic">
+              <Loader2 size={11} className="animate-spin" /> Identifying colour variants…
+            </span>
+          ) : (() => {
+            // validated_colours: web-confirmed AND has ≥1 external part
+            const validatedSet: Set<string> | null = agentResult?.validated_colours?.length
+              ? new Set(agentResult.validated_colours)
+              : null;
+            // roster for the currently selected model variant
+            const rosterSet: Set<string> | null =
+              agentResult && selVariantCode && agentResult.rosters?.[selVariantCode]?.length
+                ? new Set(agentResult.rosters[selVariantCode])
+                : null;
+            const visibleCodes = colourCodes.filter(c => {
+              const inValidated = !validatedSet || validatedSet.has(c.abbreviation);
+              const inRoster    = !rosterSet    || rosterSet.has(c.abbreviation);
+              return inValidated && inRoster;
+            });
+            return (
+              <>
+                <button
+                  onClick={() => { setSelColour(""); setSection(""); }}
+                  className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors ${!selColour ? "bg-amber-600 text-white" : "bg-white text-amber-700 border border-amber-200 hover:bg-amber-100"}`}>
+                  All
+                </button>
+                {visibleCodes.map(c => (
+                  <button
+                    key={c.abbreviation}
+                    onClick={() => { setSelColour(selColour === c.abbreviation ? "" : c.abbreviation); setSection(""); setColourView("build"); }}
+                    title={`${c.abbreviation} — paint code ${c.code}`}
+                    className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors flex items-center gap-1 ${
+                      selColour === c.abbreviation ? "bg-amber-600 text-white" : "bg-white text-amber-700 border border-amber-200 hover:bg-amber-100"
+                    }`}>
+                    {c.name}
+                    {c.is_model_colour && (
+                      <span className={`text-[9px] font-bold ${selColour === c.abbreviation ? "text-amber-200" : "text-amber-500"}`}>★</span>
+                    )}
+                  </button>
+                ))}
+                {agentResult && visibleCodes.length === 0 && (
+                  <span className="text-xs text-amber-500 italic">No colour variants for this model</span>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
 
+      {/* Sub-toggle (only when a colour is selected) */}
+      {isColourSelected && (
+        <div className="flex items-center gap-2">
+          <div className="flex gap-0.5 bg-slate-100 rounded-lg p-0.5">
+            <button
+              onClick={() => { setColourView("build"); setSection(""); }}
+              className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${colourView === "build" ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+              Complete Build
+            </button>
+            <button
+              onClick={() => { setColourView("extracted"); setSection(""); }}
+              className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${colourView === "extracted" ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+              Extracted Table
+            </button>
+          </div>
+          {colourView === "build" && agentLoading && (
+            <span className="flex items-center gap-1.5 text-xs text-amber-600">
+              <Loader2 size={11} className="animate-spin" /> Assembling — cached after first run…
+            </span>
+          )}
+          {colourView === "build" && agentError && (
+            <span className="flex items-center gap-1.5 text-xs text-red-500">
+              <AlertTriangle size={11} /> {agentError}
+              <button onClick={() => { agentFetching.current = false; setAgentError(null); setAgentLoading(false); setAgentResult(null); }}
+                className="underline ml-1">Retry</button>
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Build summary banner */}
+      {isBuildReady && (
+        <div className="flex items-center gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2">
+          <CheckCircle2 size={12} />
+          Complete catalogue for&nbsp;
+          <strong>{selColourName}{manufactureYear ? ` (${manufactureYear})` : ""}</strong>
+          &nbsp;—&nbsp;variant&nbsp;<strong>{selVariantCode}</strong>
+          &nbsp;·&nbsp;
+          <span className="text-emerald-700 font-medium">{internalCount} internal</span>
+          &nbsp;+&nbsp;
+          <span className="text-amber-600 font-medium">{externalCount} external</span>
+          &nbsp;=&nbsp;
+          <strong>{agentBuild!.part_count} total parts</strong>
+        </div>
+      )}
+
+      {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
           <span className="text-xs font-medium text-slate-500">Section:</span>
@@ -203,11 +306,12 @@ function CatalogueTable({ data, pdfUrl, meta, variants, colourCodes }: {
             value={section} onChange={e => setSection(e.target.value)}
             className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue/30 bg-white"
           >
-            <option value="">All Sections ({data.total})</option>
-            {data.sections.map(s => <option key={s} value={s}>{s}</option>)}
+            <option value="">
+              {isBuildReady ? `All Sections (${agentBuild!.part_count})` : `All Sections (${data.total})`}
+            </option>
+            {sectionOptions.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
-
         <div className="relative">
           <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
@@ -222,11 +326,9 @@ function CatalogueTable({ data, pdfUrl, meta, variants, colourCodes }: {
             </button>
           )}
         </div>
-
         <span className="text-xs text-slate-400 ml-auto">
-          {rows.length.toLocaleString()} row{rows.length !== 1 ? "s" : ""}
+          {displayRows.length.toLocaleString()} rows
         </span>
-
         {pdfUrl && (
           <a href={pdfUrl} target="_blank" rel="noreferrer"
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 transition-colors">
@@ -235,44 +337,71 @@ function CatalogueTable({ data, pdfUrl, meta, variants, colourCodes }: {
         )}
       </div>
 
+      {/* Parts table */}
       <div className="overflow-auto rounded-xl border border-slate-200 shadow-sm" style={{ maxHeight: "65vh" }}>
         <table className="w-full text-sm border-collapse">
           <thead className="sticky top-0 z-10">
             <tr style={{ background: "#1B3A6B" }}>
-              {data.headers.map((h, i) => (
-                <th key={i}
-                  className="py-2.5 px-3 text-left text-xs font-bold text-white whitespace-nowrap border-r border-blue-800 last:border-r-0">
+              {[...data.headers, ...(isBuildReady ? ["Part type"] : [])].map((h, i) => (
+                <th key={i} className="py-2.5 px-3 text-left text-xs font-bold text-white whitespace-nowrap border-r border-blue-800 last:border-r-0">
                   {h}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, ri) => {
-              const isFirstInSection = ri === 0 || row[0] !== rows[ri - 1][0];
-              return (
-                <tr key={ri} className={ri % 2 === 0 ? "bg-white" : "bg-slate-50/60"}>
-                  {row.map((cell, ci) => (
-                    <td key={ci}
-                      className={`py-2 px-3 border-b border-slate-100 whitespace-nowrap
-                        ${ci === 0 && isFirstInSection ? "font-semibold text-slate-800" : ""}
-                        ${ci === 0 && !isFirstInSection ? "text-slate-300" : ""}
-                        ${ci === 2 ? "font-mono text-xs text-slate-700" : ""}
-                        ${ci === 4 ? "text-center font-semibold text-brand-blue" : ""}
-                        ${ci === 5 ? "text-slate-400 text-xs" : ""}
-                      `}>
-                      {ci === 0 && !isFirstInSection ? "" : cell}
-                    </td>
-                  ))}
-                </tr>
-              );
-            })}
-            {rows.length === 0 && (
+            {agentLoading && colourView === "build" ? (
               <tr>
-                <td colSpan={data.headers.length} className="py-12 text-center text-slate-400 text-sm">
-                  No rows match the current filter
+                <td colSpan={data.headers.length + 1} className="py-16 text-center">
+                  <div className="flex flex-col items-center gap-3 text-slate-400">
+                    <Loader2 size={22} className="animate-spin" />
+                    <p className="text-sm">Assembling complete parts list…</p>
+                    <p className="text-xs text-slate-300">Runs once then caches — subsequent colour switches are instant</p>
+                  </div>
                 </td>
               </tr>
+            ) : (
+              <>
+                {displayRows.map((row, ri) => {
+                  const isFirstInSection = ri === 0 || row[0] !== displayRows[ri - 1][0];
+                  const kind = row[6]; // "shared" | "colour_specific" — only in build mode
+                  const rowBg = kind === "shared"
+                    ? (ri % 2 === 0 ? "bg-emerald-50/50" : "bg-emerald-50/80")
+                    : kind === "colour_specific"
+                      ? (ri % 2 === 0 ? "bg-amber-50/50" : "bg-amber-50/80")
+                      : (ri % 2 === 0 ? "bg-white" : "bg-slate-50/60");
+                  return (
+                    <tr key={ri} className={rowBg}>
+                      {row.slice(0, 6).map((cell, ci) => (
+                        <td key={ci}
+                          className={`py-2 px-3 border-b border-slate-100 whitespace-nowrap
+                            ${ci === 0 && isFirstInSection ? "font-semibold text-slate-800" : ""}
+                            ${ci === 0 && !isFirstInSection ? "text-slate-300" : ""}
+                            ${ci === 2 ? "font-mono text-xs text-slate-700" : ""}
+                            ${ci === 4 ? "text-center font-semibold text-brand-blue" : ""}
+                            ${ci === 5 ? "text-slate-400 text-xs" : ""}
+                          `}>
+                          {ci === 0 && !isFirstInSection ? "" : cell}
+                        </td>
+                      ))}
+                      {isBuildReady && (
+                        <td className="py-2 px-3 border-b border-slate-100">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${kind === "shared" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                            {kind === "shared" ? "Internal" : "External"}
+                          </span>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+                {displayRows.length === 0 && (
+                  <tr>
+                    <td colSpan={data.headers.length + (isBuildReady ? 1 : 0)} className="py-12 text-center text-slate-400 text-sm">
+                      No rows match the current filter
+                    </td>
+                  </tr>
+                )}
+              </>
             )}
           </tbody>
         </table>
@@ -350,7 +479,11 @@ function PdfCatalogueViewer({ relPath, filename, pdfUrl, onBack }: {
       <Breadcrumb onBack={onBack} label={label} icon={<FileText size={14} className="text-red-400" />} />
       {loading ? <LoadingState label="Extracting parts from PDF…" /> :
        !result || result.headers.length === 0 ? <EmptyState /> :
-       <CatalogueTable data={result} pdfUrl={pdfUrl} meta={meta} variants={result.variants} colourCodes={result.colour_codes} />}
+       <CatalogueTable
+         data={result} relPath={relPath} pdfUrl={pdfUrl} meta={meta}
+         variants={result.variants} colourCodes={result.colour_codes}
+         manufactureYear={result.manufacture_year}
+       />}
     </div>
   );
 }
@@ -403,7 +536,7 @@ function ExtractionModal({ relPath, filename, pdfUrl, onClose }: {
         <div className="flex-1 overflow-y-auto p-5">
           {loading ? <LoadingState label="Extracting parts from PDF…" /> :
            !result || result.headers.length === 0 ? <EmptyState /> :
-           <CatalogueTable data={result} meta={meta} variants={result.variants} colourCodes={result.colour_codes} />}
+           <CatalogueTable data={result} relPath={relPath} meta={meta} variants={result.variants} colourCodes={result.colour_codes} manufactureYear={result.manufacture_year} />}
         </div>
       </div>
     </div>

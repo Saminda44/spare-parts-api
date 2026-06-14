@@ -476,13 +476,68 @@ export interface PdfTableResult {
   headers: string[]; rows: string[][]; total: number; sections: string[];
   variants: string[];
   colour_codes: ColourCode[];
+  manufacture_year?: string;
   pages_scanned: number; sections_found: number; ocr_flagged: number; warnings: string[];
 }
 export const fetchPdfTables = (rel_path: string) =>
   api.get<PdfTableResult>(
     `/catalog/tables/${rel_path.split("/").map(encodeURIComponent).join("/")}`,
-    { timeout: 120_000 },  // PDF extraction can take up to 2 min for large files
+    { timeout: 120_000 },
   ).then(r => r.data);
+
+// ── Catalogue Agent ────────────────────────────────────────────────────────
+
+export interface AgentPartRow {
+  figure: string;
+  ref_no: string;
+  part_no: string;
+  description: string;
+  qty: string;
+  remarks: string;
+  kind: "shared" | "colour_specific";
+}
+
+export interface AgentBuild {
+  variant: string;
+  colour: string;
+  colour_name: string;
+  colour_code: string;
+  part_count: number;
+  parts: AgentPartRow[];
+}
+
+export interface AgentColourEntry {
+  name: string;
+  code: string;
+  is_model_colour: boolean;
+  web_confirmed?: boolean;
+  has_external_parts?: boolean;
+}
+
+export interface AgentResult {
+  source_pdf: string;
+  extracted_at: string;
+  model: string;
+  manufacture_year?: string;
+  variants: string[];
+  colour_legend: Record<string, AgentColourEntry>;
+  rosters: Record<string, string[]>;
+  builds: AgentBuild[];
+  validated_colours?: string[];
+  web_colour_names?: string[];
+  warnings: string[];
+}
+
+export const fetchAgentBuilds = (rel_path: string, refresh = false) =>
+  api.get<AgentResult>(
+    `/catalog/agent/${rel_path.split("/").map(encodeURIComponent).join("/")}${refresh ? "?refresh=true" : ""}`,
+    { timeout: 180_000 },
+  ).then(r => r.data);
+
+export const clearAgentCache = (rel_path: string) =>
+  api.delete(
+    `/catalog/agent/${rel_path.split("/").map(encodeURIComponent).join("/")}`,
+  );
 
 export interface ExtractionStatus {
   running: boolean;
