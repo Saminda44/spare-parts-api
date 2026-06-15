@@ -942,7 +942,13 @@ class YamahaCatalogueExtractor:
                         desc_parts = [_COPYRIGHT_PAT.sub("", next_joined).strip()]
                         idx += 1
 
-                desc = " ".join(desc_parts)
+                desc_raw = " ".join(desc_parts)
+                # Truncate at any embedded PN: indicates a supersession code or
+                # merged Y-row from tight typesetting (e.g. CRUX 5KA1 PDF).
+                # Yamaha descriptions are plain English — they never legitimately
+                # contain a part number.
+                _pn_in_desc = _PN_PAT.search(desc_raw)
+                desc = desc_raw[: _pn_in_desc.start()].strip() if _pn_in_desc else desc_raw
                 qty  = "/".join(slots)
                 filled = [s for s in slots if s]
                 # Collapse "1/1/1/1" → "1" only when EVERY slot is filled identically
