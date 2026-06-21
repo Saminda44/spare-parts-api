@@ -192,12 +192,22 @@ class CatalogueAgent:
             warnings.append("No colour table found in foreword; colour builds unavailable.")
 
         # ── Stage 4 ── web validation + external-parts check ───────────
-        web_colour_names = self._search_web_colours(result.model, result.manufacture_year)
-        if not web_colour_names:
-            warnings.append("Web colour search returned no results; showing all PDF colours.")
-            logger.warning(f"{pdf_path.name}: web colour search empty")
+        # If the PDF already has an "AVAILABLE COLOUR" page, use those captions
+        # directly as the colour-name reference — no web search needed.
+        pdf_available_colours = result.available_colours or []
+        if pdf_available_colours:
+            web_colour_names = pdf_available_colours
+            logger.info(
+                f"{pdf_path.name}: skipping web search — "
+                f"using {len(web_colour_names)} colour(s) from PDF available-colour page"
+            )
         else:
-            logger.info(f"{pdf_path.name}: web found {len(web_colour_names)} colour name(s)")
+            web_colour_names = self._search_web_colours(result.model, result.manufacture_year)
+            if not web_colour_names:
+                warnings.append("Web colour search returned no results; showing all PDF colours.")
+                logger.warning(f"{pdf_path.name}: web colour search empty")
+            else:
+                logger.info(f"{pdf_path.name}: web found {len(web_colour_names)} colour name(s)")
 
         # Which colour abbreviations have ≥1 external (colour_specific) part
         colours_with_external: set[str] = {

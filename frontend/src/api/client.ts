@@ -476,6 +476,7 @@ export interface PdfTableResult {
   headers: string[]; rows: string[][]; total: number; sections: string[];
   variants: string[];
   colour_codes: ColourCode[];
+  available_colours?: string[];
   manufacture_year?: string;
   pages_scanned: number; sections_found: number; ocr_flagged: number; warnings: string[];
 }

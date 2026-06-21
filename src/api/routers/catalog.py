@@ -138,17 +138,18 @@ def extract_pdf_tables(
     sections = sorted({r[0] for r in rows if r[0]})
 
     return {
-        "headers":     DISPLAY_HEADERS,
-        "rows":        rows,
-        "total":       len(rows),
-        "sections":    sections,
-        "variants":    result.variants,
-        "colour_codes":    result.colour_codes,
+        "headers":          DISPLAY_HEADERS,
+        "rows":             rows,
+        "total":            len(rows),
+        "sections":         sections,
+        "variants":         result.variants,
+        "colour_codes":     result.colour_codes,
+        "available_colours": result.available_colours,
         "manufacture_year": result.manufacture_year,
-        "pages_scanned":   result.pages_scanned,
-        "sections_found": result.sections_found,
-        "ocr_flagged":    result.ocr_flagged,
-        "warnings":       result.warnings,
+        "pages_scanned":    result.pages_scanned,
+        "sections_found":   result.sections_found,
+        "ocr_flagged":      result.ocr_flagged,
+        "warnings":         result.warnings,
     }
 
 

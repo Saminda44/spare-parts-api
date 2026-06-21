@@ -128,6 +128,17 @@ _STAMP_PREFIX_PAT = re.compile(r'^[A-Z0-9]{2,6}\s+', re.IGNORECASE)
 # Partial FIG line — just the number, section name absent or on the next row.
 _FIG_PARTIAL_PAT = re.compile(r'(?:^|.*\s)(FIG\.\s+(\d+[A-Z]?))\s*$', re.IGNORECASE)
 
+# "AVAILABLE COLOUR" page header — these pages list bike colour variants as image captions,
+# e.g. "Yamaha Alpha Cygnus Black" / "Yamaha Alpha Cygnus Cyan".
+_AVAIL_COLOUR_PAT = re.compile(r'AVAILABLE\s+COLOU?RS?', re.IGNORECASE)
+# Colour nouns used to validate caption lines on available-colour pages.
+_CAPTION_COLOUR_NOUNS: frozenset[str] = frozenset({
+    "black", "white", "blue", "red", "green", "yellow", "silver", "gray",
+    "grey", "orange", "gold", "cyan", "brown", "purple", "violet", "pink",
+    "cream", "champagne", "magenta", "maroon", "dark", "light", "metallic",
+    "matte", "matt", "vivid", "racing",
+})
+
 
 def _try_fig_match(
     joined: str,
@@ -205,6 +216,9 @@ class ExtractionResult:
     variants:          list[str] = field(default_factory=list)  # e.g. ["B65J","B65L","B65M","B65N"]
     # colour_codes: [{abbreviation, name, code, is_model_colour}] from the PDF's colour table
     colour_codes:      list[dict] = field(default_factory=list)
+    # available_colours: captions from "AVAILABLE COLOUR" page, e.g.
+    # ["Yamaha Alpha Cygnus Black", "Yamaha Alpha Cygnus Cyan"]
+    available_colours: list[str] = field(default_factory=list)
     manufacture_year:  str | None = None   # e.g. "2019" from ©2019 on the cover page
     warnings:          list[str] = field(default_factory=list)
     error:             str | None = None
@@ -357,6 +371,11 @@ class YamahaCatalogueExtractor:
         if colour_codes:
             logger.info(f"{pdf_path.name}: found {len(colour_codes)} colour codes")
 
+        # Extract available colour captions from the "AVAILABLE COLOUR" page
+        available_colours = self._extract_available_colours(pdf_path)
+        if available_colours:
+            logger.info(f"{pdf_path.name}: found {len(available_colours)} available colour(s) from page")
+
         # Extract manufacture year from cover page (©YYYY / "1st edition, May YYYY")
         manufacture_year = self._extract_manufacture_year(pdf_path)
         if manufacture_year:
@@ -366,7 +385,8 @@ class YamahaCatalogueExtractor:
             pdf_path=pdf_path, model=model, rows=rows,
             pages_scanned=pages_scanned, sections_found=len(sections_seen),
             ocr_flagged=ocr_flagged, variants=variants,
-            colour_codes=colour_codes, manufacture_year=manufacture_year,
+            colour_codes=colour_codes, available_colours=available_colours,
+            manufacture_year=manufacture_year,
             warnings=warnings,
         )
 
@@ -693,6 +713,144 @@ class YamahaCatalogueExtractor:
             pass
 
         return []
+
+    @staticmethod
+    def _extract_available_colours(pdf_path: Path) -> list[str]:
+        """Extract colour variant captions from a Yamaha parts catalogue cover page.
+
+        Yamaha catalogues show bike images side-by-side on the cover (or a
+        dedicated "AVAILABLE COLOUR" page) with colour names as captions:
+
+            "Yamaha Alpha Cygnus Black"  |  "Yamaha Alpha Cygnus Cyan"
+
+        Two detection passes (first hit wins):
+
+        Pass 1 — explicit "AVAILABLE COLOUR" page (pages 1-20):
+            If a page header contains "AVAILABLE COLOUR/COLOR", scrape every
+            word-row from that page.
+
+        Pass 2 — cover-page "Yamaha … <colour>" captions (pages 1-8):
+            Look for word-rows where at least one sub-group starts with
+            "Yamaha" AND contains a colour noun.  This handles PDFs where
+            the captions appear directly below the bike images on the cover
+            page without a dedicated colour-page header.
+
+        In both passes, same-Y sub-groups are separated by detecting the large
+        horizontal gap (≥40 pts) that lies between the two bike images.
+
+        Returns a deduplicated list of caption strings, e.g.:
+            ["Yamaha Alpha Cygnus Black", "Yamaha Alpha Cygnus Cyan"]
+        Empty if no colour captions are found.
+        """
+        import pdfplumber as _plumber
+
+        # Minimum horizontal gap (points) that separates two side-by-side captions.
+        # Normal inter-word spacing is ≤10 pts; the gap between two bike images
+        # is typically 80–250 pts.
+        _X_GAP = 40.0
+
+        def _split_by_gap(row_words: list[dict]) -> list[list[dict]]:
+            groups: list[list[dict]] = []
+            current: list[dict] = [row_words[0]]
+            for prev, cur in zip(row_words, row_words[1:]):
+                gap = float(cur.get('x0', 0)) - float(prev.get('x1', 0))
+                if gap > _X_GAP:
+                    groups.append(current)
+                    current = [cur]
+                else:
+                    current.append(cur)
+            groups.append(current)
+            return groups
+
+        def _caption_from_group(group: list[dict]) -> str | None:
+            """Return the joined caption string if the word group looks like a
+            colour caption, otherwise None.
+
+            A valid caption group must:
+            - Start with "Yamaha" (Yamaha-branded caption) or start with any
+              word followed immediately by a colour noun.
+            - Contain at least one word from _CAPTION_COLOUR_NOUNS.
+            - Not look like a colour-code-table row (abbreviation + colour + code).
+            """
+            words_text = [w['text'] for w in group]
+            joined_lower = [t.lower() for t in words_text]
+
+            has_colour = any(w in _CAPTION_COLOUR_NOUNS for w in joined_lower)
+            if not has_colour:
+                return None
+
+            starts_yamaha = words_text[0].lower() == "yamaha"
+
+            # Reject colour-code-table rows: the first token is a short all-caps
+            # abbreviation (2-8 chars) like "MBL2", "SMX(*)", "CM6(*)".
+            first = words_text[0]
+            if re.match(r'^[A-Z0-9]{2,8}(\([*]\)|\*)?$', first) and not starts_yamaha:
+                return None
+            # Also reject if only 1-2 words (e.g. bare colour word "Black")
+            if len(words_text) < 3:
+                return None
+            if _COPYRIGHT_PAT.search(" ".join(words_text)):
+                return None
+
+            return " ".join(words_text)
+
+        def _extract_from_page_words(words: list[dict]) -> list[str]:
+            """Return all colour caption strings found on a single page."""
+            rows_by_y: dict[float, list[dict]] = {}
+            for w in words:
+                y_key = round(float(w.get('top', 0)) / _Y_TOL) * _Y_TOL
+                rows_by_y.setdefault(y_key, []).append(w)
+
+            found: list[str] = []
+            seen_local: set[str] = set()
+            for y_key in sorted(rows_by_y):
+                row_ws = sorted(rows_by_y[y_key], key=lambda w: w['x0'])
+                for group in _split_by_gap(row_ws):
+                    cap = _caption_from_group(group)
+                    if cap and cap not in seen_local:
+                        seen_local.add(cap)
+                        found.append(cap)
+            return found
+
+        captions: list[str] = []
+        seen: set[str] = set()
+
+        try:
+            with _plumber.open(str(pdf_path)) as pdf:
+                # ── Pass 1: dedicated "AVAILABLE COLOUR" page ──────────────
+                for page in pdf.pages[:20]:
+                    text = page.extract_text() or ""
+                    if not _AVAIL_COLOUR_PAT.search(text):
+                        continue
+                    words = page.extract_words(x_tolerance=6, y_tolerance=4) or []
+                    if words:
+                        for cap in _extract_from_page_words(words):
+                            if cap not in seen:
+                                seen.add(cap)
+                                captions.append(cap)
+                    if captions:
+                        break
+
+                # ── Pass 2: cover-page "Yamaha … colour" captions ──────────
+                if not captions:
+                    for page in pdf.pages[:8]:
+                        words = page.extract_words(x_tolerance=6, y_tolerance=4) or []
+                        if not words:
+                            continue
+                        page_caps = _extract_from_page_words(words)
+                        # Only keep sub-groups that start with "Yamaha"
+                        yamaha_caps = [c for c in page_caps if c.lower().startswith("yamaha")]
+                        if yamaha_caps:
+                            for cap in yamaha_caps:
+                                if cap not in seen:
+                                    seen.add(cap)
+                                    captions.append(cap)
+                            break  # stop at the first page that has them
+
+        except Exception:  # noqa: BLE001
+            pass
+
+        return captions
 
     @staticmethod
     def _resolve_variants(

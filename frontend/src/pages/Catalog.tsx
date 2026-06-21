@@ -37,13 +37,14 @@ function variantQty(qty: string, varIdx: number, numVariants: number): string {
   return parts[offset + varIdx] ?? qty;
 }
 
-function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, manufactureYear }: {
+function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, availableColours, manufactureYear }: {
   data: CatalogueData;
   relPath: string;
   pdfUrl?: string;
   meta?: { pages: number; sections: number; ocr: number; warnings: string[] };
   variants?: string[];
   colourCodes?: ColourCode[];
+  availableColours?: string[];
   manufactureYear?: string;
 }) {
   const [section,    setSection]    = useState("");
@@ -175,6 +176,19 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
           {meta.warnings.length > 0 && (
             <><span>·</span><span className="text-amber-600">{meta.warnings[0]}</span></>
           )}
+        </div>
+      )}
+
+      {/* Available colours strip — from the PDF's "AVAILABLE COLOUR" page */}
+      {availableColours && availableColours.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2">
+          <span className="text-xs font-semibold text-emerald-700 shrink-0">Available colours:</span>
+          {availableColours.map(name => (
+            <span key={name} className="text-xs px-2.5 py-1 rounded-full font-medium bg-white text-emerald-700 border border-emerald-200">
+              {name}
+            </span>
+          ))}
+          <span className="text-[10px] text-emerald-500 ml-auto italic">from PDF</span>
         </div>
       )}
 
@@ -482,6 +496,7 @@ function PdfCatalogueViewer({ relPath, filename, pdfUrl, onBack }: {
        <CatalogueTable
          data={result} relPath={relPath} pdfUrl={pdfUrl} meta={meta}
          variants={result.variants} colourCodes={result.colour_codes}
+         availableColours={result.available_colours}
          manufactureYear={result.manufacture_year}
        />}
     </div>
@@ -536,7 +551,7 @@ function ExtractionModal({ relPath, filename, pdfUrl, onClose }: {
         <div className="flex-1 overflow-y-auto p-5">
           {loading ? <LoadingState label="Extracting parts from PDF…" /> :
            !result || result.headers.length === 0 ? <EmptyState /> :
-           <CatalogueTable data={result} relPath={relPath} meta={meta} variants={result.variants} colourCodes={result.colour_codes} manufactureYear={result.manufacture_year} />}
+           <CatalogueTable data={result} relPath={relPath} meta={meta} variants={result.variants} colourCodes={result.colour_codes} availableColours={result.available_colours} manufactureYear={result.manufacture_year} />}
         </div>
       </div>
     </div>
