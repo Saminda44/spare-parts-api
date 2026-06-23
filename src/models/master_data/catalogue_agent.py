@@ -324,6 +324,7 @@ class CatalogueAgent:
 
     def __init__(self, max_pages: int = 500) -> None:
         self._extractor = YamahaCatalogueExtractor(max_pages=max_pages)
+        self._last_colour_matches: dict[str, dict] = {}  # For debugging colour matching
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -417,6 +418,9 @@ class CatalogueAgent:
 
         # ── Colour validation ── check for orphaned/inconsistent colours ─
         self._check_orphaned_colours(colour_legend, rosters, variants, warnings)
+
+        # ── Roster validation ── check completeness and correctness ─────
+        self._validate_rosters(rosters, variants, colour_legend, warnings)
 
         # ── Stage 5 ── assemble builds ─────────────────────────────────
         builds = self._assemble_builds(rows, variants, colour_legend, rosters, colour_abbrs)
@@ -850,6 +854,25 @@ class CatalogueAgent:
                     f"({unmapped_pct:.1%}) captions could not be matched"
                 )
 
+        # Store match data on instance for debugging (optional)
+        self._last_colour_matches: dict[str, dict] = {}
+        for caption in available_colours:
+            if caption in result:
+                # Look up the best score for this caption
+                best_score = next(
+                    (s for s, c, a in scores if c == caption and a == result[caption]),
+                    0.0
+                )
+                self._last_colour_matches[caption] = {
+                    "abbr": result[caption],
+                    "score": best_score,
+                }
+            else:
+                self._last_colour_matches[caption] = {
+                    "abbr": None,
+                    "score": 0.0,
+                }
+
         return result
 
     # ------------------------------------------------------------------
@@ -1115,6 +1138,48 @@ class CatalogueAgent:
                         f"Roster inconsistency: variant colour counts {roster_sizes} "
                         f"differ significantly (avg={avg_size:.1f})"
                     )
+
+    def _validate_rosters(
+        self,
+        rosters: dict[str, set[str]],
+        variants: list[str],
+        colour_legend: dict[str, dict],
+        warnings: list[str],
+    ) -> None:
+        """Validate colour rosters for reasonableness and completeness.
+
+        Checks:
+        1. Empty rosters (no colours detected for variant)
+        2. Roster size consistency
+        3. All colours in rosters exist in legend
+
+        Updates warnings list in-place.
+        """
+        if not variants or not rosters:
+            return
+
+        # Check for empty rosters
+        empty_variants = [v for v in variants if not rosters.get(v, set())]
+        if empty_variants:
+            warnings.append(
+                f"No colours detected for variant(s): {', '.join(empty_variants)}. "
+                f"Remarks may be incomplete or remarks grammar not matching legend codes."
+            )
+            logger.warning(f"Empty rosters for variants: {empty_variants}")
+
+        # Check for colours in roster that don't exist in legend
+        legend_abbrs = set(colour_legend.keys())
+        for variant, colours in rosters.items():
+            unknown = colours - legend_abbrs
+            if unknown:
+                unknown_list = ", ".join(sorted(unknown))
+                warnings.append(
+                    f"Variant {variant} has unknown colour codes not in legend: {unknown_list}. "
+                    f"May indicate typos in remarks or legend extraction failure."
+                )
+                logger.warning(
+                    f"Unknown colour codes in roster {variant}: {unknown}"
+                )
 
     # ------------------------------------------------------------------
     # Colour-changing parts identification (PDF-data only)
