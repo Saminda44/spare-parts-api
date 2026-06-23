@@ -51,6 +51,170 @@ _WEB_PHRASE_PAT = re.compile(
 # Stopwords to strip when normalising colour names for fuzzy comparison
 _NORM_STOP = frozenset({"the", "a", "an", "and", "or", "of", "for", "with", "no", "new"})
 
+# ---------------------------------------------------------------------------
+# Colour-name normalisation + synonym helpers (module-level)
+# ---------------------------------------------------------------------------
+
+# Canonical spelling: map variant spellings → canonical form used for overlap
+_COLOUR_SPELLING: dict[str, str] = {
+    "grey": "gray",
+    "greyish": "grayish",
+    "matt": "mat",
+    "matte": "mat",
+}
+
+def _norm_colour_word(w: str) -> str:
+    return _COLOUR_SPELLING.get(w.lower(), w.lower())
+
+
+def _norm_colour_words(text: str) -> set[str]:
+    """Split text into normalised colour words, filtering stop words & short tokens."""
+    return {
+        _norm_colour_word(w)
+        for w in re.split(r"[\s\-_]+", text)
+        if len(w) > 2 and w.lower() not in _NORM_STOP
+    }
+
+
+# Colour-name synonyms: when matching an available-colour label to a legend name,
+# expand available-colour words with these synonyms so semantic neighbours match.
+# e.g. "Gold" expands to include "yellowish", so "LIGHT YELLOWISH GRAY" matches.
+_COLOUR_SYNONYMS: dict[str, frozenset[str]] = {
+    "gold":      frozenset({"yellowish", "golden", "champagne", "sand"}),
+    "navy":      frozenset({"dark", "darkish", "deep"}),
+    "silver":    frozenset({"gray", "metallic"}),
+    "champagne": frozenset({"gold", "beige", "yellowish"}),
+    "cream":     frozenset({"ivory", "beige"}),
+    "coral":     frozenset({"red", "orange"}),
+    "violet":    frozenset({"purple"}),
+    "turquoise": frozenset({"cyan", "teal"}),
+}
+
+
+def _expand_colour_words(words: set[str]) -> set[str]:
+    """Return the union of *words* and their colour synonyms."""
+    expanded = set(words)
+    for w in words:
+        expanded.update(_COLOUR_SYNONYMS.get(w, frozenset()))
+    return expanded
+
+
+# ---------------------------------------------------------------------------
+# Cross-PDF colour-code cache (module-level, file-backed)
+# ---------------------------------------------------------------------------
+
+# Seed dictionary of well-known Yamaha colour abbreviations → human-readable names.
+# Populated from PDFs in this project whose filenames or forewords explicitly name
+# the codes.  Extended at runtime via _update_colour_cache() for every valid extraction.
+_YAMAHA_COLOUR_SEED: dict[str, str] = {
+    "SMX":    "Black Metallic X",
+    "CM6":    "Cyan Metallic 6",
+    "YB":     "Yamaha Black",
+    "BWC1":   "Bluish White Cocktail 1",
+    "MNM3":   "Mat Gray Metallic 3",
+    "MPBM1":  "Mat Purplish Blue Metallic 1",
+    "MDPBM1": "Mat Dark Purplish Blue Metallic 1",
+    "LYNM9":  "Light Yellowish Gray Metallic 9",
+    "MBL2":   "Mat Black 2",
+    "S8":     "Silver 8",
+    "VRC1":   "Vivid Red",
+    "DBNM8":  "Dull Blue Navy Metallic 8",
+}
+
+_COLOUR_CACHE_PATH = Path("data/interim/colour_code_cache.json")
+_colour_cache: dict[str, str] | None = None   # module-level singleton
+
+
+def _load_colour_cache() -> dict[str, str]:
+    """Load the cross-PDF colour code cache (seed + file-backed entries)."""
+    global _colour_cache  # noqa: PLW0603
+    if _colour_cache is not None:
+        return _colour_cache
+    cache = dict(_YAMAHA_COLOUR_SEED)
+    if _COLOUR_CACHE_PATH.exists():
+        try:
+            cache.update(json.loads(_COLOUR_CACHE_PATH.read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001
+            pass
+    _colour_cache = cache
+    return cache
+
+
+def _update_colour_cache(legend: dict[str, dict]) -> None:
+    """Persist any new abbreviation → name entries to the colour code cache."""
+    cache = _load_colour_cache()
+    changed = False
+    for abbr, entry in legend.items():
+        name = entry.get("name", "")
+        if name and abbr not in cache:
+            cache[abbr] = name
+            changed = True
+    if changed:
+        try:
+            _COLOUR_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _COLOUR_CACHE_PATH.write_text(
+                json.dumps(cache, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Garbage-legend detection (module-level)
+# ---------------------------------------------------------------------------
+
+# Tokens that indicate a copyright / legal table was mistakenly parsed as colours
+_GARBAGE_ABBR_TOKENS = frozenset({
+    "YAMAHA", "HONDA", "SUZUKI", "KAWASAKI", "TVSL",
+    "1ST", "2ND", "3RD", "COPYRIGHT", "EDITION", "PRINTING",
+    "ANY", "ALL", "RIGHTS", "RESERVED", "USE", "THIS",
+    "CATALOGUE", "PROPERTY", "REPRINTING", "UNAUTHORIZED",
+    "REVISED", "ISSUED",
+})
+
+
+def _is_garbage_legend(legend: dict[str, dict]) -> bool:
+    """Return True if the colour legend looks like copyright text, not paint codes."""
+    if not legend:
+        return True
+    garbage = sum(1 for abbr in legend if abbr.upper() in _GARBAGE_ABBR_TOKENS)
+    return garbage / len(legend) > 0.40
+
+
+# ---------------------------------------------------------------------------
+# Remarks-based colour-code discovery (module-level)
+# ---------------------------------------------------------------------------
+
+# "FOR XYZ" or "FOR XYZ, ABC" in the remarks column; only all-caps alphanumeric tokens
+_FOR_CODE_PAT = re.compile(
+    r'\bFOR\s+((?:[A-Z][A-Z0-9]{1,7})(?:[,\s]+[A-Z][A-Z0-9]{1,7})*)',
+    re.IGNORECASE,
+)
+# Tokens that appear after FOR but are NOT colour codes (catalogue abbreviations,
+# tyre brands, common words)
+_REMARK_SKIP_TOKENS = frozenset({
+    "NEW", "OLD", "STD", "OPT", "UR", "UN", "AP", "LM",
+    "MRF", "TVS", "IRF", "CEAT", "METRO", "BRIDGESTONE",
+    "APPLICABLE", "REFERENCE", "ONLY", "ALL", "MODELS",
+})
+
+
+def _discover_remarks_codes(rows: list[dict]) -> set[str]:
+    """Scan 'FOR XYZ' patterns in all row remarks to find colour abbreviations.
+
+    Returns the set of all candidate abbreviations (2–8 uppercase chars) that
+    appear as colour applicability targets in the remarks column.
+    """
+    found: set[str] = set()
+    for row in rows:
+        rem = (row.get("remarks", "") or "").upper()
+        for m in _FOR_CODE_PAT.finditer(rem):
+            for tok in re.split(r"[,\s]+", m.group(1).strip()):
+                tok = tok.strip()
+                if tok and 2 <= len(tok) <= 8 and tok not in _REMARK_SKIP_TOKENS:
+                    found.add(tok)
+    return found
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -100,6 +264,20 @@ class AgentResult:
     validated_colours: list[str]
     web_colour_names: list[str]       # raw colour names returned by web search
     warnings: list[str]
+    # Server-computed mapping: available_colour_name → colour_abbreviation.
+    # Populated when the PDF has an "AVAILABLE COLOUR" page.  The frontend uses
+    # this directly so it doesn't have to re-derive the mapping client-side.
+    available_colour_map: dict[str, str] = field(default_factory=dict)
+    # Per-variant ordered colour list, derived from rosters + colour_legend.
+    # Key = variant code (e.g. "B65J"), value = ordered list of colour dicts
+    # [{abbreviation, name, code, is_model_colour}] in foreword-table order.
+    # Empty list means no colour variants found for that model.
+    variant_colour_map: dict[str, list[dict]] = field(default_factory=dict)
+    # How variant_colour_map was resolved: "roster" | "cyclic" | "web" | "fallback"
+    variant_colour_source: str = "fallback"
+    # Parts that have different part numbers per colour (same ref_no, ≥2 colours).
+    # Each entry: {section, ref_no, description, per_colour: {abbr: part_no}}.
+    colour_changing_parts: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -181,25 +359,74 @@ class CatalogueAgent:
             f"{len(variants)} variants, {len(colour_codes)} colours"
         )
 
+        # ── Update cross-PDF colour code cache from valid legends ──────
+        # Every time we see a clean colour table, persist its code→name
+        # entries so they can be reused when other PDFs have garbage tables.
+        if not _is_garbage_legend(colour_legend) and colour_legend:
+            _update_colour_cache(colour_legend)
+
+        # ── Garbage-legend fallback ─────────────────────────────────────
+        # Some PDFs have their colour table mis-extracted (e.g. copyright
+        # notice parsed as abbreviations → YAMAHA, 1ST, ANY).  Detect this
+        # and replace with codes discovered from the remarks column itself.
+        if _is_garbage_legend(colour_legend):
+            discovered = _discover_remarks_codes(rows)
+            if discovered:
+                logger.warning(
+                    f"{pdf_path.name}: colour legend appears to be garbage "
+                    f"({list(colour_legend.keys())}); rebuilding from "
+                    f"remarks-discovered codes: {sorted(discovered)}"
+                )
+                warnings = list(result.warnings)
+                warnings.append(
+                    f"Colour table extraction failed; "
+                    f"rebuilt from remarks: {', '.join(sorted(discovered))}"
+                )
+                # Look up a human-readable name for each discovered code via
+                # a targeted web search (one search per code, cached in-process).
+                new_legend: dict[str, dict] = {}
+                for code in sorted(discovered):
+                    code_name = self._search_colour_code_name(code)
+                    new_legend[code] = {
+                        "abbreviation": code,
+                        "name": code_name,
+                        "code": "",
+                        "is_model_colour": True,
+                    }
+                colour_legend = new_legend
+                colour_abbrs = set(colour_legend.keys())
+            else:
+                logger.warning(
+                    f"{pdf_path.name}: colour legend garbage and no 'FOR XYZ' "
+                    f"codes found in remarks — no colour builds possible"
+                )
+                warnings = list(result.warnings)
+                warnings.append(
+                    "Colour table extraction failed and remarks contain no colour codes."
+                )
+                colour_legend = {}
+                colour_abbrs = set()
+        else:
+            warnings = list(result.warnings)
+
+        if not colour_codes and not colour_abbrs:
+            warnings.append("No colour table found in foreword; colour builds unavailable.")
+
         # ── Stage 3 ── colour roster per variant ───────────────────────
         rosters = self._build_rosters(rows, variants, colour_abbrs)
 
         # ── Stage 5 ── assemble builds ─────────────────────────────────
         builds = self._assemble_builds(rows, variants, colour_legend, rosters, colour_abbrs)
 
-        warnings = list(result.warnings)
-        if not colour_codes:
-            warnings.append("No colour table found in foreword; colour builds unavailable.")
-
         # ── Stage 4 ── web validation + external-parts check ───────────
-        # If the PDF already has an "AVAILABLE COLOUR" page, use those captions
-        # directly as the colour-name reference — no web search needed.
+        # If the PDF has an "AVAILABLE COLOUR" page, use those captions as the
+        # reference colour-name list (no web search needed).
         pdf_available_colours = result.available_colours or []
         if pdf_available_colours:
             web_colour_names = pdf_available_colours
             logger.info(
-                f"{pdf_path.name}: skipping web search — "
-                f"using {len(web_colour_names)} colour(s) from PDF available-colour page"
+                f"{pdf_path.name}: using {len(web_colour_names)} colour(s) "
+                f"from PDF available-colour page"
             )
         else:
             web_colour_names = self._search_web_colours(result.model, result.manufacture_year)
@@ -220,7 +447,7 @@ class CatalogueAgent:
         for abbr, entry in colour_legend.items():
             pdf_name = entry.get("name", "")
             web_ok = (
-                not web_colour_names  # no web results → treat all as confirmed
+                not web_colour_names
                 or self._web_confirms_colour(pdf_name, web_colour_names)
             )
             ext_ok = abbr in colours_with_external
@@ -231,6 +458,128 @@ class CatalogueAgent:
             }
             if web_ok and ext_ok:
                 validated_colours.append(abbr)
+
+        # ── Server-side available-colour → abbreviation mapping ─────────
+        available_colour_map: dict[str, str] = {}
+        if pdf_available_colours and colour_legend:
+            available_colour_map = self._map_available_colours_to_abbrs(
+                pdf_available_colours, colour_legend
+            )
+            logger.info(
+                f"{pdf_path.name}: available-colour map: {available_colour_map}"
+            )
+
+        # ── variant_colour_map: ordered colour list per variant ──────────
+        # Preserves foreword colour-table order so the UI tabs match PDF order.
+        abbr_order: dict[str, int] = {
+            c["abbreviation"].upper(): i for i, c in enumerate(colour_codes)
+        }
+
+        # Model colours from foreword (those marked with (*))
+        model_colour_list: list[dict] = [c for c in colour_codes if c.get("is_model_colour")]
+        num_variants = len(variants)
+
+        # Determine if all variants share identical roster sets.
+        # When they do the roster cannot differentiate which colours belong to
+        # which variant — fall back to cyclic distribution of the foreword's
+        # model colours (Yamaha lists them in cyclic order: var0-col0, var1-col0,
+        # …, varN-col0, var0-col1, var1-col1, …).
+        roster_frozen = {v: frozenset(cs) for v, cs in rosters.items()}
+        rosters_differ = len(set(roster_frozen.values())) > 1
+
+        variant_colour_map: dict[str, list[dict]] = {}
+        variant_colour_source: str = "fallback"
+
+        if rosters_differ:
+            # Variants have distinct colour sets in remarks → use roster directly.
+            for v, roster_set in rosters.items():
+                ordered = sorted(roster_set, key=lambda a: abbr_order.get(a, 999))
+                variant_colour_map[v] = [
+                    {
+                        "abbreviation": abbr,
+                        "name": colour_legend.get(abbr, {}).get("name", abbr),
+                        "code": colour_legend.get(abbr, {}).get("code", ""),
+                        "is_model_colour": colour_legend.get(abbr, {}).get("is_model_colour", False),
+                    }
+                    for abbr in ordered
+                    if abbr in colour_legend
+                ]
+            variant_colour_source = "roster"
+        elif (
+            model_colour_list
+            and num_variants > 0
+            and len(model_colour_list) % num_variants == 0
+        ):
+            # All variants share the same roster (remarks-based colours can't
+            # differentiate them) AND the foreword model-colour count divides
+            # evenly by the variant count.  Apply cyclic distribution: each
+            # variant gets every N-th model colour starting at its own index.
+            for idx, variant in enumerate(variants):
+                variant_colour_map[variant] = [
+                    {
+                        "abbreviation": model_colour_list[j]["abbreviation"],
+                        "name": model_colour_list[j]["name"],
+                        "code": model_colour_list[j]["code"],
+                        "is_model_colour": True,
+                    }
+                    for j in range(idx, len(model_colour_list), num_variants)
+                ]
+            variant_colour_source = "cyclic"
+        else:
+            # Cyclic distribution failed — try web search per variant code.
+            if result.model and variants and colour_legend:
+                web_map = self._enrich_variant_colours_via_web(
+                    result.model, result.manufacture_year, variants, colour_legend
+                )
+            else:
+                web_map = None
+
+            if web_map and any(web_map.values()):
+                for v in variants:
+                    abbrs = web_map.get(v, [])
+                    variant_colour_map[v] = [
+                        {
+                            "abbreviation": abbr,
+                            "name": colour_legend.get(abbr, {}).get("name", abbr),
+                            "code": colour_legend.get(abbr, {}).get("code", ""),
+                            "is_model_colour": colour_legend.get(abbr, {}).get("is_model_colour", False),
+                        }
+                        for abbr in abbrs
+                        if abbr in colour_legend
+                    ]
+                variant_colour_source = "web"
+                warnings.append(
+                    "Colour variant assignment determined by web search "
+                    "(PDF data insufficient for cyclic distribution)."
+                )
+            else:
+                # Final fallback: show all known colours for every variant.
+                all_abbrs = sorted(colour_legend.keys(), key=lambda a: abbr_order.get(a, 999))
+                fallback_colours = [
+                    {
+                        "abbreviation": abbr,
+                        "name": colour_legend[abbr].get("name", abbr),
+                        "code": colour_legend[abbr].get("code", ""),
+                        "is_model_colour": colour_legend[abbr].get("is_model_colour", False),
+                    }
+                    for abbr in all_abbrs
+                ]
+                for v in variants:
+                    variant_colour_map[v] = fallback_colours
+                variant_colour_source = "fallback"
+
+        logger.info(
+            f"{pdf_path.name}: variant_colour_map keys={list(variant_colour_map)} "
+            f"sizes={[len(v) for v in variant_colour_map.values()]} "
+            f"source={variant_colour_source} rosters_differ={rosters_differ} "
+            f"model_colours={len(model_colour_list)}"
+        )
+
+        # ── Colour-changing parts: same ref_no, ≥2 colour-specific versions ──
+        colour_changing_parts = self._identify_colour_changing_parts(rows, colour_abbrs)
+        logger.info(
+            f"{pdf_path.name}: {len(colour_changing_parts)} colour-changing part(s)"
+        )
 
         return AgentResult(
             source_pdf=pdf_path.name,
@@ -244,6 +593,10 @@ class CatalogueAgent:
             validated_colours=validated_colours,
             web_colour_names=web_colour_names,
             warnings=warnings,
+            available_colour_map=available_colour_map,
+            variant_colour_map=variant_colour_map,
+            variant_colour_source=variant_colour_source,
+            colour_changing_parts=colour_changing_parts,
         )
 
     # ------------------------------------------------------------------
@@ -315,8 +668,10 @@ class CatalogueAgent:
 
         for idx, variant in enumerate(variants):
             colours = rosters.get(variant, set())
-            if not colours and not colour_legend:
-                # Single-colour catalogue — make one build with all rows
+            if not colours:
+                # Roster empty — remarks either absent or use column codes rather
+                # than colour abbreviations.  Build a single _ALL catalogue so the
+                # user still gets the complete shared parts list for this variant.
                 colours = {"_ALL"}
 
             for colour in sorted(colours):
@@ -386,6 +741,126 @@ class CatalogueAgent:
         return builds
 
     # ------------------------------------------------------------------
+    # Server-side available-colour → abbreviation mapping
+    # ------------------------------------------------------------------
+
+    def _map_available_colours_to_abbrs(
+        self,
+        available_colours: list[str],
+        colour_legend: dict[str, dict],
+    ) -> dict[str, str]:
+        """Map each available-colour caption to the best-matching colour abbreviation.
+
+        Uses normalised word-overlap between the caption and the legend colour
+        name, expanded with colour synonyms so semantic neighbours match
+        (e.g. "Gold" → "LIGHT YELLOWISH GRAY ME 9" via "yellowish"↔"gold").
+
+        Returns:
+            dict mapping caption (e.g. "Matt Grey") → abbreviation (e.g. "MNM3").
+            Entries are omitted when no match exceeds the 0.25 threshold.
+        """
+        if not available_colours or not colour_legend:
+            return {}
+
+        model_abbrs = [
+            abbr for abbr, entry in colour_legend.items()
+            if entry.get("is_model_colour", True)
+        ]
+        if not model_abbrs:
+            model_abbrs = list(colour_legend.keys())
+
+        # Score every (caption, abbreviation) pair
+        scores: list[tuple[float, str, str]] = []
+        for caption in available_colours:
+            avail_words = _expand_colour_words(_norm_colour_words(caption))
+            if not avail_words:
+                continue
+            for abbr in model_abbrs:
+                legend_name = colour_legend[abbr].get("name", "")
+                legend_words = _norm_colour_words(legend_name)
+                if not legend_words:
+                    continue
+                overlap = avail_words & legend_words
+                # Score relative to the shorter word set → short captions like
+                # "Cyan" score 100% against "CYAN METALLIC 6" (1/1 min).
+                score = len(overlap) / min(len(avail_words), len(legend_words))
+                if score > 0:
+                    scores.append((score, caption, abbr))
+
+        # Greedy 1-to-1 assignment: highest score first, each side used once
+        scores.sort(key=lambda t: t[0], reverse=True)
+        result: dict[str, str] = {}
+        used_captions: set[str] = set()
+        used_abbrs: set[str] = set()
+        for score, caption, abbr in scores:
+            if score < 0.25:
+                break
+            if caption not in used_captions and abbr not in used_abbrs:
+                result[caption] = abbr
+                used_captions.add(caption)
+                used_abbrs.add(abbr)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Colour-code name lookup (supplemental web search for discovered codes)
+    # ------------------------------------------------------------------
+
+    def _search_colour_code_name(self, code: str) -> str:
+        """Look up a Yamaha colour abbreviation (e.g. "SMX") → human-readable name.
+
+        Priority:
+          1. Cross-PDF colour code cache (seeded with known codes + accumulated from
+             all successfully extracted colour tables in this session/file).
+          2. Web search as a last resort.
+
+        Returns the code itself when no name can be established.
+        """
+        # 1. Cache lookup (cheap, reliable)
+        cache = _load_colour_cache()
+        if code in cache:
+            name = cache[code]
+            logger.debug(f"Colour code {code!r} → {name!r} (from cache)")
+            return name
+
+        # 2. Web search (slow, may be wrong — last resort)
+        q = urllib.parse.urlencode(
+            {"q": f'Yamaha "{code}" colour paint motorcycle', "ia": "web"}
+        )
+        url = f"https://html.duckduckgo.com/html/?{q}"
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:  # noqa: S310
+                html = resp.read().decode("utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Colour code name lookup failed for {code!r}: {exc}")
+            return code
+
+        text = re.sub(r"<[^>]+>", " ", html)
+        names = self._extract_colour_names_from_text(text)
+        for name in names[:8]:
+            words_lower = [w.lower() for w in name.split()]
+            if any(w in _WEB_COLOUR_NOUNS for w in words_lower):
+                logger.debug(f"Colour code {code!r} → {name!r} (from web)")
+                # Persist to cache for next time
+                cache[code] = name
+                _update_colour_cache({code: {"name": name}})
+                return name
+
+        logger.debug(f"Colour code {code!r}: no name found, using code as name")
+        return code
+
+    # ------------------------------------------------------------------
     # Web colour validation helpers
     # ------------------------------------------------------------------
 
@@ -453,28 +928,162 @@ class CatalogueAgent:
                 results.append(phrase)
         return results
 
+    # ------------------------------------------------------------------
+    # Variant colour enrichment via web search (fallback path)
+    # ------------------------------------------------------------------
+
+    def _enrich_variant_colours_via_web(
+        self,
+        model: str,
+        year: str | None,
+        variants: list[str],
+        colour_legend: dict[str, dict],
+    ) -> dict[str, list[str]] | None:
+        """Search the web for each variant code to find its colour assignment.
+
+        For every variant code (e.g. "B65J") performs a targeted DuckDuckGo
+        search: ``"B65J" Aerox 2024 colour``.  Colour-name phrases found in the
+        results are matched back to the foreword legend via word-overlap.
+
+        Returns dict[variant_code → list[colour_abbreviation]] when at least
+        one variant yields a match, otherwise None.
+        """
+        result: dict[str, list[str]] = {}
+
+        for variant in variants:
+            query_parts = [f'"{variant}"', model, "colour"]
+            if year:
+                query_parts.append(year)
+            q = urllib.parse.urlencode({"q": " ".join(query_parts), "ia": "web"})
+            url = f"https://html.duckduckgo.com/html/?{q}"
+
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/120.0.0.0 Safari/537.36"
+                        ),
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                    html = resp.read().decode("utf-8", errors="replace")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Variant colour web search failed for {variant!r}: {exc}")
+                continue
+
+            text = re.sub(r"<[^>]+>", " ", html)
+            colour_names = self._extract_colour_names_from_text(text)
+
+            # Match each found colour name to the closest legend abbreviation
+            matched: list[str] = []
+            for name in colour_names[:30]:
+                name_words = _expand_colour_words(_norm_colour_words(name))
+                if not name_words:
+                    continue
+                best_score = 0.0
+                best_abbr: str | None = None
+                for abbr, entry in colour_legend.items():
+                    legend_words = _norm_colour_words(entry.get("name", ""))
+                    if not legend_words:
+                        continue
+                    overlap = len(name_words & legend_words)
+                    score = overlap / len(legend_words)
+                    if score > best_score and score >= 0.4:
+                        best_score = score
+                        best_abbr = abbr
+                if best_abbr and best_abbr not in matched:
+                    matched.append(best_abbr)
+
+            if matched:
+                result[variant] = matched
+                logger.info(
+                    f"Variant {variant!r}: web-matched colours {matched} "
+                    f"(model={model!r} year={year!r})"
+                )
+            else:
+                logger.debug(f"Variant {variant!r}: no colour match from web search")
+
+        return result if any(result.values()) else None
+
+    # ------------------------------------------------------------------
+    # Colour-changing parts identification (PDF-data only)
+    # ------------------------------------------------------------------
+
+    def _identify_colour_changing_parts(
+        self,
+        rows: list[dict],
+        colour_abbrs: set[str],
+    ) -> list[dict]:
+        """Find parts whose part number varies by colour.
+
+        Scans all rows for entries that share the same ref_no but carry
+        different colour-applicability restrictions in their remarks.  These
+        are the physical parts (body panels, seat covers, etc.) that need to
+        be ordered in the bike's specific colour.
+
+        Returns:
+            List of dicts sorted by section then ref_no.  Each entry:
+                {section, ref_no, description, per_colour: {abbr: part_no}}
+            Only entries with ≥2 distinct colour→part_no pairs are included.
+        """
+        # Group colour-specific rows by ref_no
+        by_ref: dict[str, list[dict]] = {}
+        for row in rows:
+            ref = (row.get("ref_no", "") or "").strip()
+            if not ref:
+                continue
+            remarks = row.get("remarks", "") or ""
+            appl = parse_applicability(remarks, colour_abbrs)
+            if not appl.is_universal and appl.applies_to:
+                by_ref.setdefault(ref, []).append(row)
+
+        colour_parts: list[dict] = []
+        for ref, ref_rows in by_ref.items():
+            per_colour: dict[str, str] = {}
+            for row in ref_rows:
+                remarks = row.get("remarks", "") or ""
+                appl = parse_applicability(remarks, colour_abbrs)
+                part_no = (row.get("part_no", "") or "").strip()
+                for abbr in appl.applies_to:
+                    if abbr not in per_colour:
+                        per_colour[abbr] = part_no
+
+            # Only include when part_no actually differs across colours
+            unique_part_nos = set(per_colour.values())
+            if len(per_colour) >= 2 and len(unique_part_nos) >= 2:
+                first = ref_rows[0]
+                colour_parts.append({
+                    "section": (first.get("section", "") or "").strip(),
+                    "ref_no": ref,
+                    "description": (first.get("description", "") or "").strip(),
+                    "per_colour": per_colour,
+                })
+
+        # Sort by section then ref_no for stable display
+        colour_parts.sort(key=lambda e: (e["section"], e["ref_no"]))
+        return colour_parts
+
     @staticmethod
     def _web_confirms_colour(pdf_colour_name: str, web_names: list[str]) -> bool:
         """Return True if the PDF colour name overlaps sufficiently with any web name.
 
-        Uses a word-overlap ratio: if ≥40% of the meaningful words in
-        pdf_colour_name appear in a web name, it's considered confirmed.
+        Uses normalised word-overlap (grey↔gray, mat/matt) plus synonym expansion
+        so "MAT GRAY METALLIC 3" confirms against "Matt Grey" correctly.
+        ≥40% of the PDF colour's meaningful words must appear in a web name.
         """
         if not web_names:
-            return True  # no web data → don't filter anything
+            return True
 
-        def _words(s: str) -> set[str]:
-            return {
-                w.lower() for w in re.split(r"[\s\-_]+", s)
-                if len(w) > 2 and w.lower() not in _NORM_STOP
-            }
-
-        pdf_words = _words(pdf_colour_name)
+        pdf_words = _expand_colour_words(_norm_colour_words(pdf_colour_name))
         if not pdf_words:
-            return True  # can't judge → include
+            return True
 
         for web_name in web_names:
-            web_words = _words(web_name)
+            web_words = _expand_colour_words(_norm_colour_words(web_name))
             overlap = pdf_words & web_words
             ratio = len(overlap) / len(pdf_words)
             if ratio >= 0.40:

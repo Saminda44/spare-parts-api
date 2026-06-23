@@ -135,9 +135,23 @@ _AVAIL_COLOUR_PAT = re.compile(r'AVAILABLE\s+COLOU?RS?', re.IGNORECASE)
 _CAPTION_COLOUR_NOUNS: frozenset[str] = frozenset({
     "black", "white", "blue", "red", "green", "yellow", "silver", "gray",
     "grey", "orange", "gold", "cyan", "brown", "purple", "violet", "pink",
-    "cream", "champagne", "magenta", "maroon", "dark", "light", "metallic",
-    "matte", "matt", "vivid", "racing",
+    "cream", "champagne", "magenta", "maroon", "metallic",
+    "matte", "matt", "mat", "vivid", "racing", "bright", "dull",
+    "bluish", "purplish", "reddish", "greenish", "cocktail", "rally",
+    "navy", "cobalt", "candy", "sparkle", "pearl",
+    # "dark", "deep", "light" intentionally omitted — too generic;
+    # colours that use them (Dark Grey, Deep Blue) also have a specific colour noun.
 })
+# Subset of colour nouns valid as standalone single-word colour names.
+# Modifiers ("metallic", "mat", "vivid", ...) must be accompanied by a named colour.
+_STANDALONE_COLOUR_NOUNS: frozenset[str] = frozenset({
+    "black", "white", "blue", "red", "green", "yellow", "silver", "gray",
+    "grey", "orange", "gold", "cyan", "brown", "purple", "violet", "pink",
+    "cream", "champagne", "magenta", "maroon", "cobalt", "navy",
+})
+# Variant-code prefix that some catalogues use in colour captions:
+# "2SP3-Gold", "BP16-Cyan", "BP16-Black Metallic" etc.
+_VARIANT_CODE_PREFIX_PAT = re.compile(r'^([A-Z0-9]{2,6})-(.*)', re.IGNORECASE)
 
 
 def _try_fig_match(
@@ -718,36 +732,40 @@ class YamahaCatalogueExtractor:
     def _extract_available_colours(pdf_path: Path) -> list[str]:
         """Extract colour variant captions from a Yamaha parts catalogue cover page.
 
-        Yamaha catalogues show bike images side-by-side on the cover (or a
-        dedicated "AVAILABLE COLOUR" page) with colour names as captions:
+        Yamaha catalogues display bike images side-by-side on the cover (or on
+        a dedicated "AVAILABLE COLOUR" page) with colour names as captions
+        beneath each image.  Four caption formats are handled:
 
-            "Yamaha Alpha Cygnus Black"  |  "Yamaha Alpha Cygnus Cyan"
+            A. "Yamaha Alpha Cygnus Black"  — Yamaha-branded (Alpha, Ray)
+            B. "2SP3-Gold", "BP16-Cyan"     — VariantCode-ColourName (Fasino, XC115)
+            C. "Cyan Metallic | Mat Black"  — bare colour clusters (Fasino 2SP2)
+            D. "Black Metallic Bike"        — [colour] Bike (Fazer 2WS)
 
-        Two detection passes (first hit wins):
+        Key discriminators that separate genuine captions from colour-code tables:
+        - On a Y-row split by large X-gaps (≥40 pts), every sub-group must
+          contain at least one colour noun.  Foreword/two-column pages have one
+          sub-group that is plain sentence text (no colour nouns) — those rows
+          are rejected.
+        - Colour-code table rows start with a short all-caps abbreviation (e.g.
+          "CM6(*)", "MBL2") in the first sub-group, which has no colour noun.
+        - Paint-code abbreviation codes (2-4 char all-uppercase, e.g. "YB",
+          "SMX") as the last word flag a colour-table row, not a caption.
 
-        Pass 1 — explicit "AVAILABLE COLOUR" page (pages 1-20):
-            If a page header contains "AVAILABLE COLOUR/COLOR", scrape every
-            word-row from that page.
-
-        Pass 2 — cover-page "Yamaha … <colour>" captions (pages 1-8):
-            Look for word-rows where at least one sub-group starts with
-            "Yamaha" AND contains a colour noun.  This handles PDFs where
-            the captions appear directly below the bike images on the cover
-            page without a dedicated colour-page header.
-
-        In both passes, same-Y sub-groups are separated by detecting the large
-        horizontal gap (≥40 pts) that lies between the two bike images.
-
-        Returns a deduplicated list of caption strings, e.g.:
-            ["Yamaha Alpha Cygnus Black", "Yamaha Alpha Cygnus Cyan"]
-        Empty if no colour captions are found.
+        Returns a deduplicated list of colour name strings.  Empty if none found.
         """
         import pdfplumber as _plumber
 
-        # Minimum horizontal gap (points) that separates two side-by-side captions.
-        # Normal inter-word spacing is ≤10 pts; the gap between two bike images
-        # is typically 80–250 pts.
+        # Large X-gap (pts) between two side-by-side bike images / captions.
+        # Normal inter-word spacing: ≤15 pts.  Image-column gap: ≥80 pts.
         _X_GAP = 40.0
+        # Captions are short; sentence text in foreword pages is much longer.
+        _MAX_WORDS = 8
+        # 2–4 char ALL-CAPS endings that are paint-code abbreviations, not colours.
+        # Common colour-word endings that are allowed even when all-caps:
+        _COLOUR_ENDINGS = frozenset({
+            "black", "white", "blue", "red", "cyan", "gray", "grey", "gold",
+            "pink", "green", "brown", "silver", "orange", "maroon", "purple",
+        })
 
         def _split_by_gap(row_words: list[dict]) -> list[list[dict]]:
             groups: list[list[dict]] = []
@@ -762,40 +780,70 @@ class YamahaCatalogueExtractor:
             groups.append(current)
             return groups
 
+        def _group_has_colour(group: list[dict]) -> bool:
+            return any(w['text'].lower() in _CAPTION_COLOUR_NOUNS for w in group)
+
         def _caption_from_group(group: list[dict]) -> str | None:
-            """Return the joined caption string if the word group looks like a
-            colour caption, otherwise None.
+            """Extract a colour name from one X-gap-split sub-group, or None."""
+            texts = [w['text'] for w in group]
 
-            A valid caption group must:
-            - Start with "Yamaha" (Yamaha-branded caption) or start with any
-              word followed immediately by a colour noun.
-            - Contain at least one word from _CAPTION_COLOUR_NOUNS.
-            - Not look like a colour-code-table row (abbreviation + colour + code).
-            """
-            words_text = [w['text'] for w in group]
-            joined_lower = [t.lower() for t in words_text]
-
-            has_colour = any(w in _CAPTION_COLOUR_NOUNS for w in joined_lower)
-            if not has_colour:
+            # Sentence-length sub-groups are foreword text, not image captions.
+            if len(texts) > _MAX_WORDS:
                 return None
 
-            starts_yamaha = words_text[0].lower() == "yamaha"
-
-            # Reject colour-code-table rows: the first token is a short all-caps
-            # abbreviation (2-8 chars) like "MBL2", "SMX(*)", "CM6(*)".
-            first = words_text[0]
-            if re.match(r'^[A-Z0-9]{2,8}(\([*]\)|\*)?$', first) and not starts_yamaha:
-                return None
-            # Also reject if only 1-2 words (e.g. bare colour word "Black")
-            if len(words_text) < 3:
-                return None
-            if _COPYRIGHT_PAT.search(" ".join(words_text)):
+            if _COPYRIGHT_PAT.search(" ".join(texts)):
                 return None
 
-            return " ".join(words_text)
+            # Format B: VariantCode-ColourName, e.g. "2SP3-Gold", "BP16-Cyan".
+            # Tried FIRST: the full token "2SP3-Gold" is a single word that isn't
+            # itself a colour noun, so all downstream checks would wrongly reject it.
+            m = _VARIANT_CODE_PREFIX_PAT.match(texts[0])
+            # Guard: real variant codes (2SP3, BP16) always contain a digit.
+            # Plain hyphenated English words (NON-METALLIC, MID-BLUE) must not
+            # be mistaken for variant codes and have their suffix returned.
+            if m and any(c.isdigit() for c in m.group(1)):
+                colour_part = " ".join([m.group(2)] + texts[1:]).strip()
+                if any(w.lower() in _CAPTION_COLOUR_NOUNS for w in colour_part.split()):
+                    return colour_part
+                return None  # variant-code token but no colour → not a caption
 
-        def _extract_from_page_words(words: list[dict]) -> list[str]:
-            """Return all colour caption strings found on a single page."""
+            # Reject figure/code-reference prefixes: "FO/90", "1X/33/P1" etc.
+            if '/' in texts[0]:
+                return None
+
+            # Reject paint-code table rows with embedded 4-digit paint-code numbers
+            # e.g. "A 1124 WHITE METALLIC 6", "C 1177 VIVID PURPLISH BLUE COCKTAIL 5"
+            if any(re.match(r'^\d{4,5}$', t) for t in texts):
+                return None
+
+            # Must contain at least one colour noun.
+            if not any(t.lower() in _CAPTION_COLOUR_NOUNS for t in texts):
+                return None
+
+            # Single-word groups must be a named base colour, not a modifier alone.
+            # "Black", "Cyan" → OK; "Metallic", "Mat", "Vivid" alone → reject.
+            if len(texts) == 1 and texts[0].lower() not in _STANDALONE_COLOUR_NOUNS:
+                return None
+
+            # Reject if last word is a short paint-code abbreviation:
+            # e.g. "YB", "SMX", "DRMK" — but keep "BLACK", "BLUE", etc.
+            last = texts[-1]
+            if (2 <= len(last) <= 4
+                    and last == last.upper()
+                    and last.isalpha()
+                    and last.lower() not in _COLOUR_ENDINGS):
+                return None
+
+            # Reject colour-code-table rows: first token is a short all-caps
+            # abbreviation like "MBL2", "CM6(*)", "SMX(*)", "YB".
+            first = texts[0]
+            if re.match(r'^[A-Z0-9]{2,8}(\([*]\)|\*)?$', first) and first.upper() != "YAMAHA":
+                return None
+
+            return " ".join(texts)
+
+        def _page_captions(words: list[dict]) -> list[str]:
+            """Extract all colour captions from one page's word list."""
             rows_by_y: dict[float, list[dict]] = {}
             for w in words:
                 y_key = round(float(w.get('top', 0)) / _Y_TOL) * _Y_TOL
@@ -805,7 +853,20 @@ class YamahaCatalogueExtractor:
             seen_local: set[str] = set()
             for y_key in sorted(rows_by_y):
                 row_ws = sorted(rows_by_y[y_key], key=lambda w: w['x0'])
-                for group in _split_by_gap(row_ws):
+                sub_groups = _split_by_gap(row_ws)
+
+                # Row-level guard: every sub-group with ≥2 words must contain a
+                # colour noun.  Foreword two-column rows have one sub-group that
+                # is plain sentence text → reject the whole row.
+                if any(len(g) >= 2 and not _group_has_colour(g) for g in sub_groups):
+                    continue
+
+                # Reject paint-code table rows: any sub-group starting with a
+                # 4-5 digit paint-code number ("0918", "0033" etc.).
+                if any(re.match(r'^\d{4,5}$', g[0]['text']) for g in sub_groups):
+                    continue
+
+                for group in sub_groups:
                     cap = _caption_from_group(group)
                     if cap and cap not in seen_local:
                         seen_local.add(cap)
@@ -817,35 +878,35 @@ class YamahaCatalogueExtractor:
 
         try:
             with _plumber.open(str(pdf_path)) as pdf:
-                # ── Pass 1: dedicated "AVAILABLE COLOUR" page ──────────────
+                # ── Pass 1: dedicated "AVAILABLE COLOUR" page (pages 1-20) ────
                 for page in pdf.pages[:20]:
                     text = page.extract_text() or ""
                     if not _AVAIL_COLOUR_PAT.search(text):
                         continue
                     words = page.extract_words(x_tolerance=6, y_tolerance=4) or []
-                    if words:
-                        for cap in _extract_from_page_words(words):
-                            if cap not in seen:
-                                seen.add(cap)
-                                captions.append(cap)
+                    for cap in _page_captions(words):
+                        if cap not in seen:
+                            seen.add(cap)
+                            captions.append(cap)
                     if captions:
                         break
 
-                # ── Pass 2: cover-page "Yamaha … colour" captions ──────────
+                # ── Pass 2: cover/intro image pages (pages 1-5) ────────────
+                # Scan early pages for colour caption rows.  These pages have
+                # bike images (large whitespace) between sparse caption rows.
+                # Restricted to pages 1-5 so foreword text pages are excluded.
                 if not captions:
-                    for page in pdf.pages[:8]:
+                    for page in pdf.pages[:5]:
                         words = page.extract_words(x_tolerance=6, y_tolerance=4) or []
                         if not words:
                             continue
-                        page_caps = _extract_from_page_words(words)
-                        # Only keep sub-groups that start with "Yamaha"
-                        yamaha_caps = [c for c in page_caps if c.lower().startswith("yamaha")]
-                        if yamaha_caps:
-                            for cap in yamaha_caps:
+                        page_caps = _page_captions(words)
+                        if page_caps:
+                            for cap in page_caps:
                                 if cap not in seen:
                                     seen.add(cap)
                                     captions.append(cap)
-                            break  # stop at the first page that has them
+                            break  # one image page per PDF
 
         except Exception:  # noqa: BLE001
             pass

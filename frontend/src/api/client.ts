@@ -390,11 +390,16 @@ export const fetchParts = (params?: Record<string, unknown>) =>
 export interface CatalogDerivedPartRow {
   part_no: string;
   description: string;
+  section: string;
   compatible_models: string;
+  variant_count: number;
   source_count: number;
+  kind: "shared" | "colour_specific";
 }
 export interface CatalogDerivedPartsData {
   indexed: boolean;
+  /** True when data comes from the agent-derived part master (richer). */
+  agent_master?: boolean;
   total: number;
   total_models: number;
   rows: CatalogDerivedPartRow[];
@@ -402,6 +407,28 @@ export interface CatalogDerivedPartsData {
 }
 export const fetchPartsFromCatalog = (params?: Record<string, unknown>) =>
   api.get<CatalogDerivedPartsData>("/parts/from-catalog", { params, timeout: 60_000 }).then(r => r.data);
+
+export interface PartMasterRebuildStatus {
+  running: boolean;
+  last_result: {
+    ok: boolean;
+    total_parts?: number;
+    total_pdfs?: number;
+    agents_run?: number;
+    agents_skipped?: number;
+    agent_errors?: string[];
+    error?: string;
+  } | null;
+  parquet_exists: boolean;
+  parquet_size_kb: number;
+  cached_pdfs: number;
+}
+export const fetchPartMasterStatus = () =>
+  api.get<PartMasterRebuildStatus>("/catalog/part-master/status").then(r => r.data);
+export const rebuildPartMaster = (runMissingAgents = true) =>
+  api.post<{ queued: boolean; message: string }>(
+    `/catalog/part-master/rebuild?run_missing_agents=${runMissingAgents}`
+  ).then(r => r.data);
 
 // ── Stages 4,5,7,8: EDA ────────────────────────────────────────────────────
 
@@ -515,6 +542,22 @@ export interface AgentColourEntry {
   has_external_parts?: boolean;
 }
 
+/** One colour option in a variant's colour list (from the foreword colour table). */
+export interface VariantColourEntry {
+  abbreviation: string;   // e.g. "CM6"
+  name: string;           // e.g. "CYAN METALLIC 6"
+  code: string;           // paint code, e.g. "1344"
+  is_model_colour: boolean;
+}
+
+export interface ColourChangingPart {
+  section: string;
+  ref_no: string;
+  description: string;
+  /** colour abbreviation → part number */
+  per_colour: Record<string, string>;
+}
+
 export interface AgentResult {
   source_pdf: string;
   extracted_at: string;
@@ -527,6 +570,14 @@ export interface AgentResult {
   validated_colours?: string[];
   web_colour_names?: string[];
   warnings: string[];
+  /** Server-computed mapping: available_colour_caption → colour_abbreviation */
+  available_colour_map?: Record<string, string>;
+  /** Per-variant ordered colour list in foreword-table order. */
+  variant_colour_map?: Record<string, VariantColourEntry[]>;
+  /** How variant_colour_map was resolved: "roster" | "cyclic" | "web" | "fallback" */
+  variant_colour_source?: string;
+  /** Parts with different part numbers per colour (same ref_no, ≥2 colours). */
+  colour_changing_parts?: ColourChangingPart[];
 }
 
 export const fetchAgentBuilds = (rel_path: string, refresh = false) =>

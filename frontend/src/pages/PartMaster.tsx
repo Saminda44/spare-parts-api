@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Search, X, Loader2, Database, RefreshCw,
-  Play, CheckCircle2, AlertTriangle, Package,
+  Play, CheckCircle2, AlertTriangle, Package, Layers,
 } from "lucide-react";
 import {
-  fetchPartsFromCatalog, fetchExtractionStatus, runBatchExtraction,
+  fetchPartsFromCatalog, fetchPartMasterStatus, rebuildPartMaster,
   type CatalogDerivedPartsData, type CatalogDerivedPartRow,
-  type ExtractionStatus,
+  type PartMasterRebuildStatus,
 } from "../api/client";
 
 // ── KPI card ──────────────────────────────────────────────────────────────────
@@ -38,28 +38,38 @@ function ModelBadges({ models }: { models: string }) {
   const list = models.split(", ").filter(Boolean);
   return (
     <div className="flex flex-wrap gap-1">
-      {list.map(m => (
-        <span
-          key={m}
-          className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded text-white leading-tight whitespace-nowrap"
-          style={{ background: modelBg(m) }}
-        >
-          {m}
-        </span>
-      ))}
+      {list.map(m => {
+        // "AEROX B65J" → model="AEROX", variant="B65J"
+        // "AEROX B65J/DBNM8" → model="AEROX", variant="B65J", colour="DBNM8"
+        const [modelPart, colourPart] = m.split("/");
+        const tokens = modelPart.trim().split(" ");
+        const modelName = tokens[0];
+        const variant   = tokens.slice(1).join(" ");
+        return (
+          <span
+            key={m}
+            className="inline-flex items-center gap-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded text-white leading-tight whitespace-nowrap"
+            style={{ background: modelBg(modelName) }}
+          >
+            {modelName}
+            {variant && <span className="opacity-80"> {variant}</span>}
+            {colourPart && <span className="opacity-60 text-[9px]">/{colourPart}</span>}
+          </span>
+        );
+      })}
     </div>
   );
 }
 
-// ── Build-index panel (shown when not indexed yet) ─────────────────────────────
+// ── Build-index panel (empty state) ───────────────────────────────────────────
 
 function BuildIndexPanel({ onDone }: { onDone: () => void }) {
-  const [status,   setStatus]   = useState<ExtractionStatus | null>(null);
+  const [status,   setStatus]   = useState<PartMasterRebuildStatus | null>(null);
   const [starting, setStarting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadStatus = useCallback(() => {
-    fetchExtractionStatus().then(s => {
+    fetchPartMasterStatus().then(s => {
       setStatus(s);
       if (!s.running && s.last_result?.ok) onDone();
     });
@@ -78,7 +88,7 @@ function BuildIndexPanel({ onDone }: { onDone: () => void }) {
 
   const handleBuild = async () => {
     setStarting(true);
-    await runBatchExtraction();
+    await rebuildPartMaster(true);
     setTimeout(loadStatus, 800);
     setStarting(false);
   };
@@ -89,10 +99,11 @@ function BuildIndexPanel({ onDone }: { onDone: () => void }) {
     <div className="flex flex-col items-center justify-center py-24 gap-5 text-center">
       <Database size={48} className="text-slate-200" />
       <div>
-        <p className="text-base font-semibold text-slate-700">Catalogue index not built yet</p>
-        <p className="text-sm text-slate-400 mt-1 max-w-sm">
-          Extract all PDF catalogues to build the part master. This scans every
-          PDF in the catalogue library and may take a few minutes.
+        <p className="text-base font-semibold text-slate-700">Part master not built yet</p>
+        <p className="text-sm text-slate-400 mt-1 max-w-md">
+          Reads every PDF catalogue through the AI agent (runs once, then cached),
+          aggregates unique part numbers and their compatible models, and builds
+          the cross-catalogue part master.
         </p>
       </div>
       <button
@@ -101,9 +112,14 @@ function BuildIndexPanel({ onDone }: { onDone: () => void }) {
         className="flex items-center gap-2 px-6 py-2.5 rounded-lg bg-brand-blue text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
         {running
-          ? <><Loader2 size={15} className="animate-spin" /> Extracting…</>
-          : <><Play size={15} /> Build Index from All PDFs</>}
+          ? <><Loader2 size={15} className="animate-spin" /> Building…</>
+          : <><Play size={15} /> Build Part Master from All PDFs</>}
       </button>
+      {status?.running && (
+        <p className="text-xs text-slate-400">
+          Running agent on unprocessed PDFs — this may take several minutes…
+        </p>
+      )}
       {status?.last_result && !status.last_result.ok && (
         <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-4 py-2">
           <AlertTriangle size={14} /> {status.last_result.error}
@@ -116,12 +132,14 @@ function BuildIndexPanel({ onDone }: { onDone: () => void }) {
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export function PartMaster() {
-  const [data,      setData]      = useState<CatalogDerivedPartsData | null>(null);
-  const [search,    setSearch]    = useState("");
-  const [debSearch, setDebSearch] = useState("");
+  const [data,        setData]        = useState<CatalogDerivedPartsData | null>(null);
+  const [search,      setSearch]      = useState("");
+  const [debSearch,   setDebSearch]   = useState("");
   const [modelFilter, setModelFilter] = useState("");
-  const [loading,   setLoading]   = useState(true);
-  const [rebuilding, setRebuilding] = useState(false);
+  const [kindFilter,  setKindFilter]  = useState<"" | "shared" | "colour_specific">("");
+  const [loading,     setLoading]     = useState(true);
+  const [rebuilding,  setRebuilding]  = useState(false);
+  const [rebuildStatus, setRebuildStatus] = useState<PartMasterRebuildStatus | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(() => {
@@ -139,7 +157,7 @@ export function PartMaster() {
     return () => clearTimeout(t);
   }, [search]);
 
-  // Client-side filtering (fast for ≤10k rows)
+  // Client-side filtering
   const filtered: CatalogDerivedPartRow[] = (data?.rows ?? []).filter(r => {
     const q = debSearch.toLowerCase();
     const okSearch = !q
@@ -147,18 +165,21 @@ export function PartMaster() {
       || r.description.toLowerCase().includes(q);
     const okModel = !modelFilter
       || r.compatible_models.toLowerCase().includes(modelFilter.toLowerCase());
-    return okSearch && okModel;
+    const okKind = !kindFilter || r.kind === kindFilter;
+    return okSearch && okModel && okKind;
   });
 
-  // Rebuild flow
+  // Rebuild flow — reads agent builds and aggregates
   const handleRebuild = async () => {
     setRebuilding(true);
-    await runBatchExtraction();
+    await rebuildPartMaster(true);
     pollRef.current = setInterval(async () => {
-      const s = await fetchExtractionStatus();
+      const s = await fetchPartMasterStatus();
+      setRebuildStatus(s);
       if (!s.running) {
         clearInterval(pollRef.current!);
         setRebuilding(false);
+        setRebuildStatus(null);
         load();
       }
     }, 3000);
@@ -172,7 +193,7 @@ export function PartMaster() {
         <div className="space-y-2 mb-6">
           <h2 className="text-xl font-bold text-slate-800">Part Master</h2>
           <p className="text-xs text-slate-500">
-            Derived from PDF catalogues · unique parts across all models
+            Derived from PDF catalogues via AI agent · unique parts across all models
           </p>
         </div>
         <div className="bg-white rounded-xl shadow-sm p-8">
@@ -191,21 +212,33 @@ export function PartMaster() {
             <h2 className="text-xl font-bold text-slate-800">Part Master</h2>
             <p className="text-xs text-slate-500 mt-0.5">
               {data
-                ? `${data.total.toLocaleString()} unique part numbers across ${data.total_models} models · sourced from PDF catalogues`
+                ? `${data.total.toLocaleString()} unique part numbers · ${data.total_models} models · ${data.agent_master ? "AI-agent catalogue index" : "legacy index"}`
                 : "Loading…"}
             </p>
           </div>
           <button
             onClick={handleRebuild}
             disabled={rebuilding || loading}
-            title="Re-extract all PDFs and rebuild the index"
+            title="Run agent on all unprocessed PDFs then rebuild the part master"
             className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-40 transition-colors"
           >
             {rebuilding
               ? <><Loader2 size={12} className="animate-spin" /> Rebuilding…</>
-              : <><RefreshCw size={12} /> Rebuild Index</>}
+              : <><RefreshCw size={12} /> Rebuild from All PDFs</>}
           </button>
         </div>
+
+        {/* Rebuild progress banner */}
+        {rebuilding && rebuildStatus && (
+          <div className="flex items-center gap-3 px-4 py-3 bg-blue-50 border border-blue-100 rounded-xl text-sm text-blue-700">
+            <Loader2 size={15} className="animate-spin shrink-0" />
+            <span>
+              Processing PDFs — {rebuildStatus.cached_pdfs} cached so far.
+              {rebuildStatus.last_result?.agents_run != null &&
+                ` ${rebuildStatus.last_result.agents_run} new agents run.`}
+            </span>
+          </div>
+        )}
 
         {/* KPI row */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -217,7 +250,7 @@ export function PartMaster() {
           <Kpi
             label="Models Covered"
             value={loading ? "…" : (data?.total_models ?? 0).toString()}
-            sub="catalogue folders indexed"
+            sub="catalogue models indexed"
           />
           <Kpi
             label="Showing"
@@ -225,9 +258,9 @@ export function PartMaster() {
             sub="after current filters"
           />
           <Kpi
-            label="Index Status"
-            value={data?.indexed ? "Ready" : "Not built"}
-            sub={data?.indexed ? "catalogue index up to date" : "click Rebuild Index"}
+            label="Index"
+            value={data?.agent_master ? "AI Agent" : data?.indexed ? "Legacy" : "Not built"}
+            sub={data?.agent_master ? "agent-derived, full variant detail" : data?.indexed ? "basic extraction" : "click Rebuild"}
           />
         </div>
 
@@ -262,6 +295,16 @@ export function PartMaster() {
               ))}
             </select>
 
+            <select
+              value={kindFilter}
+              onChange={e => setKindFilter(e.target.value as "" | "shared" | "colour_specific")}
+              className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue/30 bg-white"
+            >
+              <option value="">All Types</option>
+              <option value="shared">Shared (universal)</option>
+              <option value="colour_specific">Colour-specific</option>
+            </select>
+
             <span className="text-xs text-slate-400 ml-auto">
               {filtered.length.toLocaleString()} part{filtered.length !== 1 ? "s" : ""}
             </span>
@@ -283,7 +326,7 @@ export function PartMaster() {
               <table className="w-full text-sm border-collapse">
                 <thead className="sticky top-0 z-10">
                   <tr style={{ background: "#1B3A6B" }}>
-                    {["Part No.", "Description", "Compatible Models", "Sources"].map(h => (
+                    {["Part No.", "Description", "Kind", "Compatible Models", "Variants"].map(h => (
                       <th key={h}
                         className="py-2.5 px-3 text-left text-xs font-bold text-white whitespace-nowrap border-r border-blue-800 last:border-r-0">
                         {h}
@@ -297,14 +340,21 @@ export function PartMaster() {
                       <td className="py-2 px-3 border-b border-slate-100 font-mono text-xs text-slate-700 whitespace-nowrap">
                         {r.part_no}
                       </td>
-                      <td className="py-2 px-3 border-b border-slate-100 text-slate-700 max-w-[280px]">
+                      <td className="py-2 px-3 border-b border-slate-100 text-slate-700 max-w-[300px]">
                         <span title={r.description}>{r.description || <span className="text-slate-300">—</span>}</span>
+                      </td>
+                      <td className="py-2 px-3 border-b border-slate-100 whitespace-nowrap">
+                        {r.kind === "colour_specific" ? (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold bg-amber-100 text-amber-700">Colour</span>
+                        ) : (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold bg-emerald-100 text-emerald-700">Shared</span>
+                        )}
                       </td>
                       <td className="py-2 px-3 border-b border-slate-100">
                         <ModelBadges models={r.compatible_models} />
                       </td>
                       <td className="py-2 px-3 border-b border-slate-100 text-center text-xs text-slate-400">
-                        {r.source_count}
+                        {r.variant_count}
                       </td>
                     </tr>
                   ))}
@@ -313,11 +363,15 @@ export function PartMaster() {
             </div>
           )}
 
-          {/* Index status footer */}
+          {/* Footer */}
           {data?.indexed && (
-            <div className="flex items-center gap-2 text-xs text-green-600">
-              <CheckCircle2 size={12} />
-              Index built · {data.total.toLocaleString()} unique parts from {data.total_models} model catalogues
+            <div className="flex items-center gap-2 text-xs text-slate-400">
+              {data.agent_master
+                ? <><CheckCircle2 size={12} className="text-emerald-500" />
+                    AI-agent part master · {data.total.toLocaleString()} unique parts from {data.total_models} models</>
+                : <><Layers size={12} className="text-slate-300" />
+                    Legacy extraction index · rebuild to get full variant detail</>
+              }
             </div>
           )}
         </div>

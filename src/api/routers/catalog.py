@@ -19,6 +19,9 @@ from src.models.master_data.pdf_catalogue_extractor import (
     DISPLAY_HEADERS, YamahaCatalogueExtractor,
 )
 from src.models.master_data.catalogue_agent import CatalogueAgent
+from src.models.master_data.catalogue_part_master import (
+    build_part_master, load_part_master,
+)
 
 PDF_ROOT   = Path("data/raw/pdf_catalogues").resolve()
 PDF_EXTS   = {".pdf", ".PDF"}
@@ -419,3 +422,114 @@ def clear_agent_cache(file_path: str) -> dict[str, str]:
         cache.unlink()
         return {"status": "cleared", "path": str(cache)}
     return {"status": "not_cached"}
+
+
+# ---------------------------------------------------------------------------
+# Part-master rebuild from agent builds
+# ---------------------------------------------------------------------------
+
+_PM_STATUS: dict[str, Any] = {
+    "running": False,
+    "last_result": None,
+}
+
+
+def _run_part_master_rebuild(run_missing_agents: bool) -> None:
+    """Background task: optionally run agent on unprocessed PDFs, then build master."""
+    _PM_STATUS["running"] = True
+    _PM_STATUS["last_result"] = None
+    processed: list[str] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+
+    try:
+        # ── 1. Run agent on PDFs that have no cached build ─────────────────
+        if run_missing_agents and PDF_ROOT.exists():
+            agent = CatalogueAgent(max_pages=500)
+            for pdf_path in sorted(PDF_ROOT.rglob("*")):
+                if pdf_path.suffix not in PDF_EXTS or not pdf_path.is_file():
+                    continue
+                rel = pdf_path.relative_to(PDF_ROOT).as_posix()
+                cache = _cache_path(rel)
+                if cache.exists():
+                    skipped.append(pdf_path.name)
+                    continue
+                try:
+                    result = agent.run(pdf_path)
+                    out = result.to_dict()
+                    AGENT_CACHE.mkdir(parents=True, exist_ok=True)
+                    cache.write_text(
+                        __import__("json").dumps(out, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    processed.append(pdf_path.name)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{pdf_path.name}: {exc}")
+
+        # ── 2. Build part master — agent JSONs + extractor fallback ────────
+        df = build_part_master(pdf_root=PDF_ROOT)
+
+        _PM_STATUS["last_result"] = {
+            "ok": True,
+            "total_parts":     len(df),
+            "total_pdfs":      len(list(AGENT_CACHE.glob("*.json"))),
+            "agents_run":      len(processed),
+            "agents_skipped":  len(skipped),
+            "agent_errors":    errors,
+        }
+    except Exception as exc:  # noqa: BLE001
+        _PM_STATUS["last_result"] = {"ok": False, "error": str(exc)}
+    finally:
+        _PM_STATUS["running"] = False
+
+
+@router.post("/part-master/rebuild")
+def rebuild_part_master(
+    background_tasks: BackgroundTasks,
+    run_missing_agents: bool = Query(
+        True,
+        description=(
+            "If true, run the CatalogueAgent on any PDFs that do not yet have "
+            "a cached build before aggregating."
+        ),
+    ),
+) -> dict[str, Any]:
+    """Rebuild the catalogue part master from all agent build caches.
+
+    Scans every PDF in data/raw/pdf_catalogues/:
+    - If ``run_missing_agents=true`` (default): runs CatalogueAgent on PDFs
+      that have no cached JSON yet (may take several minutes per PDF).
+    - Aggregates all cached build JSONs into a unified part master:
+        data/interim/catalogue_part_master.parquet
+        data/outputs/catalogue_part_master.xlsx
+
+    Poll ``GET /catalog/part-master/status`` for progress.
+    """
+    if _PM_STATUS["running"]:
+        return {"queued": False, "message": "Rebuild already running"}
+
+    background_tasks.add_task(_run_part_master_rebuild, run_missing_agents)
+    return {
+        "queued": True,
+        "message": (
+            "Part master rebuild started — agents will run on unprocessed PDFs "
+            "then aggregate all builds."
+            if run_missing_agents
+            else "Aggregating existing agent builds into part master."
+        ),
+    }
+
+
+@router.get("/part-master/status")
+def part_master_status() -> dict[str, Any]:
+    """Return the status of the last part master rebuild."""
+    pm_parquet = Path("data/interim/catalogue_part_master.parquet").resolve()
+    return {
+        "running":       _PM_STATUS["running"],
+        "last_result":   _PM_STATUS["last_result"],
+        "parquet_exists": pm_parquet.exists(),
+        "parquet_size_kb": (
+            round(pm_parquet.stat().st_size / 1024, 1) if pm_parquet.exists() else 0
+        ),
+        "cached_pdfs": len(list(AGENT_CACHE.glob("*.json"))),
+    }
