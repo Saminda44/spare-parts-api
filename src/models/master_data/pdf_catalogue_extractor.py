@@ -232,7 +232,10 @@ class ExtractionResult:
     colour_codes:      list[dict] = field(default_factory=list)
     # available_colours: captions from "AVAILABLE COLOUR" page, e.g.
     # ["Yamaha Alpha Cygnus Black", "Yamaha Alpha Cygnus Cyan"]
-    available_colours: list[str] = field(default_factory=list)
+    available_colours:    list[str] = field(default_factory=list)
+    # available_colour_map: populated by CatalogueAgent after web/PDF colour matching;
+    # empty when result comes directly from the extractor without agent post-processing.
+    available_colour_map: dict[str, str] = field(default_factory=dict)
     manufacture_year:  str | None = None   # e.g. "2019" from ©2019 on the cover page
     warnings:          list[str] = field(default_factory=list)
     error:             str | None = None
@@ -408,16 +411,23 @@ class YamahaCatalogueExtractor:
         self,
         pdf_root: Path,
         save_path: Path | None = None,
+        max_workers: int = 4,
     ) -> pd.DataFrame:
         """Batch-extract every PDF under pdf_root and return a merged DataFrame.
 
+        Uses parallel extraction (ThreadPoolExecutor) to process multiple PDFs
+        concurrently, improving throughput for large batches.
+
         Args:
-            pdf_root:  Root folder containing model sub-directories.
-            save_path: Optional path to write the result as Parquet.
+            pdf_root:    Root folder containing model sub-directories.
+            save_path:   Optional path to write the result as Parquet.
+            max_workers: Maximum concurrent workers for parallel extraction (default 4).
 
         Returns:
             DataFrame with COLUMNS + ["model", "source_file"] columns.
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         all_dfs: list[pd.DataFrame] = []
 
         # Use case-insensitive .pdf suffix to avoid double-counting on Windows
@@ -426,27 +436,80 @@ class YamahaCatalogueExtractor:
             key=lambda p: (p.parent.name.upper(), p.name.upper()),
         )
 
-        for pdf_file in pdf_files:
-            # Derive model name from direct parent folder
+        if not pdf_files:
+            empty = pd.DataFrame(
+                columns=COLUMNS + ["model", "source_file", "ocr_used"]
+            )
+            if save_path:
+                empty.to_parquet(save_path, index=False)
+            return empty
+
+        logger.info(f"extract_all: {len(pdf_files)} PDFs, {max_workers} workers")
+
+        def extract_one(pdf_file: Path) -> tuple[Path, str, pd.DataFrame | None]:
+            """Extract one PDF, returning (path, model_name, dataframe or None)."""
             model_name = pdf_file.parent.name
-            logger.info(f"Extracting [{model_name}] {pdf_file.name}")
+            try:
+                logger.info(f"Extracting [{model_name}] {pdf_file.name}")
+                result = self.extract(pdf_file, model=model_name)
+                logger.debug(result.summary())
 
-            result = self.extract(pdf_file, model=model_name)
-            logger.debug(result.summary())
+                if result.error:
+                    logger.error(f"  → skipped: {result.error}")
+                    return (pdf_file, model_name, None)
 
-            if result.error:
-                logger.error(f"  → skipped: {result.error}")
-                continue
+                if not result.rows:
+                    logger.warning(f"  → no rows extracted")
+                    return (pdf_file, model_name, None)
 
-            if not result.rows:
-                logger.warning(f"  → no rows extracted")
-                continue
+                df = result.df.copy()
+                df["model"] = model_name
+                df["source_file"] = pdf_file.name
+                df["ocr_used"] = False
+                return (pdf_file, model_name, df)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"Extract failed for {pdf_file}: {exc}")
+                return (pdf_file, model_name, None)
 
-            df = result.df.copy()
-            df["model"] = model_name
-            df["source_file"] = pdf_file.name
-            df["ocr_used"] = False
-            all_dfs.append(df)
+        # Parallel extraction using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(extract_one, pf): pf for pf in pdf_files}
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                try:
+                    pdf_file, model_name, df = future.result()
+                    if df is not None:
+                        all_dfs.append(df)
+                    logger.debug(f"Completed {completed}/{len(pdf_files)}: {pdf_file.name}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(f"Future failed: {exc}")
+
+        if not all_dfs:
+            empty = pd.DataFrame(
+                columns=COLUMNS + ["model", "source_file", "ocr_used"]
+            )
+            if save_path:
+                empty.to_parquet(save_path, index=False)
+            return empty
+
+        merged = pd.concat(all_dfs, ignore_index=True)
+        merged = merged.drop_duplicates(
+            subset=["model", "source_file", "part_no", "ref_no", "fig_no"],
+        )
+
+        logger.info(
+            f"Extraction complete: {len(merged)} total rows | "
+            f"{merged['part_no'].nunique()} distinct part numbers | "
+            f"{merged['model'].nunique()} models"
+        )
+
+        if save_path:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            merged.to_parquet(save_path, index=False)
+            logger.info(f"Saved → {save_path}")
+
+        return merged
 
         if not all_dfs:
             empty = pd.DataFrame(
