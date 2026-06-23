@@ -1,7 +1,15 @@
 {
+  "model": "claude-sonnet-4-6",
   "permissions": {
     "allow": [
-      "PowerShell(Copy-Item \"c:\\\\Users\\\\Saminda\\\\Downloads\\\\awesome-claude-code-subagents-main\\\\skills and roles\\\\CLAUDE.md\" \"e:\\\\projects\\\\Inventory Optimization 3\\\\CLAUDE.md\")"
+      "Bash(pytest*)",
+      "Bash(ruff*)",
+      "Bash(mypy*)",
+      "Bash(python -m scripts.*)",
+      "Bash(python -m pytest*)",
+      "Bash(uvicorn*)",
+      "PowerShell(Get-ChildItem*)",
+      "PowerShell(.venv\\Scripts\\python.exe*)"
     ]
   }
 }

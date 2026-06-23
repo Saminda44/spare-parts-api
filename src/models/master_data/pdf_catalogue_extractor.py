@@ -794,10 +794,13 @@ class YamahaCatalogueExtractor:
             if _COPYRIGHT_PAT.search(" ".join(texts)):
                 return None
 
-            # Format B: VariantCode-ColourName, e.g. "2SP3-Gold", "BP16-Cyan".
+            # Format B: VariantCode-ColourName, e.g. "2SP3-Gold", "BP16-Cyan", "5YY6-Dark Blue Pearl".
+            # Also handles: "BP16_Cyan Metallic" (underscore variant), "2SP3-Black-Pearl" (hyphenated colours).
             # Tried FIRST: the full token "2SP3-Gold" is a single word that isn't
             # itself a colour noun, so all downstream checks would wrongly reject it.
+            joined_first = " ".join(texts)
             m = _VARIANT_CODE_PREFIX_PAT.match(texts[0])
+
             # Guard: real variant codes (2SP3, BP16) always contain a digit.
             # Plain hyphenated English words (NON-METALLIC, MID-BLUE) must not
             # be mistaken for variant codes and have their suffix returned.
@@ -806,6 +809,20 @@ class YamahaCatalogueExtractor:
                 if any(w.lower() in _CAPTION_COLOUR_NOUNS for w in colour_part.split()):
                     return colour_part
                 return None  # variant-code token but no colour → not a caption
+
+            # Format B variant: variant code with underscore instead of hyphen, e.g. "BP16_Cyan Metallic"
+            # Also multi-word colour after dash: "5YY6-Dark Blue Pearl" (dash in first word)
+            if "_" in texts[0] or ("-" in texts[0] and re.match(r'^[A-Z0-9]{2,6}-', texts[0])):
+                # Split on underscore or dash
+                variant_and_colour = re.split(r'[_-]', texts[0], maxsplit=1)
+                if len(variant_and_colour) == 2:
+                    variant_code, colour_start = variant_and_colour
+                    if any(c.isdigit() for c in variant_code) and variant_code.upper() != "YAMAHA":
+                        # Reconstruct: colour_start + remaining words
+                        colour_part = " ".join([colour_start] + texts[1:]).strip()
+                        if any(w.lower() in _CAPTION_COLOUR_NOUNS for w in colour_part.split()):
+                            return colour_part
+                        return None
 
             # Reject figure/code-reference prefixes: "FO/90", "1X/33/P1" etc.
             if '/' in texts[0]:
