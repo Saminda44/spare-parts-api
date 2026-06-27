@@ -124,11 +124,12 @@ def load_orders(dealers: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     logger.info(f"    MC lines: {mc_lines:,}  OBM lines: {obm_lines:,}")
 
     # ── Derived columns ─────────────────────────────────────────
-    raw["lead_time_days"] = (raw["Goods Issue Date"] - raw["Created On"]).dt.days
-    raw["lost_qty"]       = raw["Confirmed Quantity (Item)"] - raw["Order Quantity (Item)"]
-    raw["fill_rate"]      = (
+    raw["lead_time_days"]  = (raw["Goods Issue Date"] - raw["Created On"]).dt.days
+    raw["lost_qty"]        = raw["Confirmed Quantity (Item)"] - raw["Order Quantity (Item)"]
+    raw["fill_rate"]       = (
         raw["Confirmed Quantity (Item)"] / raw["Order Quantity (Item)"].replace(0, np.nan)
     ).clip(0, 1)
+    raw["confirmed_value"] = raw["Net Price"] * raw["Confirmed Quantity (Item)"]
     raw["Year_Month"]     = raw["Created On"].dt.to_period("M")
     raw["Year_Month_str"] = raw["Created On"].dt.strftime("%Y-%m")
 
@@ -166,7 +167,7 @@ def summary_kpis(clean: pd.DataFrame, rejected: pd.DataFrame) -> dict:
         "Fully Rejected Lines" : len(rejected),
         "Unique Dealers"       : clean["Sold-to Party"].nunique(),
         "Unique Materials"     : clean["Material"].nunique(),
-        f"Total PO Value ({CURRENCY})": round(po["Net Value (Item)"].sum()),
+        f"Total PO Value ({CURRENCY})": round(po["confirmed_value"].sum()),
         "Overall Fill Rate %"  : round(total_confirmed / max(total_ordered, 1) * 100, 2),
         "Median Lead Time (days)": float(clean["lead_time_days"].median()),
         "Avg Lead Time (days)" : round(float(clean["lead_time_days"].mean()), 1),
@@ -183,7 +184,7 @@ def monthly_trend(clean: pd.DataFrame) -> pd.DataFrame:
             po_lines      = ("Sales Document", "count"),
             po_qty        = ("Order Quantity (Item)", "sum"),
             confirmed_qty = ("Confirmed Quantity (Item)", "sum"),
-            po_value      = ("Net Value (Item)", "sum"),
+            po_value      = ("confirmed_value", "sum"),
         )
         .reset_index()
     )
@@ -193,7 +194,7 @@ def monthly_trend(clean: pd.DataFrame) -> pd.DataFrame:
 
     ret_monthly = (
         ret.groupby("Year_Month_str")
-        .agg(return_lines=("Sales Document", "count"), return_value=("Net Value (Item)", "sum"))
+        .agg(return_lines=("Sales Document", "count"), return_value=("confirmed_value", "sum"))
         .reset_index()
     )
 
@@ -243,7 +244,7 @@ def fill_rate_by_dealer(clean: pd.DataFrame, dealer_names: pd.DataFrame) -> pd.D
             po_lines        = ("Sales Document", "count"),
             total_ordered   = ("Order Quantity (Item)", "sum"),
             total_confirmed = ("Confirmed Quantity (Item)", "sum"),
-            total_value     = ("Net Value (Item)", "sum"),
+            total_value     = ("confirmed_value", "sum"),
         )
         .reset_index()
         .rename(columns={"Sold-To Party Name": "Dealer Name"})
@@ -260,7 +261,7 @@ def returns_analysis(clean: pd.DataFrame) -> pd.DataFrame:
         .agg(
             return_lines = ("Sales Document", "count"),
             return_qty   = ("Order Quantity (Item)", "sum"),
-            return_value = ("Net Value (Item)", "sum"),
+            return_value = ("confirmed_value", "sum"),
         )
         .reset_index()
     )
@@ -274,7 +275,7 @@ def top_materials_by_value(clean: pd.DataFrame, top_n: int = 50) -> pd.DataFrame
         po.groupby(["Material", "Material Description"]).agg(
             total_lines     = ("Sales Document", "count"),
             total_qty       = ("Confirmed Quantity (Item)", "sum"),
-            total_value     = ("Net Value (Item)", "sum"),
+            total_value     = ("confirmed_value", "sum"),
         )
         .reset_index()
     )

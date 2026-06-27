@@ -60,7 +60,7 @@ def get_orders_eda(
     if dealer_col:
         dealer_grp = (
             orders[po_mask].groupby(dealer_col)
-            .agg(order_count=("doc_type", "count"), total_value=("Net Value (Item)", "sum"))
+            .agg(order_count=("doc_type", "count"), total_value=("confirmed_value", "sum"))
             .sort_values("order_count", ascending=False)
             .head(10)
             .reset_index()
@@ -78,7 +78,7 @@ def get_orders_eda(
         grp = (
             orders.groupby(["Year_Month_str", "doc_type"]).agg(
                 cnt=("doc_type", "count"),
-                val=("Net Value (Item)", "sum"),
+                val=("confirmed_value", "sum"),
             ).reset_index()
         )
         periods = sorted(grp["Year_Month_str"].unique())
