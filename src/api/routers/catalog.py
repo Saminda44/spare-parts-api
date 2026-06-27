@@ -153,6 +153,14 @@ def extract_pdf_tables(
         "sections_found":   result.sections_found,
         "ocr_flagged":      result.ocr_flagged,
         "warnings":         result.warnings,
+        # NEW: Colour matching metadata for debugging
+        "colour_extraction_metadata": {
+            "source": "pdf_cover" if result.available_colours else "agent_web",
+            "unmapped_count": len(result.available_colours or []) - len(result.available_colour_map),
+            "total_available": len(result.available_colours or []),
+            "matched_count": len(result.available_colour_map),
+            "has_warnings": any("colour" in w.lower() or "unmapped" in w.lower() for w in result.warnings),
+        },
     }
 
 

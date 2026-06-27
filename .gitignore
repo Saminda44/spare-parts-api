@@ -54,6 +54,8 @@ Thumbs.db
 # Background task log files
 api_err.txt
 api_out.txt
+fe_err.txt
+fe_out.txt
 frontend/api_err.txt
 frontend/api_out.txt
 frontend/dev_err.txt

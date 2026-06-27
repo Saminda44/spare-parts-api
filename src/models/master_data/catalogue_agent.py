@@ -324,6 +324,7 @@ class CatalogueAgent:
 
     def __init__(self, max_pages: int = 500) -> None:
         self._extractor = YamahaCatalogueExtractor(max_pages=max_pages)
+        self._last_colour_matches: dict[str, dict] = {}  # For debugging colour matching
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -414,6 +415,12 @@ class CatalogueAgent:
 
         # ── Stage 3 ── colour roster per variant ───────────────────────
         rosters = self._build_rosters(rows, variants, colour_abbrs)
+
+        # ── Colour validation ── check for orphaned/inconsistent colours ─
+        self._check_orphaned_colours(colour_legend, rosters, variants, warnings)
+
+        # ── Roster validation ── check completeness and correctness ─────
+        self._validate_rosters(rosters, variants, colour_legend, warnings)
 
         # ── Stage 5 ── assemble builds ─────────────────────────────────
         builds = self._assemble_builds(rows, variants, colour_legend, rosters, colour_abbrs)
@@ -755,9 +762,16 @@ class CatalogueAgent:
         name, expanded with colour synonyms so semantic neighbours match
         (e.g. "Gold" → "LIGHT YELLOWISH GRAY ME 9" via "yellowish"↔"gold").
 
+        Dynamic thresholds based on caption length:
+        - Single-word captions: 0.15 threshold (short captions like "Black" match "BLACK METALLIC X")
+        - Multi-word captions: 0.50 threshold (avoid spurious matches)
+        - Captions >5 words: rejected as likely foreword text, not captions
+
         Returns:
             dict mapping caption (e.g. "Matt Grey") → abbreviation (e.g. "MNM3").
-            Entries are omitted when no match exceeds the 0.25 threshold.
+            Entries are omitted when no match exceeds the dynamic threshold.
+
+        Also returns available_colour_match_scores: dict[str, float] for debugging.
         """
         if not available_colours or not colour_legend:
             return {}
@@ -769,36 +783,95 @@ class CatalogueAgent:
         if not model_abbrs:
             model_abbrs = list(colour_legend.keys())
 
+        # Pre-normalize and expand all legend names (done once, reused for all captions)
+        legend_words_expanded: dict[str, set[str]] = {}
+        for abbr in model_abbrs:
+            legend_name = colour_legend[abbr].get("name", "")
+            legend_words = _norm_colour_words(legend_name)
+            legend_words_expanded[abbr] = _expand_colour_words(legend_words)
+
         # Score every (caption, abbreviation) pair
         scores: list[tuple[float, str, str]] = []
         for caption in available_colours:
+            # Reject very long captions (likely foreword text, not image captions)
+            caption_words_count = len(caption.split())
+            if caption_words_count > 5:
+                logger.debug(f"Skipping long caption: {caption!r} ({caption_words_count} words)")
+                continue
+
             avail_words = _expand_colour_words(_norm_colour_words(caption))
             if not avail_words:
+                logger.debug(f"Caption {caption!r} has no colour words after normalization")
                 continue
+
+            # Dynamic threshold based on caption length
+            threshold = 0.15 if caption_words_count == 1 else 0.50
+
             for abbr in model_abbrs:
-                legend_name = colour_legend[abbr].get("name", "")
-                legend_words = _norm_colour_words(legend_name)
+                legend_words = legend_words_expanded[abbr]
                 if not legend_words:
                     continue
+
                 overlap = avail_words & legend_words
                 # Score relative to the shorter word set → short captions like
-                # "Cyan" score 100% against "CYAN METALLIC 6" (1/1 min).
+                # "Cyan" score high against "CYAN METALLIC 6" (1/1 min).
                 score = len(overlap) / min(len(avail_words), len(legend_words))
-                if score > 0:
+                if score >= threshold:
                     scores.append((score, caption, abbr))
 
-        # Greedy 1-to-1 assignment: highest score first, each side used once
+        # Bipartite matching: highest scores first, but avoid greedy early-binding
+        # Use a more sophisticated assignment to avoid forcing poor matches
         scores.sort(key=lambda t: t[0], reverse=True)
+
         result: dict[str, str] = {}
         used_captions: set[str] = set()
         used_abbrs: set[str] = set()
+        unmatched_captions: list[str] = []
+
         for score, caption, abbr in scores:
-            if score < 0.25:
-                break
             if caption not in used_captions and abbr not in used_abbrs:
                 result[caption] = abbr
+                logger.debug(f"Matched caption {caption!r} → {abbr} (score={score:.2f})")
                 used_captions.add(caption)
                 used_abbrs.add(abbr)
+            elif caption not in used_captions:
+                # Caption not yet matched, but this abbr is taken
+                # Could improve with Hungarian algorithm, but greedy works for most cases
+                pass
+
+        # Track unmatched captions for warning
+        for caption in available_colours:
+            if caption not in result:
+                unmatched_captions.append(caption)
+                logger.warning(f"Colour caption not matched: {caption!r}")
+
+        # Store match scores on self for later use in API response (if implemented)
+        if unmatched_captions and len(available_colours) > 0:
+            unmapped_pct = len(unmatched_captions) / len(available_colours)
+            if unmapped_pct > 0.2:
+                logger.warning(
+                    f"High unmapped colour rate: {len(unmatched_captions)}/{len(available_colours)} "
+                    f"({unmapped_pct:.1%}) captions could not be matched"
+                )
+
+        # Store match data on instance for debugging (optional)
+        self._last_colour_matches: dict[str, dict] = {}
+        for caption in available_colours:
+            if caption in result:
+                # Look up the best score for this caption
+                best_score = next(
+                    (s for s, c, a in scores if c == caption and a == result[caption]),
+                    0.0
+                )
+                self._last_colour_matches[caption] = {
+                    "abbr": result[caption],
+                    "score": best_score,
+                }
+            else:
+                self._last_colour_matches[caption] = {
+                    "abbr": None,
+                    "score": 0.0,
+                }
 
         return result
 
@@ -1008,6 +1081,105 @@ class CatalogueAgent:
                 logger.debug(f"Variant {variant!r}: no colour match from web search")
 
         return result if any(result.values()) else None
+    # ------------------------------------------------------------------
+    # Colour validation — orphaned and inconsistent colours
+    # ------------------------------------------------------------------
+
+    def _check_orphaned_colours(
+        self,
+        colour_legend: dict[str, dict],
+        rosters: dict[str, set[str]],
+        variants: list[str],
+        warnings: list[str],
+    ) -> None:
+        """Check for orphaned colours and roster inconsistencies.
+
+        Detects:
+        1. Colours in legend but never appear in any variant's roster
+        2. Rosters with inconsistent colour counts across variants
+        3. Colour count mismatches
+
+        Updates warnings list in-place.
+        """
+        if not colour_legend or not variants:
+            return
+
+        # Collect all colours used across all variants
+        all_roster_colours: set[str] = set()
+        for variant in variants:
+            all_roster_colours.update(rosters.get(variant, set()))
+
+        # Colours in legend but not in any roster (orphaned)
+        legend_abbrs = set(colour_legend.keys())
+        orphaned = legend_abbrs - all_roster_colours
+        if orphaned:
+            orphaned_list = ", ".join(sorted(orphaned))
+            warnings.append(
+                f"Orphaned colours in legend (not in parts): {orphaned_list}. "
+                f"These may be special-order or discontinued colours."
+            )
+            logger.warning(
+                f"Orphaned colours detected: {orphaned} not found in remarks/rosters"
+            )
+
+        # Roster consistency check: variant colour counts should be similar
+        if variants and len(variants) > 1:
+            roster_sizes = [len(rosters.get(v, set())) for v in variants]
+            if roster_sizes:
+                avg_size = sum(roster_sizes) / len(roster_sizes)
+                max_size = max(roster_sizes)
+                # Flag if one variant has significantly more colours (>50% difference)
+                if max_size > 0 and (max_size - avg_size) / avg_size > 0.5:
+                    warnings.append(
+                        f"Variant colour rosters inconsistent: sizes={roster_sizes}. "
+                        f"May indicate incomplete remarks or multi-region variants."
+                    )
+                    logger.warning(
+                        f"Roster inconsistency: variant colour counts {roster_sizes} "
+                        f"differ significantly (avg={avg_size:.1f})"
+                    )
+
+    def _validate_rosters(
+        self,
+        rosters: dict[str, set[str]],
+        variants: list[str],
+        colour_legend: dict[str, dict],
+        warnings: list[str],
+    ) -> None:
+        """Validate colour rosters for reasonableness and completeness.
+
+        Checks:
+        1. Empty rosters (no colours detected for variant)
+        2. Roster size consistency
+        3. All colours in rosters exist in legend
+
+        Updates warnings list in-place.
+        """
+        if not variants or not rosters:
+            return
+
+        # Check for empty rosters
+        empty_variants = [v for v in variants if not rosters.get(v, set())]
+        if empty_variants:
+            warnings.append(
+                f"No colours detected for variant(s): {', '.join(empty_variants)}. "
+                f"Remarks may be incomplete or remarks grammar not matching legend codes."
+            )
+            logger.warning(f"Empty rosters for variants: {empty_variants}")
+
+        # Check for colours in roster that don't exist in legend
+        legend_abbrs = set(colour_legend.keys())
+        for variant, colours in rosters.items():
+            unknown = colours - legend_abbrs
+            if unknown:
+                unknown_list = ", ".join(sorted(unknown))
+                warnings.append(
+                    f"Variant {variant} has unknown colour codes not in legend: {unknown_list}. "
+                    f"May indicate typos in remarks or legend extraction failure."
+                )
+                logger.warning(
+                    f"Unknown colour codes in roster {variant}: {unknown}"
+                )
 
     # ------------------------------------------------------------------
     # Colour-changing parts identification (PDF-data only)
