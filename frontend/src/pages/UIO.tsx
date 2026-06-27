@@ -47,7 +47,7 @@ export function UIO() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
                 <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={fmt}/>
                 <YAxis type="category" dataKey="name" tick={{ fontSize: 9 }} width={170}/>
-                <Tooltip formatter={(v: unknown, n: string) => [Number(v).toLocaleString(), n === "uio" ? "UIO" : "Total Sales"]}/>
+                <Tooltip formatter={(v: unknown, n: unknown) => [Number(v).toLocaleString(), n === "uio" ? "UIO" : "Total Sales"]}/>
                 <Legend/>
                 <Bar dataKey="uio"   fill="#7C3AED" name="UIO"         radius={[0, 3, 3, 0]}/>
                 <Bar dataKey="sales" fill="#E2D9F3" name="Total Sales" radius={[0, 3, 3, 0]}/>

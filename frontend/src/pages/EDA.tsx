@@ -6,6 +6,7 @@ import {
 import {
   fetchOrdersEda, fetchSalesEda, fetchMovements, fetchSparePartsEda,
   type OrdersEdaData, type SalesEdaData, type MovementsData, type SparePartsEdaData,
+  type DealerType, type McCategoryType,
 } from "../api/client";
 import { KpiCard } from "../components/KpiCard";
 import { TimePicker, filterByRange, type TimeRange, YearPicker, filterByYear, getYears, monthLabel } from "../components/TimePicker";
@@ -16,6 +17,8 @@ const CLASS_COLOR: Record<string, string> = {
   return: "#7C3AED", receipt_rev: "#06B6D4",
 };
 const CAT_COLORS = ["#EF4444","#F97316","#FFC107","#4361EE","#2CC56F","#7C3AED","#94A3B8"];
+// MC – Lubricant, Battery, Tyre, Spare Parts, OBM
+const SEG_PALETTE = ["#F97316","#3B82F6","#22C55E","#8B5CF6","#06B6D4"];
 
 function fmt(n: number) {
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
@@ -25,31 +28,50 @@ function fmt(n: number) {
 }
 
 type Tab = "orders" | "sales" | "movements" | "spare";
+type OrdersView = "analysis" | "performance";
+type OrdersAnalysisSeg = "parts" | "geography";
 
 export function EDA() {
   const [ordersData,  setOrdersData]  = useState<OrdersEdaData | null>(null);
   const [salesData,   setSalesData]   = useState<SalesEdaData | null>(null);
   const [movData,     setMovData]     = useState<MovementsData | null>(null);
   const [spareData,   setSpareData]   = useState<SparePartsEdaData | null>(null);
-  const [tab,         setTab]         = useState<Tab>("orders");
-  const [ordersYear,  setOrdersYear]  = useState<number | "All">("All");
-  const [ordersRange, setOrdersRange] = useState<TimeRange>("YTD");
-  const [salesYear,   setSalesYear]   = useState<number | "All">("All");
+  const [tab,             setTab]             = useState<Tab>("orders");
+  const [ordersDt,        setOrdersDt]        = useState<DealerType>("MC");
+  const [ordersMcCat,     setOrdersMcCat]     = useState<McCategoryType>("ALL");
+  const [ordersYear,      setOrdersYear]      = useState<number | "All">("All");
+  const [ordersRange,     setOrdersRange]     = useState<TimeRange>("YTD");
+  const [ordersView,      setOrdersView]      = useState<OrdersView>("analysis");
+  const [ordersAnalysisSeg, setOrdersAnalysisSeg] = useState<OrdersAnalysisSeg>("parts");
+  const [salesDt,     setSalesDt]     = useState<DealerType>("MC");
+  const [salesMcCat,  setSalesMcCat]  = useState<string>("ALL");
+  const [salesYear,   setSalesYear]   = useState<number>(0);   // 0 = latest year (API resolves)
   const [salesRange,  setSalesRange]  = useState<TimeRange>("YTD");
+  const [salesView,   setSalesView]   = useState<"kpi" | "parts" | "dealers" | "hierarchy">("kpi");
   const [movYear,     setMovYear]     = useState<number | "All">("All");
   const [movRange,    setMovRange]    = useState<TimeRange>("YTD");
 
   useEffect(() => {
-    fetchOrdersEda("MC").then(d => {
+    fetchOrdersEda(ordersDt, ordersMcCat).then(d => {
+      setOrdersData(null);
       setOrdersData(d);
       const yrs = getYears(d.monthly_trend);
       if (yrs.length) setOrdersYear(yrs[0]);
     });
-    fetchSalesEda("MC").then(d => {
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ordersDt, ordersMcCat]);
+
+  useEffect(() => {
+    setSalesData(null);
+    fetchSalesEda(salesDt, salesMcCat, salesYear).then(d => {
       setSalesData(d);
-      const yrs = getYears(d.monthly_trend);
-      if (yrs.length) setSalesYear(yrs[0]);
+      // On first load (year=0) sync the picker to the year the API resolved
+      if (salesYear === 0 && d.data_year) setSalesYear(d.data_year);
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [salesDt, salesMcCat, salesYear]);
+
+  useEffect(() => {
     fetchMovements().then(d => {
       setMovData(d);
       const yrs = getYears(d.monthly_trend);
@@ -74,7 +96,7 @@ export function EDA() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <KpiCard label="Purchase Orders"  value={ordersData ? fmt(ordersData.total_po)    : "…"} color="blue"/>
         <KpiCard label="Avg Fill Rate"    value={ordersData ? `${(ordersData.avg_fill_rate*100).toFixed(1)}%` : "…"} sub={`${ordersData?.fill_rate_lt1_count ?? 0} lines short-shipped`} color="green"/>
-        <KpiCard label="Parts Revenue"    value={salesData  ? `LKR ${fmt(salesData.total_revenue_lkr)}` : "…"} color="purple"/>
+        <KpiCard label="Parts Revenue"    value={salesData  ? `LKR ${fmt(salesData.total_sale_value_lkr)}` : "…"} color="purple"/>
         <KpiCard label="Movement Records" value={movData    ? fmt(movData.total_records) : "…"} sub={movData ? `${movData.date_from} → ${movData.date_to}` : ""} color="teal"/>
       </div>
 
@@ -90,122 +112,630 @@ export function EDA() {
 
         {/* ── Orders EDA ── */}
         {tab === "orders" && (
-          ordersData ? (
-            <div className="space-y-5">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <KpiCard label="Total POs"       value={fmt(ordersData.total_po)}            color="blue"/>
-                <KpiCard label="Returns"          value={fmt(ordersData.total_returns)}        color="red"/>
-                <KpiCard label="Avg Fill Rate"    value={`${(ordersData.avg_fill_rate*100).toFixed(2)}%`} sub={`${ordersData.fill_rate_lt1_count} short-shipped`} color="green"/>
-                <KpiCard label="Avg Lead Time"    value={`${ordersData.avg_lead_time_days.toFixed(1)} days`} sub="Good issue − created" color="purple"/>
+          <div className="space-y-5">
+            {/* Segment selector */}
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide w-20">Segment</span>
+                {(["MC","OBM"] as DealerType[]).map(dt => (
+                  <button key={dt} onClick={() => { setOrdersDt(dt); setOrdersMcCat("ALL"); setOrdersView("analysis"); }}
+                    className={`px-3 py-1 text-xs rounded-lg font-semibold border transition-colors ${ordersView==="analysis" && ordersDt===dt ? "bg-brand-blue text-white border-brand-blue" : "border-slate-200 text-slate-500 hover:border-brand-blue"}`}>
+                    {dt === "MC" ? "MC Spare Parts" : "OBM Spare Parts"}
+                  </button>
+                ))}
+                <button onClick={() => setOrdersView("performance")}
+                  className={`px-3 py-1 text-xs rounded-lg font-semibold border transition-colors ${ordersView==="performance" ? "bg-brand-blue text-white border-brand-blue" : "border-slate-200 text-slate-500 hover:border-brand-blue"}`}>
+                  Performance
+                </button>
               </div>
+              {ordersView === "analysis" && ordersDt === "MC" && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide w-20">Category</span>
+                  {([
+                    { key: "ALL" as McCategoryType, label: "All MC" },
+                    { key: "Lubricant" as McCategoryType, label: "Lubricant" },
+                    { key: "Battery" as McCategoryType, label: "Battery" },
+                    { key: "Tyre" as McCategoryType, label: "Tyre" },
+                    { key: "SpareParts" as McCategoryType, label: "Spare Parts" },
+                  ]).map(({ key, label }) => (
+                    <button key={key} onClick={() => setOrdersMcCat(key)}
+                      className={`px-3 py-1 text-xs rounded-lg font-medium border transition-colors ${ordersMcCat===key ? "bg-slate-700 text-white border-slate-700" : "border-slate-200 text-slate-500 hover:border-slate-400"}`}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Monthly trend */}
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-sm font-semibold text-slate-700">Monthly Order Volume</h3>
-                    <div className="flex items-center gap-2">
-                      <YearPicker years={getYears(ordersData.monthly_trend)} value={ordersYear} onChange={setOrdersYear}/>
-                      <TimePicker value={ordersRange} onChange={setOrdersRange}/>
+          {ordersData ? (
+            <div className="space-y-5">
+              {ordersView === "analysis" && ordersDt === "MC" && ordersMcCat === "ALL" && (
+                <>
+                  {/* Row 1: Value KPIs — Order Received, Total Sales, Value Fill Rate */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <KpiCard label="Order Received"   value={`LKR ${fmt(ordersData.total_order_value_lkr)}`}     sub="Total PO value incl. rejected"   color="blue"/>
+                    <KpiCard label="Total Sales"      value={`LKR ${fmt(ordersData.total_confirmed_value_lkr)}`} sub="Confirmed delivery value"         color="green"/>
+                    <KpiCard label="Order Fulfillment" value={`${ordersData.value_fill_rate_pct.toFixed(1)}%`}   sub="Sales Value ÷ Order Received"    color="teal"/>
+                    <KpiCard label="Rejection Rate"   value={`${ordersData.rejection_rate_pct.toFixed(1)}%`}     sub="PO lines fully rejected"          color="amber"/>
+                  </div>
+
+                  {/* Row 2: Supporting KPIs */}
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                    <KpiCard label="Qty Fill Rate"    value={`${(ordersData.avg_fill_rate*100).toFixed(1)}%`}    sub={`${ordersData.fill_rate_lt1_count} lines short-shipped`} color="purple"/>
+                    <KpiCard label="Total POs"        value={fmt(ordersData.total_po)}                            sub="Purchase order lines"             color="blue"/>
+                    <KpiCard label="Avg Dispatch LT"  value={`${ordersData.avg_lead_time_days.toFixed(1)} days`} sub="Warehouse → dealer"               color="purple"/>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* Monthly value trend: Order Received vs Total Sales */}
+                    <div>
+                      <div className="flex items-center justify-between mb-3">
+                        <div>
+                          <h3 className="text-sm font-semibold text-slate-700">Monthly Order Value (LKR)</h3>
+                          <p className="text-xs text-slate-400 mt-0.5">Order Received vs Confirmed Sales</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <YearPicker years={getYears(ordersData.monthly_trend)} value={ordersYear} onChange={setOrdersYear}/>
+                          <TimePicker value={ordersRange} onChange={setOrdersRange}/>
+                        </div>
+                      </div>
+                      <ResponsiveContainer width="100%" height={220}>
+                        <BarChart data={filterByRange(filterByYear(ordersData.monthly_trend, ordersYear), ordersRange)} margin={{ top:5, right:10, left:0, bottom:5 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                          <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
+                            tickFormatter={p => monthLabel(p, ordersYear !== "All")}/>
+                          <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt}/>
+                          <Tooltip formatter={(v: unknown, n: unknown) => [`LKR ${fmt(Number(v))}`, String(n)]} labelFormatter={p => String(p)}/>
+                          <Legend wrapperStyle={{ fontSize: 10 }}/>
+                          <Bar dataKey="total_value_lkr"     fill="#94A3B8" name="Order Received" radius={[2,2,0,0]}/>
+                          <Bar dataKey="confirmed_value_lkr" fill="#4361EE" name="Total Sales"    radius={[2,2,0,0]}/>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                    {/* Top dealers */}
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-2">Top Dealers by Order Value</h3>
+                      <ResponsiveContainer width="100%" height={220}>
+                        <BarChart data={ordersData.top_dealers} layout="vertical" margin={{ top:0, right:40, left:5, bottom:0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
+                          <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={fmt}/>
+                          <YAxis type="category" dataKey="dealer" tick={{ fontSize: 9 }} width={140}/>
+                          <Tooltip formatter={(v: unknown) => `LKR ${fmt(Number(v))}`}/>
+                          <Bar dataKey="total_value_lkr" fill="#4361EE" name="Order Value (LKR)" radius={[0,3,3,0]}/>
+                        </BarChart>
+                      </ResponsiveContainer>
                     </div>
                   </div>
-                  <ResponsiveContainer width="100%" height={200}>
-                    <BarChart data={filterByRange(filterByYear(ordersData.monthly_trend, ordersYear), ordersRange)} margin={{ top:5, right:10, left:0, bottom:5 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
-                      <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
-                        tickFormatter={p => monthLabel(p, ordersYear !== "All")}/>
-                      <YAxis tick={{ fontSize: 11 }} tickFormatter={fmt}/>
-                      <Tooltip formatter={(v: unknown) => Number(v).toLocaleString()} labelFormatter={p => String(p)}/>
-                      <Legend/>
-                      <Bar dataKey="po_count"     fill="#4361EE" name="Purchase Orders" radius={[2,2,0,0]} stackId="a"/>
-                      <Bar dataKey="return_count" fill="#EF4444" name="Returns"         radius={[2,2,0,0]} stackId="a"/>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
+                </>
+              )}
 
-                {/* Top dealers */}
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-700 mb-2">Top Dealers by Order Count</h3>
-                  <ResponsiveContainer width="100%" height={200}>
-                    <BarChart data={ordersData.top_dealers} layout="vertical" margin={{ top:0, right:40, left:5, bottom:0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
-                      <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={fmt}/>
-                      <YAxis type="category" dataKey="dealer" tick={{ fontSize: 9 }} width={140}/>
-                      <Tooltip formatter={(v: unknown) => Number(v).toLocaleString()}/>
-                      <Bar dataKey="order_count" fill="#4361EE" name="Orders" radius={[0,3,3,0]}/>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Order fulfillment breakdown */}
-              {ordersData.orders_received_breakdown && (
+              {/* Rejection reasons pie — MC only */}
+              {ordersView === "analysis" && ordersDt === "MC" && ordersMcCat === "ALL" && ordersData.rejection_reasons.length > 0 && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <h3 className="text-sm font-semibold text-slate-700 mb-2">Order Fulfillment Breakdown</h3>
-                    <p className="text-xs text-slate-400 mb-3">By Purchase Order document — classified across all line items per order.</p>
-                    <ResponsiveContainer width="100%" height={180}>
+                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Rejection Reasons</h3>
+                    <p className="text-xs text-slate-400 mb-3">Fully-rejected PO lines by reason code · share of total rejections</p>
+                    <ResponsiveContainer width="100%" height={220}>
                       <PieChart>
                         <Pie
-                          data={[
-                            { name: "Fully Filled",   value: ordersData.orders_received_breakdown.fully_filled,  fill: "#2CC56F" },
-                            { name: "Partial Fill",   value: ordersData.orders_received_breakdown.partial_fill,  fill: "#FFC107" },
-                            { name: "Complete Zero",  value: ordersData.orders_received_breakdown.complete_zero, fill: "#EF4444" },
-                          ]}
-                          dataKey="value" cx="50%" cy="50%" outerRadius={70} label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                          labelLine={false}
+                          data={ordersData.rejection_reasons.map(r => ({
+                            name: r.reason || "Unspecified",
+                            value: r.rejected_lines,
+                            share: r.share_pct,
+                          }))}
+                          dataKey="value" cx="50%" cy="50%" outerRadius={85} innerRadius={36}
+                          label={({ share }: any) => `${(share ?? 0).toFixed(0)}%`}
+                          labelLine={true}
                         >
-                          {["#2CC56F","#FFC107","#EF4444"].map((c, i) => <Cell key={i} fill={c}/>)}
+                          {ordersData.rejection_reasons.map((_, i) => (
+                            <Cell key={i} fill={CAT_COLORS[i % CAT_COLORS.length]}/>
+                          ))}
                         </Pie>
-                        <Tooltip formatter={(v: unknown) => Number(v).toLocaleString()}/>
+                        <Tooltip formatter={(v: unknown, _n: unknown, p: any) => [`${Number(v).toLocaleString()} lines · ${(p.payload?.share ?? 0).toFixed(1)}%`, p.payload?.name ?? ""]}/>
+                        <Legend wrapperStyle={{ fontSize: 10 }}/>
                       </PieChart>
                     </ResponsiveContainer>
                   </div>
                   <div className="flex flex-col gap-2 justify-center">
-                    {[
-                      { label: "Total PO Documents", value: ordersData.orders_received_breakdown.total_documents, color: "slate" },
-                      { label: "Fully Filled", value: ordersData.orders_received_breakdown.fully_filled, color: "green" },
-                      { label: "Partially Filled", value: ordersData.orders_received_breakdown.partial_fill, color: "amber" },
-                      { label: "Complete Zero (all rejected)", value: ordersData.orders_received_breakdown.complete_zero, color: "red" },
-                    ].map(({ label, value, color }) => (
-                      <div key={label} className="flex justify-between items-center bg-slate-50 rounded-lg px-4 py-2">
-                        <span className="text-xs text-slate-600">{label}</span>
-                        <span className={`font-bold text-sm text-${color}-600`}>{value.toLocaleString()}</span>
+                    {ordersData.rejection_reasons.map((r, i) => (
+                      <div key={i} className="flex items-center justify-between bg-slate-50 rounded-lg px-4 py-2">
+                        <span className="flex items-center gap-2 text-xs text-slate-700">
+                          <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: CAT_COLORS[i % CAT_COLORS.length] }}/>
+                          {r.reason || "Unspecified"}
+                        </span>
+                        <span className="flex items-center gap-3 text-xs">
+                          <span className="font-bold text-red-600">{r.rejected_lines.toLocaleString()} lines</span>
+                          <span className="text-slate-400 w-10 text-right">{r.share_pct.toFixed(1)}%</span>
+                        </span>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* Rejection reasons */}
-              {ordersData.rejection_reasons.length > 0 && (
+
+              {/* ══ Fulfillment Analysis (Qty & Value) ══════════════════════ */}
+              {ordersView === "analysis" && ordersData.fulfillment && (
+                <div className="pt-3 border-t border-slate-200 space-y-4">
+                  <div>
+                    <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Fulfillment Analysis</p>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Order Quantity vs Confirmed Quantity · PO lines only ·{" "}
+                      {ordersData.fulfillment.total_lines.toLocaleString()} lines across{" "}
+                      {ordersData.fulfillment.total_docs.toLocaleString()} documents
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* ── Line-level ── */}
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-1">By Line</h3>
+                      <p className="text-xs text-slate-400 mb-2">
+                        Each order item line — Confirmed Qty vs Order Qty
+                      </p>
+                      {/* Stacked progress bar */}
+                      <div className="flex h-5 rounded-full overflow-hidden mb-3 gap-0.5">
+                        <div style={{ width: `${ordersData.fulfillment.fully_confirmed.pct_of_lines}%`, background: '#22C55E' }} className="h-full rounded-l-full"/>
+                        <div style={{ width: `${ordersData.fulfillment.partially_confirmed.pct_of_lines}%`, background: '#F59E0B' }} className="h-full"/>
+                        <div style={{ width: `${ordersData.fulfillment.fully_rejected.pct_of_lines}%`, background: '#EF4444' }} className="h-full rounded-r-full"/>
+                      </div>
+                      {[
+                        { label: 'Fully Confirmed',     color: '#22C55E', bucket: ordersData.fulfillment.fully_confirmed,     sub: 'Conf ≥ Order' },
+                        { label: 'Partially Confirmed', color: '#F59E0B', bucket: ordersData.fulfillment.partially_confirmed, sub: '0 < Conf < Order' },
+                        { label: 'Fully Rejected',      color: '#EF4444', bucket: ordersData.fulfillment.fully_rejected,      sub: 'Conf = 0' },
+                      ].map(({ label, color, bucket, sub }) => (
+                        <div key={label} className="flex items-start gap-3 bg-slate-50 rounded-lg px-3 py-2.5 mb-1.5">
+                          <span className="w-2.5 h-2.5 rounded-sm mt-0.5 flex-shrink-0" style={{ background: color }}/>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex justify-between items-baseline">
+                              <span className="text-xs font-semibold text-slate-700">{label}</span>
+                              <span className="text-sm font-bold" style={{ color }}>{bucket.pct_of_lines}%</span>
+                            </div>
+                            <div className="text-xs text-slate-400 mt-0.5">{sub}</div>
+                            <div className="grid grid-cols-3 gap-x-2 mt-1 text-xs">
+                              <span className="text-slate-500">{bucket.lines.toLocaleString()} <span className="text-slate-400">lines</span></span>
+                              <span className="text-slate-500">Ord <span className="font-medium text-slate-700">{Number(bucket.order_qty).toLocaleString('en-US', {maximumFractionDigits:0})}</span></span>
+                              <span className="text-slate-500">Conf <span className="font-medium text-slate-700">{Number(bucket.confirmed_qty).toLocaleString('en-US', {maximumFractionDigits:0})}</span></span>
+                            </div>
+                            {bucket.confirmed_value_lkr > 0 && (
+                              <div className="text-xs mt-0.5 text-slate-500">
+                                Value <span className="font-semibold text-slate-700">LKR {fmt(bucket.confirmed_value_lkr)}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* ── Document-level ── */}
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-1">By Order Document</h3>
+                      <p className="text-xs text-slate-400 mb-2">
+                        Each Sales Document (PO) — all lines combined
+                      </p>
+                      <div className="flex h-5 rounded-full overflow-hidden mb-3 gap-0.5">
+                        <div style={{ width: `${ordersData.fulfillment.docs_fully_filled_pct}%`, background: '#22C55E' }} className="h-full rounded-l-full"/>
+                        <div style={{ width: `${ordersData.fulfillment.docs_partially_filled_pct}%`, background: '#F59E0B' }} className="h-full"/>
+                        <div style={{ width: `${ordersData.fulfillment.docs_complete_zero_pct}%`, background: '#EF4444' }} className="h-full rounded-r-full"/>
+                      </div>
+                      {[
+                        { label: 'Fully Filled',     color: '#22C55E', count: ordersData.fulfillment.docs_fully_filled,     pct: ordersData.fulfillment.docs_fully_filled_pct,     sub: 'All lines: Conf ≥ Order' },
+                        { label: 'Partially Filled', color: '#F59E0B', count: ordersData.fulfillment.docs_partially_filled, pct: ordersData.fulfillment.docs_partially_filled_pct, sub: 'Some lines short-shipped or zero' },
+                        { label: 'Complete Zero',    color: '#EF4444', count: ordersData.fulfillment.docs_complete_zero,    pct: ordersData.fulfillment.docs_complete_zero_pct,    sub: 'All lines: Conf = 0' },
+                      ].map(({ label, color, count, pct, sub }) => (
+                        <div key={label} className="flex items-start gap-3 bg-slate-50 rounded-lg px-3 py-2.5 mb-1.5">
+                          <span className="w-2.5 h-2.5 rounded-sm mt-0.5 flex-shrink-0" style={{ background: color }}/>
+                          <div className="flex-1">
+                            <div className="flex justify-between items-baseline">
+                              <span className="text-xs font-semibold text-slate-700">{label}</span>
+                              <span className="text-sm font-bold" style={{ color }}>{pct}%</span>
+                            </div>
+                            <div className="text-xs text-slate-400 mt-0.5">{sub}</div>
+                            <div className="mt-1 text-xs text-slate-500">
+                              {count.toLocaleString()} <span className="text-slate-400">documents</span>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ══ Return Orders Analysis ════════════════════════════════════ */}
+              {ordersView === "analysis" && ordersData.total_returns > 0 && (
+                <div className="pt-3 border-t border-slate-200 space-y-4">
+                  <div>
+                    <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Return Orders Analysis</p>
+                    <p className="text-xs text-slate-400 mt-0.5">H (Return Orders) + Cancelled C-orders · excluded from order value &amp; fill-rate calculations</p>
+                  </div>
+
+                  {/* Return KPI row */}
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                    <KpiCard label="Total Returns"      value={ordersData.total_returns.toLocaleString()}                    sub="Return order lines"       color="red"/>
+                    <KpiCard label="Return Value (LKR)" value={`LKR ${fmt(ordersData.total_return_value_lkr)}`}             sub="Net value of return orders" color="amber"/>
+                    <KpiCard label="Return Rate %"      value={`${ordersData.return_rate_value_pct.toFixed(1)}%`}           sub="Return ÷ Order value"     color="purple"/>
+                  </div>
+
+                  {/* Detailed breakdown — MC + ALL category only */}
+                  {ordersDt === "MC" && ordersMcCat === "ALL" && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Return type breakdown */}
+                      {Object.keys(ordersData.return_type_breakdown).length > 0 && (
+                        <div>
+                          <h3 className="text-sm font-semibold text-slate-700 mb-1">Return Type Breakdown</h3>
+                          <p className="text-xs text-slate-400 mb-3">H Return Orders vs Cancelled C-Orders</p>
+                          <div className="space-y-2">
+                            {Object.entries(ordersData.return_type_breakdown).map(([type, count], i) => {
+                              const total = Object.values(ordersData.return_type_breakdown).reduce((a, b) => a + b, 0);
+                              const pct = total > 0 ? (count / total * 100).toFixed(1) : "0.0";
+                              return (
+                                <div key={type} className="flex items-center justify-between bg-slate-50 rounded-lg px-4 py-2.5">
+                                  <span className="flex items-center gap-2 text-sm text-slate-700">
+                                    <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: i === 0 ? "#EF4444" : "#F97316" }}/>
+                                    {type}
+                                  </span>
+                                  <span className="flex items-center gap-3 text-sm">
+                                    <span className="font-bold text-slate-700">{count.toLocaleString()}</span>
+                                    <span className="text-slate-400 w-14 text-right">{pct}%</span>
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Return reasons list */}
+                      {ordersData.return_order_reasons.length > 0 && (
+                        <div>
+                          <h3 className="text-sm font-semibold text-slate-700 mb-1">Return &amp; Cancellation Reasons</h3>
+                          <p className="text-xs text-slate-400 mb-3">Top reasons across H returns + cancelled C-orders</p>
+                          <div className="space-y-1.5">
+                            {ordersData.return_order_reasons.slice(0, 8).map((r, i) => (
+                              <div key={i} className="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2">
+                                <span className="flex items-center gap-2 text-xs text-slate-700 truncate max-w-[60%]" title={r.reason}>
+                                  <span className="w-2 h-2 rounded-sm flex-shrink-0" style={{ background: CAT_COLORS[i % CAT_COLORS.length] }}/>
+                                  {r.reason || "Unspecified"}
+                                </span>
+                                <span className="flex items-center gap-2 text-xs flex-shrink-0">
+                                  <span className="font-bold text-red-600">{r.rejected_lines.toLocaleString()}</span>
+                                  <span className="text-slate-400 w-10 text-right">{r.share_pct.toFixed(1)}%</span>
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ══ Performance view — Dealer, RM, ASE ═══════════════════════ */}
+              {ordersView === "performance" && (
+                <div className="space-y-5">
+                  {ordersData.dealer_perf.length > 0 && (
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-700 mb-1">Dealer Performance <span className="text-xs font-normal text-slate-400 ml-1">(top 30 by order value · A=top 80% · B=next 15% · C=bottom 5%)</span></h3>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
+                                <th className="py-2 pr-3">Code</th>
+                                <th className="py-2 pr-3">Dealer Name</th>
+                                <th className="py-2 pr-2">Province</th>
+                                <th className="py-2 pr-2">District</th>
+                                <th className="py-2 pr-2">RM</th>
+                                <th className="py-2 pr-2">ASE</th>
+                                <th className="py-2 pr-2 text-right">PO Lines</th>
+                                <th className="py-2 pr-2 text-right">Value (LKR)</th>
+                                <th className="py-2 pr-2 text-right">Share %</th>
+                                <th className="py-2 pr-2 text-right">Fill Rate</th>
+                                <th className="py-2 pr-2 text-right">Return %</th>
+                                <th className="py-2 text-center">Tier</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {ordersData.dealer_perf.map((r, i) => (
+                                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
+                                  <td className="py-1.5 pr-3 font-mono text-slate-500">{r.dealer_code}</td>
+                                  <td className="py-1.5 pr-3 font-medium text-slate-700 max-w-[140px] truncate" title={r.dealer_name}>{r.dealer_name}</td>
+                                  <td className="py-1.5 pr-2 text-slate-500">{r.province}</td>
+                                  <td className="py-1.5 pr-2 text-slate-500">{r.district}</td>
+                                  <td className="py-1.5 pr-2 text-slate-500 max-w-[80px] truncate" title={r.rm}>{r.rm}</td>
+                                  <td className="py-1.5 pr-2 text-slate-500 max-w-[80px] truncate" title={r.ase}>{r.ase}</td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.po_lines.toLocaleString()}</td>
+                                  <td className="py-1.5 pr-2 text-right font-semibold text-slate-700">{fmt(r.order_value_lkr)}</td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.value_share_pct.toFixed(1)}%</td>
+                                  <td className="py-1.5 pr-2 text-right">
+                                    <span className="px-1.5 py-0.5 rounded-full font-medium" style={{ background: r.fill_rate_pct>=98?"#DCFCE7":r.fill_rate_pct>=90?"#FEF9C3":"#FEE2E2", color: r.fill_rate_pct>=98?"#16A34A":r.fill_rate_pct>=90?"#CA8A04":"#DC2626" }}>
+                                      {r.fill_rate_pct.toFixed(1)}%
+                                    </span>
+                                  </td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.return_rate_pct.toFixed(1)}%</td>
+                                  <td className="py-1.5 text-center">
+                                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${r.dealer_tier==="A"?"bg-green-100 text-green-700":r.dealer_tier==="B"?"bg-blue-100 text-blue-700":"bg-amber-100 text-amber-700"}`}>{r.dealer_tier}</span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {ordersData.rm_perf.length > 0 && (
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-700 mb-1">RM Performance</h3>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
+                                <th className="py-2 pr-3">RM</th>
+                                <th className="py-2 pr-2">Province</th>
+                                <th className="py-2 pr-2 text-right">Dealers</th>
+                                <th className="py-2 pr-2 text-right">Lines</th>
+                                <th className="py-2 pr-2 text-right">Value</th>
+                                <th className="py-2 pr-2 text-right">Fill</th>
+                                <th className="py-2 pr-2 text-right">Return%</th>
+                                <th className="py-2 text-right">Share</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {ordersData.rm_perf.map((r, i) => (
+                                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
+                                  <td className="py-1.5 pr-3 font-medium text-slate-700 max-w-[120px] truncate" title={r.rm}>{r.rm || "—"}</td>
+                                  <td className="py-1.5 pr-2 text-slate-500">{r.province || "—"}</td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.unique_dealers}</td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.po_lines.toLocaleString()}</td>
+                                  <td className="py-1.5 pr-2 text-right font-semibold text-slate-700">{fmt(r.order_value_lkr)}</td>
+                                  <td className="py-1.5 pr-2 text-right">
+                                    <span className="px-1.5 py-0.5 rounded-full font-medium" style={{ background: r.fill_rate_pct>=98?"#DCFCE7":r.fill_rate_pct>=90?"#FEF9C3":"#FEE2E2", color: r.fill_rate_pct>=98?"#16A34A":r.fill_rate_pct>=90?"#CA8A04":"#DC2626" }}>
+                                      {r.fill_rate_pct.toFixed(1)}%
+                                    </span>
+                                  </td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.return_rate_pct.toFixed(1)}%</td>
+                                  <td className="py-1.5 text-right text-slate-500">{r.value_share_pct.toFixed(1)}%</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                    {ordersData.ase_perf.length > 0 && (
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-700 mb-1">ASE Performance</h3>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
+                                <th className="py-2 pr-3">ASE</th>
+                                <th className="py-2 pr-2">RM</th>
+                                <th className="py-2 pr-2 text-right">Dealers</th>
+                                <th className="py-2 pr-2 text-right">Value</th>
+                                <th className="py-2 text-right">Fill</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {ordersData.ase_perf.map((r, i) => (
+                                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
+                                  <td className="py-1.5 pr-3 font-medium text-slate-700 max-w-[120px] truncate" title={r.ase}>{r.ase || "—"}</td>
+                                  <td className="py-1.5 pr-2 text-slate-500 max-w-[80px] truncate" title={r.rm}>{r.rm}</td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.unique_dealers}</td>
+                                  <td className="py-1.5 pr-2 text-right font-semibold text-slate-700">{fmt(r.order_value_lkr)}</td>
+                                  <td className="py-1.5 text-right">
+                                    <span className="px-1.5 py-0.5 rounded-full font-medium" style={{ background: r.fill_rate_pct>=98?"#DCFCE7":r.fill_rate_pct>=90?"#FEF9C3":"#FEE2E2", color: r.fill_rate_pct>=98?"#16A34A":r.fill_rate_pct>=90?"#CA8A04":"#DC2626" }}>
+                                      {r.fill_rate_pct.toFixed(1)}%
+                                    </span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Geography — District + Province */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {ordersData.district_perf.length > 0 && (
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-700 mb-1">District-Wise Performance</h3>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
+                                <th className="py-2 pr-3">Province</th>
+                                <th className="py-2 pr-3">District</th>
+                                <th className="py-2 pr-2 text-right">Dealers</th>
+                                <th className="py-2 pr-2 text-right">Value</th>
+                                <th className="py-2 pr-2 text-right">Share</th>
+                                <th className="py-2 pr-2 text-right">Fill</th>
+                                <th className="py-2 text-right">Return%</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {ordersData.district_perf.map((r, i) => (
+                                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
+                                  <td className="py-1.5 pr-3 text-slate-500">{r.province}</td>
+                                  <td className="py-1.5 pr-3 font-medium text-slate-700">{r.district}</td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.unique_dealers}</td>
+                                  <td className="py-1.5 pr-2 text-right font-semibold text-slate-700">{fmt(r.order_value_lkr)}</td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.value_share_pct.toFixed(1)}%</td>
+                                  <td className="py-1.5 pr-2 text-right">
+                                    <span className="px-1.5 py-0.5 rounded-full font-medium" style={{ background: r.fill_rate_pct>=98?"#DCFCE7":r.fill_rate_pct>=90?"#FEF9C3":"#FEE2E2", color: r.fill_rate_pct>=98?"#16A34A":r.fill_rate_pct>=90?"#CA8A04":"#DC2626" }}>
+                                      {r.fill_rate_pct.toFixed(1)}%
+                                    </span>
+                                  </td>
+                                  <td className="py-1.5 text-right text-slate-500">{r.return_rate_pct.toFixed(1)}%</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                    {ordersData.province_analysis.length > 0 && (
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-700 mb-1">Province-Wise Performance</h3>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
+                                <th className="py-2 pr-3">Province</th>
+                                <th className="py-2 pr-2 text-right">Dealers</th>
+                                <th className="py-2 pr-2 text-right">Lines</th>
+                                <th className="py-2 pr-2 text-right">Value</th>
+                                <th className="py-2 pr-2 text-right">Share</th>
+                                <th className="py-2 pr-2 text-right">Fill</th>
+                                <th className="py-2 text-right">Return %</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {ordersData.province_analysis.map((r, i) => (
+                                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
+                                  <td className="py-1.5 pr-3 font-medium text-slate-700">{r.province}</td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.unique_dealers}</td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.po_lines.toLocaleString()}</td>
+                                  <td className="py-1.5 pr-2 text-right font-semibold text-slate-700">{fmt(r.order_value_lkr)}</td>
+                                  <td className="py-1.5 pr-2 text-right text-slate-500">{r.value_share_pct.toFixed(1)}%</td>
+                                  <td className="py-1.5 pr-2 text-right">
+                                    <span className="px-1.5 py-0.5 rounded-full font-medium" style={{ background: r.fill_rate_pct>=98?"#DCFCE7":r.fill_rate_pct>=90?"#FEF9C3":"#FEE2E2", color: r.fill_rate_pct>=98?"#16A34A":r.fill_rate_pct>=90?"#CA8A04":"#DC2626" }}>
+                                      {r.fill_rate_pct.toFixed(1)}%
+                                    </span>
+                                  </td>
+                                  <td className="py-1.5 text-right text-slate-500">{r.return_rate_pct.toFixed(1)}%</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* ══ Per-Segment Analysis Tables ════════════════════════════════ */}
+              {ordersView === "analysis" && ordersData.part_analysis.length > 0 && (<>
+
+                <div className="pt-3 border-t border-slate-200">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div>
+                      <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Segment Analysis</p>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        {ordersDt === "MC" && ordersMcCat !== "ALL" ? `MC – ${ordersMcCat === "SpareParts" ? "Spare Parts" : ordersMcCat}` : ordersDt === "OBM" ? "OBM Spare Parts" : "All MC Spare Parts"}
+                      </p>
+                    </div>
+                    <div className="flex gap-1">
+                      {([
+                        { key: "parts" as OrdersAnalysisSeg, label: "Parts" },
+                      ]).map(s => (
+                        <button key={s.key} onClick={() => setOrdersAnalysisSeg(s.key)}
+                          className={`px-3 py-1 text-xs rounded-lg font-semibold border transition-colors ${ordersAnalysisSeg === s.key ? "bg-brand-blue text-white border-brand-blue" : "border-slate-200 text-slate-500 hover:border-brand-blue"}`}>
+                          {s.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Parts sub-segment */}
+                {ordersAnalysisSeg === "parts" && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Part-Wise Analysis <span className="text-xs font-normal text-slate-400 ml-1">(top 30 by order value)</span></h3>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
+                            <th className="py-2 pr-3">Material</th>
+                            <th className="py-2 pr-3">Description</th>
+                            <th className="py-2 pr-2 text-right">Lines</th>
+                            <th className="py-2 pr-2 text-right">Order Qty</th>
+                            <th className="py-2 pr-2 text-right">Value (LKR)</th>
+                            <th className="py-2 pr-2 text-right">Share %</th>
+                            <th className="py-2 pr-2 text-right">Fill Rate</th>
+                            <th className="py-2 text-right">Short Qty</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ordersData.part_analysis.map((r, i) => (
+                            <tr key={i} className="border-b border-slate-50 hover:bg-blue-50/20">
+                              <td className="py-1.5 pr-3 font-mono text-slate-700">{r.material}</td>
+                              <td className="py-1.5 pr-3 text-slate-600 max-w-[200px] truncate" title={r.description}>{r.description}</td>
+                              <td className="py-1.5 pr-2 text-right text-slate-500">{r.order_lines.toLocaleString()}</td>
+                              <td className="py-1.5 pr-2 text-right text-slate-500">{r.order_qty.toLocaleString(undefined,{maximumFractionDigits:0})}</td>
+                              <td className="py-1.5 pr-2 text-right font-semibold text-slate-700">{fmt(r.total_value_lkr)}</td>
+                              <td className="py-1.5 pr-2 text-right text-slate-500">{r.value_share_pct.toFixed(1)}%</td>
+                              <td className="py-1.5 pr-2 text-right">
+                                <span className="px-1.5 py-0.5 rounded-full font-medium" style={{ background: r.fill_rate_pct>=98?"#DCFCE7":r.fill_rate_pct>=90?"#FEF9C3":"#FEE2E2", color: r.fill_rate_pct>=98?"#16A34A":r.fill_rate_pct>=90?"#CA8A04":"#DC2626" }}>
+                                  {r.fill_rate_pct.toFixed(1)}%
+                                </span>
+                              </td>
+                              <td className="py-1.5 text-right text-red-500 font-medium">{r.short_qty > 0 ? r.short_qty.toLocaleString(undefined,{maximumFractionDigits:0}) : "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+              </>)}
+
+              {/* ══ MC Monthly Order Value by Category ════════════════════════ */}
+              {ordersView === "analysis" && ordersDt === "MC" && ordersMcCat === "ALL" && ordersData.mc_monthly_category.length > 0 && (
                 <div>
-                  <h3 className="text-sm font-semibold text-slate-700 mb-2">Rejection Reasons</h3>
-                  <p className="text-xs text-slate-400 mb-3">Fully-rejected PO lines grouped by reason code.</p>
+                  <div className="pt-3 border-t border-slate-200 mb-3">
+                    <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">MC Monthly Order Value by Category</p>
+                    <p className="text-xs text-slate-400 mt-0.5">All MC purchase orders · monthly LKR value split by sub-category</p>
+                  </div>
+                  <ResponsiveContainer width="100%" height={260}>
+                    <BarChart data={ordersData.mc_monthly_category} margin={{ top: 5, right: 16, left: 0, bottom: 40 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                      <XAxis dataKey="period" tick={{ fontSize: 9 }} angle={-35} textAnchor="end" interval={0}
+                        tickFormatter={p => monthLabel(String(p), true)}/>
+                      <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt}/>
+                      <Tooltip formatter={(v: unknown, n: unknown) => [`LKR ${fmt(Number(v))}`, String(n)]} labelFormatter={p => String(p)}/>
+                      <Legend wrapperStyle={{ fontSize: 10, paddingTop: 4 }}/>
+                      <Bar dataKey="lubricant_lkr"  name="Lubricant"   stackId="a" fill={SEG_PALETTE[0]} radius={[0,0,0,0]}/>
+                      <Bar dataKey="battery_lkr"    name="Battery"     stackId="a" fill={SEG_PALETTE[1]} radius={[0,0,0,0]}/>
+                      <Bar dataKey="tyre_lkr"       name="Tyre"        stackId="a" fill={SEG_PALETTE[2]} radius={[0,0,0,0]}/>
+                      <Bar dataKey="spare_parts_lkr" name="Spare Parts" stackId="a" fill={SEG_PALETTE[3]} radius={[2,2,0,0]}/>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+
+              {/* ══ Fraud Alerts ══════════════════════════════════════════════ */}
+              {ordersView === "performance" && ordersData.fraud_alerts.length > 0 && (
+                <div className="border border-red-200 bg-red-50 rounded-xl p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-red-600 font-bold text-sm">⚠ Concentration Alert</span>
+                    <span className="text-xs text-red-400">Single dealer &gt;40% of monthly returns (CLAUDE.md §15)</span>
+                  </div>
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
+                    <table className="w-full text-xs">
                       <thead>
-                        <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
-                          <th className="py-2 pr-4">Reason</th>
-                          <th className="py-2 pr-4 text-right">Lines</th>
-                          <th className="py-2 pr-4 text-right">Qty</th>
-                          <th className="py-2 text-right">Share</th>
+                        <tr className="text-left text-xs text-red-500 uppercase border-b border-red-200">
+                          <th className="py-1.5 pr-4">Month</th>
+                          <th className="py-1.5 pr-4">Dealer Code</th>
+                          <th className="py-1.5 pr-4">Dealer Name</th>
+                          <th className="py-1.5 text-right">Return Share</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {ordersData.rejection_reasons.map((r, i) => (
-                          <tr key={i} className="border-b border-slate-50 hover:bg-red-50/20">
-                            <td className="py-2 pr-4 text-xs text-slate-700">{r.reason || "— unspecified —"}</td>
-                            <td className="py-2 pr-4 text-right font-semibold text-red-600">{r.rejected_lines.toLocaleString()}</td>
-                            <td className="py-2 pr-4 text-right text-xs text-slate-500">{r.rejected_qty.toFixed(0)}</td>
-                            <td className="py-2 text-right">
-                              <div className="flex items-center justify-end gap-2">
-                                <div className="w-16 bg-slate-100 rounded-full h-1.5">
-                                  <div className="bg-red-400 h-1.5 rounded-full" style={{ width: `${Math.min(r.share_pct, 100)}%` }}/>
-                                </div>
-                                <span className="text-xs text-slate-600 w-10 text-right">{r.share_pct.toFixed(1)}%</span>
-                              </div>
-                            </td>
+                        {ordersData.fraud_alerts.map((a, i) => (
+                          <tr key={i} className="border-b border-red-100">
+                            <td className="py-1.5 pr-4 text-slate-600">{a.month}</td>
+                            <td className="py-1.5 pr-4 font-mono text-slate-500">{a.dealer_code}</td>
+                            <td className="py-1.5 pr-4 text-slate-600">{a.dealer_name}</td>
+                            <td className="py-1.5 text-right font-bold text-red-600">{a.return_share_pct.toFixed(1)}%</td>
                           </tr>
                         ))}
                       </tbody>
@@ -214,113 +744,634 @@ export function EDA() {
                 </div>
               )}
 
-              {/* Rejection log */}
-              <div>
-                <h3 className="text-sm font-semibold text-slate-700 mb-2">Rejection Log — Fully Short-Shipped Lines</h3>
-                <p className="text-xs text-slate-400 mb-3">Lines where fill rate = 0 (order qty received = 0). Require follow-up.</p>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
-                        <th className="py-2 pr-3">Material</th>
-                        <th className="py-2 pr-3">Description</th>
-                        <th className="py-2 pr-3">Customer</th>
-                        <th className="py-2 pr-3">Date</th>
-                        <th className="py-2 pr-3 text-right">Ordered</th>
-                        <th className="py-2 pr-3 text-right">Lost</th>
-                        <th className="py-2 text-right">Fill Rate</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {ordersData.rejections.map((r, i) => (
-                        <tr key={i} className="border-b border-slate-50 hover:bg-red-50/20">
-                          <td className="py-2 pr-3 font-mono text-xs text-slate-700">{r.material}</td>
-                          <td className="py-2 pr-3 text-slate-600 max-w-[160px] truncate" title={r.description}>{r.description}</td>
-                          <td className="py-2 pr-3 text-xs text-slate-500 max-w-[130px] truncate" title={r.customer}>{r.customer}</td>
-                          <td className="py-2 pr-3 text-xs text-slate-400">{r.document_date}</td>
-                          <td className="py-2 pr-3 text-right">{r.order_qty.toFixed(0)}</td>
-                          <td className="py-2 pr-3 text-right text-red-600 font-semibold">{r.lost_qty.toFixed(0)}</td>
-                          <td className="py-2 text-right">
-                            <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: r.fill_rate >= 0.99 ? "#DCFCE7" : r.fill_rate >= 0.8 ? "#FEF9C3" : "#FEE2E2", color: r.fill_rate >= 0.99 ? "#16A34A" : r.fill_rate >= 0.8 ? "#CA8A04" : "#DC2626" }}>
-                              {(r.fill_rate * 100).toFixed(0)}%
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+              {/* ══ Business Insights ══════════════════════════════════════════ */}
+              {ordersView === "analysis" && ordersDt === "MC" && ordersMcCat === "ALL" && ordersData.category_mix.length > 0 && (<>
+
+                <div className="pt-3 border-t border-slate-200">
+                  <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Business Insights</p>
+                  <p className="text-xs text-slate-400 mt-0.5">Computed across all segments (MC sub-categories + OBM) · 2024 – 2025</p>
                 </div>
-              </div>
+
+                {/* Row 1: Category Mix + YoY Growth */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Category Value Mix */}
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Category Value Mix</h3>
+                    <p className="text-xs text-slate-400 mb-2">LKR order value by segment</p>
+                    <ResponsiveContainer width="100%" height={170}>
+                      <BarChart data={ordersData.category_mix} layout="vertical" margin={{ top:0, right:16, left:10, bottom:0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
+                        <XAxis type="number" tick={{ fontSize:10 }} tickFormatter={fmt}/>
+                        <YAxis type="category" dataKey="segment" tick={{ fontSize:9 }} width={115}/>
+                        <Tooltip formatter={(v:unknown) => `LKR ${fmt(Number(v))}`} labelFormatter={s => String(s)}/>
+                        <Bar dataKey="value_lkr" name="Value (LKR)" radius={[0,3,3,0]}>
+                          {ordersData.category_mix.map((_,i) => <Cell key={i} fill={SEG_PALETTE[i % SEG_PALETTE.length]}/>)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                    <div className="mt-2 space-y-1">
+                      {ordersData.category_mix.map((r,i) => (
+                        <div key={r.segment} className="flex items-center justify-between text-xs">
+                          <span className="flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-sm inline-block flex-shrink-0" style={{ background: SEG_PALETTE[i % SEG_PALETTE.length] }}/>
+                            <span className="text-slate-600">{r.segment}</span>
+                          </span>
+                          <span className="text-slate-400">{r.value_share_pct.toFixed(1)}% · fill {r.fill_rate_pct.toFixed(1)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* YoY Growth */}
+                  {ordersData.yoy_growth.length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-1">Year-on-Year Growth</h3>
+                      <p className="text-xs text-slate-400 mb-2">{ordersData.yoy_growth[0]?.year_prev ?? "Prev"} vs {ordersData.yoy_growth[0]?.year_curr ?? "Curr"} order value by segment</p>
+                      <ResponsiveContainer width="100%" height={170}>
+                        <BarChart data={ordersData.yoy_growth} margin={{ top:0, right:10, left:0, bottom:32 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                          <XAxis dataKey="segment" tick={{ fontSize:8 }} angle={-20} textAnchor="end" interval={0} tickFormatter={s => String(s).replace("MC – ","")}/>
+                          <YAxis tick={{ fontSize:10 }} tickFormatter={fmt}/>
+                          <Tooltip formatter={(v:unknown) => `LKR ${fmt(Number(v))}`} labelFormatter={s => String(s)}/>
+                          <Legend wrapperStyle={{ fontSize:10, paddingTop:4 }}/>
+                          <Bar dataKey="value_year_prev" name={String(ordersData.yoy_growth[0]?.year_prev ?? "Prev")} fill="#94A3B8" radius={[2,2,0,0]}/>
+                          <Bar dataKey="value_year_curr" name={String(ordersData.yoy_growth[0]?.year_curr ?? "Curr")} fill="#4361EE" radius={[2,2,0,0]}/>
+                        </BarChart>
+                      </ResponsiveContainer>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {ordersData.yoy_growth.map(r => (
+                          <span key={r.segment} className={`text-xs px-2 py-0.5 rounded-full font-medium ${r.yoy_pct >= 0 ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
+                            {String(r.segment).replace("MC – ","")} {r.yoy_pct >= 0 ? "+" : ""}{r.yoy_pct.toFixed(1)}%
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Row 2: Province Performance */}
+                {ordersData.province_perf.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Province Performance</h3>
+                    <p className="text-xs text-slate-400 mb-2">Order value · value share % · fill rate % · dealer count</p>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={ordersData.province_perf} layout="vertical" margin={{ top:0, right:16, left:10, bottom:0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
+                        <XAxis type="number" tick={{ fontSize:10 }} tickFormatter={fmt}/>
+                        <YAxis type="category" dataKey="province" tick={{ fontSize:10 }} width={100}/>
+                        <Tooltip
+                          formatter={(_v:unknown, _n:unknown, p:any) => {
+                            const r = ordersData.province_perf[p.index];
+                            return [`LKR ${fmt(r?.order_value_lkr ?? 0)} · ${r?.value_share_pct?.toFixed(1) ?? 0}% share · fill ${r?.fill_rate_pct?.toFixed(1) ?? 0}% · ${r?.dealer_count ?? 0} dealers`,""];
+                          }}
+                          labelFormatter={s => String(s)}
+                        />
+                        <Bar dataKey="order_value_lkr" name="Order Value (LKR)" fill="#4361EE" radius={[0,3,3,0]}
+                          label={{ content: (p:any) => {
+                            const r = ordersData.province_perf[p.index];
+                            if (!r) return null;
+                            return <text x={p.x+p.width+6} y={p.y+p.height/2+4} fontSize={9} fill="#64748B">{r.value_share_pct.toFixed(0)}% · {r.fill_rate_pct.toFixed(0)}%fr</text>;
+                          }}}
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+
+                {/* Row 3: Dealer Intelligence + Pareto */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {ordersData.dealer_health_summary.total_dealers > 0 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-1">Dealer Intelligence</h3>
+                      <p className="text-xs text-slate-400 mb-3">Value tiers: A = top 80%, B = next 15%, C = bottom 5%</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        {([
+                          { label:"A-Tier Dealers", value: ordersData.dealer_health_summary.a_tier,     sub:"top 80% of value",    color:"green"  },
+                          { label:"B-Tier Dealers", value: ordersData.dealer_health_summary.b_tier,     sub:"next 15% of value",   color:"teal"   },
+                          { label:"C-Tier Dealers", value: ordersData.dealer_health_summary.c_tier,     sub:"bottom 5% of value",  color:"amber"  },
+                          { label:"Dormant (90d)",  value: ordersData.dealer_health_summary.dormant_count, sub:"no orders last 90d", color:"red"  },
+                        ] as const).map(({label,value,sub,color}) => (
+                          <KpiCard key={label} label={label} value={value.toLocaleString()} sub={sub} color={color}/>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {ordersData.pareto_summary.total_skus > 0 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-1">Pareto &amp; Category Cross</h3>
+                      <p className="text-xs text-slate-400 mb-2">80/20 rule · multi-category dealer behaviour</p>
+                      <div className="space-y-2">
+                        <div className="bg-purple-50 rounded-xl px-4 py-3">
+                          <p className="text-xs text-purple-600 font-semibold uppercase tracking-wide">Part Pareto (80% of value)</p>
+                          <p className="text-2xl font-bold text-purple-800 mt-0.5">
+                            {ordersData.pareto_summary.sku_80pct_count.toLocaleString()}
+                            <span className="text-sm font-normal text-purple-400 ml-1">of {ordersData.pareto_summary.total_skus.toLocaleString()} SKUs</span>
+                          </p>
+                          <p className="text-xs text-purple-400">{((ordersData.pareto_summary.sku_80pct_count/ordersData.pareto_summary.total_skus)*100).toFixed(1)}% of parts → 80% of order value</p>
+                        </div>
+                        <div className="bg-blue-50 rounded-xl px-4 py-3">
+                          <p className="text-xs text-blue-600 font-semibold uppercase tracking-wide">Dealer Pareto (80% of value)</p>
+                          <p className="text-2xl font-bold text-blue-800 mt-0.5">
+                            {ordersData.pareto_summary.dealer_80pct_count.toLocaleString()}
+                            <span className="text-sm font-normal text-blue-400 ml-1">of {ordersData.pareto_summary.total_dealers.toLocaleString()} dealers</span>
+                          </p>
+                          <p className="text-xs text-blue-400">{((ordersData.pareto_summary.dealer_80pct_count/ordersData.pareto_summary.total_dealers)*100).toFixed(1)}% of dealers → 80% of revenue</p>
+                        </div>
+                        {ordersData.category_cross.total_mc_dealers > 0 && (
+                          <div className="bg-teal-50 rounded-xl px-4 py-3 flex items-center justify-between">
+                            <div>
+                              <p className="text-xs text-teal-600 font-semibold uppercase tracking-wide">Multi-Category MC Dealers</p>
+                              <p className="text-xl font-bold text-teal-800 mt-0.5">
+                                {ordersData.category_cross.multi_category}
+                                <span className="text-sm font-normal text-teal-400 ml-1">of {ordersData.category_cross.total_mc_dealers}</span>
+                              </p>
+                              <p className="text-xs text-teal-400">order across 2+ sub-categories</p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-2xl font-bold text-amber-600">{ordersData.category_cross.single_category}</p>
+                              <p className="text-xs text-teal-400">single-category</p>
+                              <p className="text-xs text-amber-500 mt-0.5">cross-sell targets</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Row 4: Fill Rate Bands */}
+                {ordersData.fill_rate_bands.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Fill Rate Bands by Segment</h3>
+                    <p className="text-xs text-slate-400 mb-2">Count of dealers in each fill-rate band (per-dealer aggregate fill rate)</p>
+                    <ResponsiveContainer width="100%" height={170}>
+                      <BarChart data={ordersData.fill_rate_bands} layout="vertical" margin={{ top:0, right:20, left:10, bottom:0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
+                        <XAxis type="number" tick={{ fontSize:10 }} allowDecimals={false}/>
+                        <YAxis type="category" dataKey="segment" tick={{ fontSize:9 }} width={115}/>
+                        <Tooltip formatter={(v:unknown) => `${Number(v)} dealers`} labelFormatter={s => String(s)}/>
+                        <Legend wrapperStyle={{ fontSize:10 }}/>
+                        <Bar dataKey="above_98"      name="≥98%"   fill="#22C55E" stackId="a"/>
+                        <Bar dataKey="between_95_98" name="95–98%" fill="#FCD34D" stackId="a"/>
+                        <Bar dataKey="between_90_95" name="90–95%" fill="#F97316" stackId="a"/>
+                        <Bar dataKey="below_90"      name="<90%"   fill="#EF4444" stackId="a" radius={[0,3,3,0]}/>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+
+                {/* Row 5: Top Short-Shipped */}
+                {ordersData.top_short_shipped.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Top Short-Shipped Materials</h3>
+                    <p className="text-xs text-slate-400 mb-3">Largest unmet demand gaps — procurement priority list</p>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
+                            <th className="py-2 pr-3">Material</th>
+                            <th className="py-2 pr-3">Description</th>
+                            <th className="py-2 pr-3 text-right">Short Qty</th>
+                            <th className="py-2 pr-3 text-right">Fill Rate</th>
+                            <th className="py-2 text-right">Times</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ordersData.top_short_shipped.map((r,i) => (
+                            <tr key={i} className="border-b border-slate-50 hover:bg-red-50/20">
+                              <td className="py-2 pr-3 font-mono text-xs text-slate-700">{r.material}</td>
+                              <td className="py-2 pr-3 text-xs text-slate-600 max-w-[200px] truncate" title={r.description}>{r.description}</td>
+                              <td className="py-2 pr-3 text-right font-bold text-red-600">{r.short_qty.toLocaleString(undefined,{maximumFractionDigits:0})}</td>
+                              <td className="py-2 pr-3 text-right">
+                                <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: r.fill_rate_pct>=95?"#DCFCE7":r.fill_rate_pct>=80?"#FEF9C3":"#FEE2E2", color: r.fill_rate_pct>=95?"#16A34A":r.fill_rate_pct>=80?"#CA8A04":"#DC2626" }}>
+                                  {r.fill_rate_pct.toFixed(1)}%
+                                </span>
+                              </td>
+                              <td className="py-2 text-right text-xs text-slate-400">{r.occurrences}×</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+              </>)}
+
             </div>
-          ) : <p className="text-slate-400 text-sm">Loading…</p>
+          ) : <p className="text-slate-400 text-sm py-8 text-center">Loading…</p>
+          }
+          </div>
         )}
 
         {/* ── Sales EDA ── */}
         {tab === "sales" && (
-          salesData ? (
-            <div className="space-y-5">
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                <KpiCard label="Total Revenue" value={`LKR ${fmt(salesData.total_revenue_lkr)}`}   color="purple"/>
-                <KpiCard label="Total Units"   value={fmt(salesData.total_units)}                    color="blue"/>
-                <KpiCard label="Channels"      value={Object.keys(salesData.by_channel).length.toString()} sub={Object.keys(salesData.by_channel).join(" · ")} color="teal"/>
+          <div className="space-y-5">
+            {/* Dealer type + MC sub-category selectors */}
+            <div className="space-y-2">
+              <div className="flex gap-1">
+                {(["MC","OBM"] as DealerType[]).map(dt => (
+                  <button key={dt} onClick={() => { setSalesDt(dt); setSalesMcCat("ALL"); }}
+                    className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${salesDt===dt?"bg-brand-blue text-white":"bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>
+                    {dt} Spare Parts
+                  </button>
+                ))}
               </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Monthly revenue trend */}
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-sm font-semibold text-slate-700">Monthly Spare Parts Revenue (LKR)</h3>
-                    <div className="flex items-center gap-2">
-                      <YearPicker years={getYears(salesData.monthly_trend)} value={salesYear} onChange={setSalesYear}/>
-                      <TimePicker value={salesRange} onChange={setSalesRange}/>
-                    </div>
-                  </div>
-                  <ResponsiveContainer width="100%" height={200}>
-                    <LineChart data={filterByRange(filterByYear(salesData.monthly_trend, salesYear), salesRange)} margin={{ top:5, right:10, left:0, bottom:5 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
-                      <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
-                        tickFormatter={p => monthLabel(p, salesYear !== "All")}/>
-                      <YAxis tick={{ fontSize: 11 }} tickFormatter={fmt}/>
-                      <Tooltip formatter={(v: unknown) => fmt(Number(v))} labelFormatter={p => String(p)}/>
-                      <Line type="monotone" dataKey="revenue_lkr" stroke="#7C3AED" strokeWidth={2} dot={{ r: 3 }} name="Revenue (LKR)"/>
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-
-                {/* By product category */}
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-700 mb-2">Revenue by Product Category</h3>
-                  <ResponsiveContainer width="100%" height={200}>
-                    <BarChart
-                      data={Object.entries(salesData.by_category).map(([k, v], i) => ({ name: k, value: v, fill: CAT_COLORS[i % CAT_COLORS.length] }))}
-                      layout="vertical" margin={{ top:0, right:40, left:10, bottom:0 }}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
-                      <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={fmt}/>
-                      <YAxis type="category" dataKey="name" tick={{ fontSize: 9 }} width={150}/>
-                      <Tooltip formatter={(v: unknown) => `LKR ${fmt(Number(v))}`}/>
-                      <Bar dataKey="value" radius={[0,3,3,0]}>
-                        {Object.entries(salesData.by_category).map(([k], i) => <Cell key={k} fill={CAT_COLORS[i % CAT_COLORS.length]}/>)}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Channel breakdown table */}
-              <div>
-                <h3 className="text-sm font-semibold text-slate-700 mb-2">Revenue by Channel</h3>
-                <div className="flex gap-4">
-                  {Object.entries(salesData.by_channel).map(([ch, val]) => (
-                    <div key={ch} className="flex-1 bg-slate-50 rounded-lg p-4">
-                      <p className="text-xs text-slate-500 uppercase tracking-wider">{ch}</p>
-                      <p className="text-xl font-bold text-slate-800 mt-1">LKR {fmt(val)}</p>
-                    </div>
+              {salesDt === "MC" && (
+                <div className="flex gap-1 flex-wrap">
+                  {[
+                    { key: "ALL",          label: "All MC" },
+                    { key: "Lubricant",    label: "Lubricant (YAMALUBE)" },
+                    { key: "Battery",      label: "Battery (KARATE)" },
+                    { key: "Tyre",         label: "Tyre (KATANA)" },
+                    { key: "Spare Parts",  label: "Spare Parts" },
+                  ].map(o => (
+                    <button key={o.key} onClick={() => setSalesMcCat(o.key)}
+                      className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${salesMcCat===o.key?"bg-purple-600 text-white":"bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>
+                      {o.label}
+                    </button>
                   ))}
                 </div>
-              </div>
+              )}
             </div>
-          ) : <p className="text-slate-400 text-sm">Loading…</p>
+
+            {salesData ? (
+              <>
+                {/* View tabs + year indicator */}
+                <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                  <div className="flex gap-1">
+                    {[
+                      { key: "kpi" as const,       label: "Overview" },
+                      { key: "parts" as const,      label: `Parts (${salesData.unique_parts.toLocaleString()})` },
+                      { key: "dealers" as const,    label: `Dealers (${salesData.unique_dealers})` },
+                      { key: "hierarchy" as const,  label: "RM / ASE / Geography" },
+                    ].map(v => (
+                      <button key={v.key} onClick={() => setSalesView(v.key)}
+                        className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${salesView===v.key?"bg-slate-700 text-white":"text-slate-500 hover:bg-slate-50"}`}>
+                        {v.label}
+                      </button>
+                    ))}
+                  </div>
+                  {salesData.data_year > 0 && (
+                    <span className="text-xs font-semibold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-full">
+                      {salesData.data_year}
+                    </span>
+                  )}
+                </div>
+
+                {/* ── Overview ── */}
+                {salesView === "kpi" && (
+                  <div className="space-y-5">
+                    {/* KPI cards — row 1: mirrors dashboard gauges */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <KpiCard label="Order Received"   value={`LKR ${fmt(salesData.order_received_lkr)}`}     sub="All orders placed (incl. cancelled/rejected)"               color="blue"/>
+                      <KpiCard label="Total Sales"      value={`LKR ${fmt(salesData.total_sale_value_lkr)}`}   sub="Fulfilled orders (orders.xlsx)"                             color="purple"/>
+                      <KpiCard label="Order Fulfillment" value={`${salesData.fulfillment_pct.toFixed(1)}%`}    sub="Total Sales ÷ Order Received"                               color="green"/>
+                      <KpiCard label="Return Rate"      value={`${salesData.return_rate_pct.toFixed(1)}%`}      sub="Returns ÷ Billed Revenue"                                   color="amber"/>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <KpiCard label="Net Revenue"      value={`LKR ${fmt(salesData.net_sale_value_lkr)}`}     sub="Billed revenue minus returns (sales.xlsx)"                   color="teal"/>
+                      <KpiCard label="Return Value"     value={`LKR ${fmt(salesData.total_return_value_lkr)}`} sub={`${salesData.total_return_lines.toLocaleString()} lines`}    color="red"/>
+                      <KpiCard label="Sale Qty"         value={salesData.total_sale_qty.toLocaleString('en-US',{maximumFractionDigits:0})}   sub="units sold"        color="blue"/>
+                      <KpiCard label="Unique SKUs"      value={salesData.unique_parts.toLocaleString()}                                       sub="materials sold"     color="teal"/>
+                    </div>
+
+                    {/* Monthly trend */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <div className="flex items-center justify-between mb-3">
+                          <div>
+                            <h3 className="text-sm font-semibold text-slate-700">Monthly: Order Received vs Sales vs Returns (LKR)</h3>
+                            <p className="text-xs text-slate-400 mt-0.5">Order Received · Sale Value · Return Value</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <YearPicker years={salesData.available_years} value={salesYear} onChange={y => setSalesYear(typeof y === "number" ? y : salesData.data_year)}/>
+                            <TimePicker value={salesRange} onChange={setSalesRange}/>
+                          </div>
+                        </div>
+                        <ResponsiveContainer width="100%" height={220}>
+                          <BarChart data={filterByRange(salesData.monthly_trend, salesRange)} margin={{ top:5, right:10, left:0, bottom:5 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                            <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
+                              tickFormatter={p => monthLabel(p, true)}/>
+                            <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt}/>
+                            <Tooltip formatter={(v: unknown, n: unknown) => [`LKR ${fmt(Number(v))}`, String(n)]} labelFormatter={p => String(p)}/>
+                            <Legend wrapperStyle={{ fontSize: 10 }}/>
+                            <Bar dataKey="order_received_lkr" fill="#94A3B8" name="Order Received" radius={[2,2,0,0]}/>
+                            <Bar dataKey="sale_value_lkr"     fill="#7C3AED" name="Total Sales (Fulfilled)" radius={[2,2,0,0]}/>
+                            <Bar dataKey="return_value_lkr"   fill="#EF4444" name="Return Value"    radius={[2,2,0,0]}/>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+
+                      {/* MC Category Mix (MC only) */}
+                      {salesDt === "MC" && salesMcCat === "ALL" && salesData.mc_category_mix.length > 0 && (
+                        <div>
+                          <h3 className="text-sm font-semibold text-slate-700 mb-2">MC Sub-category Mix</h3>
+                          <p className="text-xs text-slate-400 mb-3">Sale value share · Lubricant / Battery / Tyre / Spare Parts</p>
+                          <ResponsiveContainer width="100%" height={220}>
+                            <BarChart data={salesData.mc_category_mix} layout="vertical" margin={{ top:0, right:50, left:5, bottom:0 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
+                              <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={fmt}/>
+                              <YAxis type="category" dataKey="mc_category" tick={{ fontSize: 10 }} width={80}/>
+                              <Tooltip formatter={(v: unknown) => `LKR ${fmt(Number(v))}`}/>
+                              <Bar dataKey="sale_value_lkr" radius={[0,3,3,0]}>
+                                {salesData.mc_category_mix.map((c, i) => (
+                                  <Cell key={c.mc_category} fill={CAT_COLORS[i % CAT_COLORS.length]}/>
+                                ))}
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                          {/* share + return rate table */}
+                          <div className="mt-2 space-y-1">
+                            {salesData.mc_category_mix.map((c, i) => (
+                              <div key={c.mc_category} className="flex items-center justify-between bg-slate-50 rounded px-3 py-1.5">
+                                <span className="flex items-center gap-2 text-xs text-slate-700">
+                                  <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: CAT_COLORS[i % CAT_COLORS.length] }}/>
+                                  {c.mc_category}
+                                </span>
+                                <span className="flex gap-3 text-xs">
+                                  <span className="font-bold text-slate-700">LKR {fmt(c.sale_value_lkr)}</span>
+                                  <span className="text-slate-400 w-10 text-right">{c.value_share_pct.toFixed(1)}%</span>
+                                  <span className="text-red-500 w-16 text-right">ret {c.return_rate_pct.toFixed(1)}%</span>
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* MC monthly by category (stacked bar) */}
+                    {salesDt === "MC" && salesMcCat === "ALL" && salesData.mc_monthly_category.length > 0 && (
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-700 mb-1">MC Monthly Sales by Sub-category</h3>
+                        <p className="text-xs text-slate-400 mb-3">Stacked by Lubricant · Battery · Tyre · Spare Parts</p>
+                        <ResponsiveContainer width="100%" height={220}>
+                          <BarChart data={filterByRange(salesData.mc_monthly_category, salesRange)} margin={{ top:5, right:10, left:0, bottom:5 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                            <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
+                              tickFormatter={p => monthLabel(p, true)}/>
+                            <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt}/>
+                            <Tooltip formatter={(v: unknown, n: unknown) => [`LKR ${fmt(Number(v))}`, String(n)]}/>
+                            <Legend wrapperStyle={{ fontSize: 10 }}/>
+                            <Bar dataKey="lubricant_lkr"   fill={CAT_COLORS[0]} name="Lubricant"    stackId="mc" radius={[0,0,0,0]}/>
+                            <Bar dataKey="battery_lkr"     fill={CAT_COLORS[1]} name="Battery"      stackId="mc"/>
+                            <Bar dataKey="tyre_lkr"        fill={CAT_COLORS[2]} name="Tyre"         stackId="mc"/>
+                            <Bar dataKey="spare_parts_lkr" fill={CAT_COLORS[3]} name="Spare Parts"  stackId="mc" radius={[2,2,0,0]}/>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    )}
+
+                    {/* District Sales Value bar — mirrors dashboard Image 3 */}
+                    {salesData.district_perf.length > 0 && (
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-700 mb-1">District Sales Value (LKR)</h3>
+                        <p className="text-xs text-slate-400 mb-3">Sale value by district · sorted descending</p>
+                        <ResponsiveContainer width="100%" height={200}>
+                          <BarChart
+                            data={[...salesData.district_perf].sort((a, b) => b.sale_value_lkr - a.sale_value_lkr).slice(0, 25).map(d => ({
+                              name: d.district || "—",
+                              sale: d.sale_value_lkr,
+                              order: d.order_received_lkr,
+                            }))}
+                            margin={{ top:5, right:10, left:0, bottom:40 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                            <XAxis dataKey="name" tick={{ fontSize: 9 }} angle={-40} textAnchor="end" interval={0}/>
+                            <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt}/>
+                            <Tooltip formatter={(v: unknown, n: unknown) => [`LKR ${fmt(Number(v))}`, String(n)]}/>
+                            <Legend wrapperStyle={{ fontSize: 10 }}/>
+                            <Bar dataKey="sale"  fill="#1D3461" name="Sale Value"      radius={[2,2,0,0]}/>
+                            <Bar dataKey="order" fill="#94A3B8" name="Order Received"  radius={[2,2,0,0]}/>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ── Parts analysis ── */}
+                {salesView === "parts" && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Part-wise Sales Analysis</h3>
+                    <p className="text-xs text-slate-400 mb-3">Top 300 parts by sale value · {salesData.unique_parts.toLocaleString()} total SKUs</p>
+                    <div className="overflow-auto max-h-[520px]">
+                      <table className="w-full text-xs border-collapse">
+                        <thead className="sticky top-0 bg-white z-10">
+                          <tr className="border-b border-slate-200">
+                            <th className="text-left py-2 px-2 text-slate-500 font-medium">#</th>
+                            <th className="text-left py-2 px-2 text-slate-500 font-medium">Material</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Sale Lines</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Sale Qty</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Sale Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Return Qty</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Return Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Net Qty</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Net Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Ret %</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {salesData.part_analysis.map((p, i) => (
+                            <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
+                              <td className="py-1.5 px-2 text-slate-400">{i+1}</td>
+                              <td className="py-1.5 px-2 text-slate-700 max-w-[220px] truncate" title={p.material}>{p.material}</td>
+                              <td className="py-1.5 px-2 text-right text-slate-600">{p.sale_lines.toLocaleString()}</td>
+                              <td className="py-1.5 px-2 text-right text-slate-600">{p.sale_qty.toLocaleString('en-US',{maximumFractionDigits:0})}</td>
+                              <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(p.sale_value_lkr)}</td>
+                              <td className="py-1.5 px-2 text-right text-red-500">{p.return_qty.toLocaleString('en-US',{maximumFractionDigits:0})}</td>
+                              <td className="py-1.5 px-2 text-right text-red-500">{fmt(p.return_value_lkr)}</td>
+                              <td className="py-1.5 px-2 text-right text-slate-600">{p.net_qty.toLocaleString('en-US',{maximumFractionDigits:0})}</td>
+                              <td className="py-1.5 px-2 text-right font-semibold text-green-700">{fmt(p.net_value_lkr)}</td>
+                              <td className="py-1.5 px-2 text-right">
+                                <span className={p.return_rate_pct > 10 ? "text-red-600 font-bold" : p.return_rate_pct > 5 ? "text-amber-600" : "text-slate-400"}>
+                                  {p.return_rate_pct.toFixed(1)}%
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Dealer performance ── */}
+                {salesView === "dealers" && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Dealer Performance</h3>
+                    <p className="text-xs text-slate-400 mb-3">{salesData.unique_dealers} dealers · sorted by sale value</p>
+                    <div className="overflow-auto max-h-[520px]">
+                      <table className="w-full text-xs border-collapse">
+                        <thead className="sticky top-0 bg-white z-10">
+                          <tr className="border-b border-slate-200">
+                            <th className="text-left py-2 px-2 text-slate-500 font-medium">#</th>
+                            <th className="text-left py-2 px-2 text-slate-500 font-medium">Dealer</th>
+                            <th className="text-left py-2 px-2 text-slate-500 font-medium">Province</th>
+                            <th className="text-left py-2 px-2 text-slate-500 font-medium">ASE</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Order Rec. (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Sale Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Fulfill %</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Return Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Ret %</th>
+                            <th className="text-right py-2 px-2 text-slate-500 font-medium">SKUs</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {salesData.dealer_perf.map((d, i) => (
+                            <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
+                              <td className="py-1.5 px-2 text-slate-400">{i+1}</td>
+                              <td className="py-1.5 px-2 text-slate-700 max-w-[180px] truncate" title={d.dealer_name}>{d.dealer_name}</td>
+                              <td className="py-1.5 px-2 text-slate-500">{d.province || "—"}</td>
+                              <td className="py-1.5 px-2 text-slate-500 max-w-[100px] truncate" title={d.ase}>{d.ase || "—"}</td>
+                              <td className="py-1.5 px-2 text-right text-slate-500">{fmt(d.order_received_lkr)}</td>
+                              <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(d.sale_value_lkr)}</td>
+                              <td className="py-1.5 px-2 text-right">
+                                <span className={d.fulfillment_pct < 50 ? "text-red-600 font-bold" : d.fulfillment_pct < 80 ? "text-amber-600" : "text-green-600 font-medium"}>
+                                  {d.fulfillment_pct > 0 ? `${d.fulfillment_pct.toFixed(1)}%` : "—"}
+                                </span>
+                              </td>
+                              <td className="py-1.5 px-2 text-right text-red-500">{fmt(d.return_value_lkr)}</td>
+                              <td className="py-1.5 px-2 text-right">
+                                <span className={d.return_rate_pct > 10 ? "text-red-600 font-bold" : d.return_rate_pct > 5 ? "text-amber-600" : "text-slate-400"}>
+                                  {d.return_rate_pct.toFixed(1)}%
+                                </span>
+                              </td>
+                              <td className="py-1.5 px-2 text-right text-slate-500">{d.unique_skus}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Hierarchy (RM / ASE / District / Province) ── */}
+                {salesView === "hierarchy" && (
+                  <div className="space-y-6">
+                    {/* Province */}
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-1">Province Performance</h3>
+                      <div className="overflow-auto">
+                        <table className="w-full text-xs border-collapse">
+                          <thead><tr className="border-b border-slate-200">
+                            <th className="text-left py-2 px-2 text-slate-500">Province</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Dealers</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Sale Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Return Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Ret %</th>
+                            <th className="text-right py-2 px-2 text-slate-500">SKUs</th>
+                          </tr></thead>
+                          <tbody>
+                            {salesData.province_perf.map((p, i) => (
+                              <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
+                                <td className="py-1.5 px-2 font-medium text-slate-700">{p.province || "—"}</td>
+                                <td className="py-1.5 px-2 text-right text-slate-500">{p.dealer_count}</td>
+                                <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(p.sale_value_lkr)}</td>
+                                <td className="py-1.5 px-2 text-right text-red-500">{fmt(p.return_value_lkr)}</td>
+                                <td className="py-1.5 px-2 text-right text-slate-500">{p.return_rate_pct.toFixed(1)}%</td>
+                                <td className="py-1.5 px-2 text-right text-slate-500">{p.unique_skus?.toLocaleString()}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* RM */}
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-1">RM Performance</h3>
+                      <div className="overflow-auto">
+                        <table className="w-full text-xs border-collapse">
+                          <thead><tr className="border-b border-slate-200">
+                            <th className="text-left py-2 px-2 text-slate-500">RM</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Dealers</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Sale Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Return Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Ret %</th>
+                          </tr></thead>
+                          <tbody>
+                            {salesData.rm_perf.map((r, i) => (
+                              <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
+                                <td className="py-1.5 px-2 font-medium text-slate-700">{r.rm || "—"}</td>
+                                <td className="py-1.5 px-2 text-right text-slate-500">{r.dealer_count}</td>
+                                <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(r.sale_value_lkr)}</td>
+                                <td className="py-1.5 px-2 text-right text-red-500">{fmt(r.return_value_lkr)}</td>
+                                <td className="py-1.5 px-2 text-right text-slate-500">{r.return_rate_pct.toFixed(1)}%</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* ASE */}
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-1">ASE Performance</h3>
+                      <div className="overflow-auto">
+                        <table className="w-full text-xs border-collapse">
+                          <thead><tr className="border-b border-slate-200">
+                            <th className="text-left py-2 px-2 text-slate-500">ASE</th>
+                            <th className="text-left py-2 px-2 text-slate-500">RM</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Dealers</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Sale Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Return Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Ret %</th>
+                          </tr></thead>
+                          <tbody>
+                            {salesData.ase_perf.map((a, i) => (
+                              <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
+                                <td className="py-1.5 px-2 font-medium text-slate-700">{a.ase || "—"}</td>
+                                <td className="py-1.5 px-2 text-slate-500">{a.rm || "—"}</td>
+                                <td className="py-1.5 px-2 text-right text-slate-500">{a.dealer_count}</td>
+                                <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(a.sale_value_lkr)}</td>
+                                <td className="py-1.5 px-2 text-right text-red-500">{fmt(a.return_value_lkr)}</td>
+                                <td className="py-1.5 px-2 text-right text-slate-500">{a.return_rate_pct.toFixed(1)}%</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* District */}
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-1">District Performance</h3>
+                      <div className="overflow-auto max-h-[320px]">
+                        <table className="w-full text-xs border-collapse">
+                          <thead className="sticky top-0 bg-white"><tr className="border-b border-slate-200">
+                            <th className="text-left py-2 px-2 text-slate-500">District</th>
+                            <th className="text-left py-2 px-2 text-slate-500">Province</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Dealers</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Order Rec. (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Sale Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Return Value (LKR)</th>
+                            <th className="text-right py-2 px-2 text-slate-500">Ret %</th>
+                          </tr></thead>
+                          <tbody>
+                            {salesData.district_perf.map((d, i) => (
+                              <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
+                                <td className="py-1.5 px-2 font-medium text-slate-700">{d.district || "—"}</td>
+                                <td className="py-1.5 px-2 text-slate-500">{d.province || "—"}</td>
+                                <td className="py-1.5 px-2 text-right text-slate-500">{d.dealer_count}</td>
+                                <td className="py-1.5 px-2 text-right text-slate-500">{fmt(d.order_received_lkr ?? 0)}</td>
+                                <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(d.sale_value_lkr)}</td>
+                                <td className="py-1.5 px-2 text-right text-red-500">{fmt(d.return_value_lkr)}</td>
+                                <td className="py-1.5 px-2 text-right text-slate-500">{d.return_rate_pct.toFixed(1)}%</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : <p className="text-slate-400 text-sm py-6">Loading sales data…</p>}
+          </div>
         )}
 
         {/* ── Stock Movements ── */}
@@ -428,7 +1479,7 @@ export function EDA() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <KpiCard label="In SSOP"           value={fmt(spareData.in_ssop_count)}    sub="in supersession table" color="amber"/>
                 <KpiCard label="Non-Moving"        value={fmt(spareData.demand_category_counts.non_moving ?? 0)} sub="p_zero=1 across period" color="red"/>
-                <KpiCard label="Intermittent / Lumpy" value={fmt(spareData.intermittent_skus.length)} sub="p_zero ≥ 70%, ever active" color="orange"/>
+                <KpiCard label="Intermittent / Lumpy" value={fmt(spareData.intermittent_skus.length)} sub="p_zero ≥ 70%, ever active" color="amber"/>
                 <KpiCard label="Smooth Demand"     value={fmt(spareData.demand_category_counts.smooth ?? 0)} sub="regular fast movers" color="green"/>
               </div>
 

@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
-  LineChart, Line, Legend,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 import {
   fetchOrdersEda, fetchSalesEda,
@@ -9,8 +8,6 @@ import {
 } from "../api/client";
 import { KpiCard } from "../components/KpiCard";
 import { TimePicker, filterByRange, type TimeRange, YearPicker, filterByYear, getYears, monthLabel } from "../components/TimePicker";
-
-const CAT_COLORS = ["#EF4444","#F97316","#FFC107","#4361EE","#2CC56F","#7C3AED","#94A3B8"];
 
 function fmt(n: number) {
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
@@ -59,7 +56,7 @@ export function OBMEDA() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <KpiCard label="Purchase Orders"  value={ordersData ? fmt(ordersData.total_po)    : "…"} color="blue"/>
         <KpiCard label="Avg Fill Rate"    value={ordersData ? `${(ordersData.avg_fill_rate*100).toFixed(1)}%` : "…"} sub={`${ordersData?.fill_rate_lt1_count ?? 0} lines short-shipped`} color="green"/>
-        <KpiCard label="OBM Revenue"      value={salesData  ? `LKR ${fmt(salesData.total_revenue_lkr)}` : "…"} color="purple"/>
+        <KpiCard label="OBM Revenue"      value={salesData  ? `LKR ${fmt(salesData.total_sale_value_lkr)}` : "…"} color="purple"/>
         <KpiCard label="Avg Lead Time"    value={ordersData ? `${ordersData.avg_lead_time_days.toFixed(1)} days` : "…"} color="teal"/>
       </div>
 
@@ -168,62 +165,61 @@ export function OBMEDA() {
         {tab === "sales" && (
           salesData ? (
             <div className="space-y-5">
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                <KpiCard label="OBM Revenue"  value={`LKR ${fmt(salesData.total_revenue_lkr)}`} color="purple"/>
-                <KpiCard label="Total Units"  value={fmt(salesData.total_units)}                  color="blue"/>
-                <KpiCard label="Channels"     value={Object.keys(salesData.by_channel).length.toString()} sub={Object.keys(salesData.by_channel).join(" · ")} color="teal"/>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <KpiCard label="OBM Revenue"    value={`LKR ${fmt(salesData.total_sale_value_lkr)}`}   sub={`${salesData.total_sale_lines.toLocaleString()} lines`}  color="purple"/>
+                <KpiCard label="Return Value"   value={`LKR ${fmt(salesData.total_return_value_lkr)}`} sub={`${salesData.total_return_lines} lines`}                  color="red"/>
+                <KpiCard label="Return Rate"    value={`${salesData.return_rate_pct.toFixed(1)}%`}      sub="value basis"                                              color="amber"/>
+                <KpiCard label="Net Revenue"    value={`LKR ${fmt(salesData.net_sale_value_lkr)}`}     sub={`${salesData.unique_dealers} dealers`}                    color="green"/>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-sm font-semibold text-slate-700">Monthly OBM Parts Revenue (LKR)</h3>
-                    <div className="flex items-center gap-2">
-                      <YearPicker years={getYears(salesData.monthly_trend)} value={salesYear} onChange={setSalesYear}/>
-                      <TimePicker value={salesRange} onChange={setSalesRange}/>
-                    </div>
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-slate-700">Monthly OBM Sales vs Returns (LKR)</h3>
+                  <div className="flex items-center gap-2">
+                    <YearPicker years={getYears(salesData.monthly_trend)} value={salesYear} onChange={setSalesYear}/>
+                    <TimePicker value={salesRange} onChange={setSalesRange}/>
                   </div>
-                  <ResponsiveContainer width="100%" height={200}>
-                    <LineChart data={filterByRange(filterByYear(salesData.monthly_trend, salesYear), salesRange)} margin={{ top:5, right:10, left:0, bottom:5 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
-                      <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
-                        tickFormatter={p => monthLabel(p, salesYear !== "All")}/>
-                      <YAxis tick={{ fontSize: 11 }} tickFormatter={fmt}/>
-                      <Tooltip formatter={(v: unknown) => fmt(Number(v))} labelFormatter={p => String(p)}/>
-                      <Line type="monotone" dataKey="revenue_lkr" stroke="#06B6D4" strokeWidth={2} dot={{ r: 3 }} name="Revenue (LKR)"/>
-                    </LineChart>
-                  </ResponsiveContainer>
                 </div>
-
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-700 mb-2">Revenue by Product Category</h3>
-                  <ResponsiveContainer width="100%" height={200}>
-                    <BarChart
-                      data={Object.entries(salesData.by_category).map(([k, v], i) => ({ name: k, value: v, fill: CAT_COLORS[i % CAT_COLORS.length] }))}
-                      layout="vertical" margin={{ top:0, right:40, left:10, bottom:0 }}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
-                      <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={fmt}/>
-                      <YAxis type="category" dataKey="name" tick={{ fontSize: 9 }} width={150}/>
-                      <Tooltip formatter={(v: unknown) => `LKR ${fmt(Number(v))}`}/>
-                      <Bar dataKey="value" radius={[0,3,3,0]}>
-                        {Object.entries(salesData.by_category).map(([k], i) => <Cell key={k} fill={CAT_COLORS[i % CAT_COLORS.length]}/>)}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={filterByRange(filterByYear(salesData.monthly_trend, salesYear), salesRange)} margin={{ top:5, right:10, left:0, bottom:5 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                    <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
+                      tickFormatter={p => monthLabel(p, salesYear !== "All")}/>
+                    <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt}/>
+                    <Tooltip formatter={(v: unknown, n: unknown) => [`LKR ${fmt(Number(v))}`, String(n)]}/>
+                    <Legend wrapperStyle={{ fontSize: 10 }}/>
+                    <Bar dataKey="sale_value_lkr"   fill="#06B6D4" name="Sale Value"   radius={[2,2,0,0]}/>
+                    <Bar dataKey="return_value_lkr" fill="#EF4444" name="Return Value" radius={[2,2,0,0]}/>
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
 
-              {Object.keys(salesData.by_channel).length > 0 && (
+              {salesData.dealer_perf.length > 0 && (
                 <div>
-                  <h3 className="text-sm font-semibold text-slate-700 mb-2">Revenue by Channel</h3>
-                  <div className="flex gap-4 flex-wrap">
-                    {Object.entries(salesData.by_channel).map(([ch, val]) => (
-                      <div key={ch} className="flex-1 min-w-[160px] bg-slate-50 rounded-lg p-4">
-                        <p className="text-xs text-slate-500 uppercase tracking-wider">{ch}</p>
-                        <p className="text-xl font-bold text-slate-800 mt-1">LKR {fmt(val)}</p>
-                      </div>
-                    ))}
+                  <h3 className="text-sm font-semibold text-slate-700 mb-1">OBM Dealer Performance</h3>
+                  <div className="overflow-auto max-h-[360px]">
+                    <table className="w-full text-xs border-collapse">
+                      <thead className="sticky top-0 bg-white"><tr className="border-b border-slate-200">
+                        <th className="text-left py-2 px-2 text-slate-500">#</th>
+                        <th className="text-left py-2 px-2 text-slate-500">Dealer</th>
+                        <th className="text-left py-2 px-2 text-slate-500">Province</th>
+                        <th className="text-right py-2 px-2 text-slate-500">Sale Value (LKR)</th>
+                        <th className="text-right py-2 px-2 text-slate-500">Ret %</th>
+                        <th className="text-right py-2 px-2 text-slate-500">SKUs</th>
+                      </tr></thead>
+                      <tbody>
+                        {salesData.dealer_perf.map((d, i) => (
+                          <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
+                            <td className="py-1.5 px-2 text-slate-400">{i+1}</td>
+                            <td className="py-1.5 px-2 font-medium text-slate-700 max-w-[200px] truncate">{d.dealer_name}</td>
+                            <td className="py-1.5 px-2 text-slate-500">{d.province || "—"}</td>
+                            <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(d.sale_value_lkr)}</td>
+                            <td className="py-1.5 px-2 text-right text-slate-500">{d.return_rate_pct.toFixed(1)}%</td>
+                            <td className="py-1.5 px-2 text-right text-slate-500">{d.unique_skus}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               )}
