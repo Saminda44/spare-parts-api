@@ -38,7 +38,7 @@ export function McsiEDA() {
 
   // Pie data for model share
   const modelPie = by_model.slice(0, 8).map((r, i) => ({
-    name: r.model, value: r.units_sold, fill: MODEL_COLORS[i % MODEL_COLORS.length],
+    name: r.model, value: r.units_sold, share_pct: r.share_pct, fill: MODEL_COLORS[i % MODEL_COLORS.length],
   }));
 
   return (
@@ -151,7 +151,7 @@ export function McsiEDA() {
                 <ResponsiveContainer width="100%" height={220}>
                   <PieChart>
                     <Pie data={modelPie} cx="50%" cy="50%" outerRadius={85} dataKey="value" nameKey="name"
-                      label={({ name, share_pct }: { name: string; share_pct: number }) => `${name}: ${share_pct}%`}
+                      label={(props: any) => `${props.name}: ${props.share_pct}%`}
                       labelLine={false}>
                       {modelPie.map((d, i) => <Cell key={i} fill={d.fill}/>)}
                     </Pie>

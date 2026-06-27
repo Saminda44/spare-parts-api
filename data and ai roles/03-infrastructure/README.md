@@ -16,7 +16,7 @@ Use these subagents when you need to:
 
 ## Available Subagents
 
-### [**azure-infra-engineer**](azure-infra-engineer.md) - Azure cloud infrastructure and automation specialist  
+### [**azure-infra-engineer**](azure-infra-engineer.md) - Azure cloud infrastructure and automation specialist
 Expert in Azure resource design, virtual networking, identity integration, and infrastructure-as-code patterns via PowerShell, Bicep, and Az modules.
 
 **Use when:** Designing Azure environments, deploying resources safely, integrating with M365, or creating automation scripts for Azure services and hybrid identity.
@@ -91,7 +91,7 @@ Senior Terragrunt expert orchestrating OpenTofu/Terraform infrastructure at scal
 
 **Use when:** Orchestrating Terraform modules with Terragrunt, implementing DRY configurations across environments, managing complex dependency graphs, designing multi-account/multi-region infrastructure, or migrating from monolithic Terraform to modular Terragrunt stacks.
 
-### [**windows-infra-admin**](windows-infra-admin.md) - Windows infrastructure and Active Directory automation expert  
+### [**windows-infra-admin**](windows-infra-admin.md) - Windows infrastructure and Active Directory automation expert
 Deep expertise in automating AD, DNS, DHCP, GPO, server configuration, and domain services using PowerShell. Focuses on safe change workflows, idempotent operations, and enterprise-grade operational patterns.
 
 **Use when:** Managing domain infrastructure, modifying AD objects, updating DNS/DHCP records, automating GPO tasks, or performing server-level automation in enterprise environments.

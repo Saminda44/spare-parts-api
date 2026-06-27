@@ -61,6 +61,15 @@ frontend/api_out.txt
 frontend/dev_err.txt
 frontend/dev_out.txt
 
+# Server / dev-tool log files
+*.log
+uvicorn.log
+uvicorn_err.log
+vite.log
+
+# Nested repo clone — not a submodule
+spare-parts-api/
+
 # ML training logs
 lightning_logs/
 

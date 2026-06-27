@@ -1,37 +1,33 @@
-"""Stage 5: Spare Parts Sales EDA + Dealer Churn Analysis.
+"""Stage 5: Spare Parts Sales EDA — Yamaha dealer-scoped billing analysis.
 
-Two channels are analysed:
-  - Dealer channel  : sales.xlsx  (Seeduwa PDC warehouse → dealers)
-  - Service channel : service.xlsx (Yamaha service centers — Union Place, Matara)
+Data source:
+  sales.xlsx — SAP billing export (Payer = the customer / dealer name).
 
-Product categories (from Matl Group prefix):
-  AWPYM → Yamaha Spare Parts   (primary spare-parts business)
-  AWPKT → Tyres                (Katana tyre range)
-  AWPOB → Marine/Outboard Parts
-  AWPSU → Suzuki Spare Parts
-  AWPMA → Accessories & Filters
-  AWLCA, AWLOT, AWLMC → Lubricants
-  Other prefixes → Other
+Dealer scoping:
+  Inner join ``Payer`` = ``Dealer Name`` from dealers.xlsx.
+  Unmatched Payers (institutions, end-consumers, etc.) are excluded.
+  No Active/Inactive filter — all matched dealers are included.
 
-Data quality note:
-  Lubricant Net Sales total is NEGATIVE (bulk reseller accounting treatment —
-  large-volume transfers to distributors like CEB are recorded as cost flows
-  rather than revenue). Lubricants are shown as a separate informational row
-  and EXCLUDED from gross revenue totals to avoid distorting the picture.
+Dealer type (from dealers.xlsx ``Type`` column):
+  MC  → motorcycle spare-parts dealer
+  OBM → outboard-motor spare-parts dealer
 
-Bill-type classification:
-  Positive billings : F2, ZVAT, S1, S2, ZFOC  → sales
-  Return billings   : RE, ZRVT, ZSVT, ZRE, ZRSV → returns
+MC sub-category (from ``Material`` description keyword):
+  YAMALUBE       → Lubricant
+  KARATE BATTERY → Battery
+  KATANA TYRE    → Tyre
+  (all others)   → Spare Parts
 
-Dealer churn definition (rolling from last data date):
-  Active   : ≤90 days since last order
-  At-Risk  : 91–180 days
-  Dormant  : 181–365 days
-  Churned  : >365 days
+Sale vs Return classification:
+  SlsVolQty > 0  → bill_class = "sale"
+  SlsVolQty < 0  → bill_class = "return"
+  SlsVolQty == 0 → dropped
 
-Inputs:
-  data/raw/sales.xlsx
-  data/raw/service.xlsx
+Value metric: ``Net Sales`` (LKR after discount, before tax).
+  Return Net Sales is already negative — no sign flip needed.
+
+Hierarchy for drilldown:
+  Province → RM → ASE → Dealer (all from dealers.xlsx).
 
 Outputs:
   data/interim/sales_clean.parquet
@@ -45,7 +41,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import xlsxwriter
 from loguru import logger
 
 from src.config.constants import CURRENCY
@@ -54,148 +49,160 @@ from src.config.paths import DATA_INTERIM, DATA_OUTPUTS, DATA_RAW
 warnings.filterwarnings("ignore")
 
 # ── Paths ──────────────────────────────────────────────────────
-_SALES_RAW    = DATA_RAW / "sales.xlsx"
-_SERVICE_RAW  = DATA_RAW / "service.xlsx"
-_DEALERS_RAW  = DATA_RAW / "dealers.xlsx"
-_CLEAN_PARQ   = DATA_INTERIM / "sales_clean.parquet"
+_SALES_RAW = DATA_RAW / "sales.xlsx"
+_DEALERS_RAW = DATA_RAW / "Dealers.xlsx"
+_CLEAN_PARQ = DATA_INTERIM / "sales_clean.parquet"
 _OUTPUT_EXCEL = DATA_OUTPUTS / "stage05_sales_eda.xlsx"
 
-# ── Product category mapping (Matl Group prefix → label) ───────
-# AWPSU (Suzuki spare parts) is intentionally excluded — mapped to Other.
-# AWPMA mixes genuine accessories/filters with Suzuki Alto body parts;
-# see "Accessories Sample" sheet in the report for the full breakdown.
-_CATEGORY_MAP: dict[str, str] = {
-    "AWPYM": "Yamaha Spare Parts",
-    "AWPKT": "Tyres",
-    "AWPOB": "Marine / Outboard Parts",
-    "AWPMA": "Accessories & Filters",
-    "AWLCA": "Lubricants",
-    "AWLOT": "Lubricants",
-    "AWLMC": "Lubricants",
-}
-_LUBRICANT_CATEGORIES = {"Lubricants"}  # excluded from revenue totals (accounting anomaly)
-
-# ── Bill type sets ──────────────────────────────────────────────
-_POS_BILL_TYPES = {"F2", "ZVAT", "S1", "S2", "ZFOC"}
-_RET_BILL_TYPES = {"RE", "ZRVT", "ZSVT", "ZRE", "ZRSV"}
-
-# ── Churn thresholds ────────────────────────────────────────────
-_CHURN_ACTIVE_DAYS  =  90
-_CHURN_AT_RISK_DAYS = 180
-_CHURN_DORMANT_DAYS = 365
+# ── MC sub-category keywords (applied to Material description) ──
+_KW_LUBRICANT = "YAMALUBE"
+_KW_BATTERY = "KARATE BATTERY"
+_KW_TYRE = "KATANA TYRE"
 
 
-def _assign_category(matl_group: str) -> str:
-    """Map a Matl Group code to its product category."""
-    prefix = str(matl_group)[:5]
-    return _CATEGORY_MAP.get(prefix, "Other")
+def _mc_category(material: str) -> str:
+    """Classify an MC material into its sub-category based on description keywords."""
+    m = str(material).upper()
+    if _KW_LUBRICANT in m:
+        return "Lubricant"
+    if _KW_BATTERY in m:
+        return "Battery"
+    if _KW_TYRE in m:
+        return "Tyre"
+    return "Spare Parts"
 
 
 # ══════════════════════════════════════════════════════════════
 # 1. Loading & cleaning
 # ══════════════════════════════════════════════════════════════
 
-def _read_billing_file(path: Any, channel: str) -> pd.DataFrame:
-    df = pd.read_excel(path)
-    df["Billing Date"] = pd.to_datetime(df["Billing Date"], dayfirst=True, errors="coerce")
-    df["Net Sales"]    = pd.to_numeric(df["Net Sales"],    errors="coerce").fillna(0.0)
-    df["SlsVolQty"]    = pd.to_numeric(df["SlsVolQty"],    errors="coerce").fillna(0.0)
-    df["channel"]      = channel
-    for col in ["Payer", "Material", "Matl Group", "Bill. Type"]:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
-    return df
-
 
 def load_dealer_map() -> pd.DataFrame:
-    """Load dealers.xlsx; return DataFrame with Dealer Name and Type.
+    """Load dealers.xlsx with all hierarchy attributes.
 
-    Business rule: Payer in sales.xlsx must exactly match Dealer Name here.
-    Type column distinguishes MC (motorcycle) from OBM (outboard motor parts).
+    Returns all dealers (Active and Inactive) whose Dealer Name is non-empty.
+    Columns returned: Dealer Code, Dealer Name, Type, Province, District, ASE, RM.
     """
     df = pd.read_excel(_DEALERS_RAW, dtype=str)
-    for col in ["Dealer Name", "Type"]:
+    for col in df.columns:
         df[col] = df[col].fillna("").str.strip()
+    # Normalise expected columns
+    col_map = {c: c for c in df.columns}
+    df = df.rename(columns=col_map)
     df = df[df["Dealer Name"] != ""].copy()
     logger.info(
         f"Dealer master: {len(df)} dealers  "
         f"(MC={(df['Type']=='MC').sum()}, OBM={(df['Type']=='OBM').sum()})"
     )
-    return df[["Dealer Name", "Type"]].drop_duplicates("Dealer Name")
+    keep = [
+        c
+        for c in ["Dealer Code", "Dealer Name", "Type", "Province", "District", "ASE", "RM"]
+        if c in df.columns
+    ]
+    return df[keep].drop_duplicates("Dealer Name")
 
 
 def load_and_clean(refresh: bool = False) -> pd.DataFrame:
-    """Load both billing files, scope to registered Yamaha dealers, tag dealer_type.
+    """Load sales.xlsx, scope to Yamaha dealers, assign categories and bill_class.
 
-    Scoping rule: Payer must exactly match a Dealer Name in dealers.xlsx.
-    Unmatched payers (bulk lubricant distributors, institutions, etc.) are excluded.
-    dealer_type = 'MC' or 'OBM' from the Type column in dealers.xlsx.
-
-    Returns a combined clean DataFrame covering ALL product categories.
-    Use 'product_category' and 'dealer_type' columns to filter for analyses.
+    Business rules applied:
+    - Payer (sales) must exactly match Dealer Name (dealers.xlsx) — inner join.
+    - bill_class 'sale'   : SlsVolQty > 0
+    - bill_class 'return' : SlsVolQty < 0
+    - Rows with SlsVolQty == 0 are dropped.
+    - mc_category assigned only for MC dealers; OBM rows carry mc_category = None.
     """
     if not refresh and _CLEAN_PARQ.exists():
         logger.info("Loading cached sales_clean.parquet")
         return pd.read_parquet(_CLEAN_PARQ)
 
     dealer_df = load_dealer_map()
-    name_to_type = dealer_df.set_index("Dealer Name")["Type"].to_dict()
 
-    sales   = _read_billing_file(_SALES_RAW,   "Dealer")
-    service = _read_billing_file(_SERVICE_RAW, "Service")
-    logger.info(f"Loaded: sales={len(sales):,}  service={len(service):,}")
+    raw = pd.read_excel(_SALES_RAW)
+    logger.info(f"Raw sales rows: {len(raw):,}")
 
-    combined = pd.concat([sales, service], ignore_index=True)
-    combined = combined[combined["Billing Date"].notna()].copy()
+    # ── Normalise key columns ────────────────────────────────────
+    raw["Billing Date"] = pd.to_datetime(raw["Billing Date"], dayfirst=True, errors="coerce")
+    raw["Net Sales"] = pd.to_numeric(raw["Net Sales"], errors="coerce").fillna(0.0)
+    raw["SlsVolQty"] = pd.to_numeric(raw["SlsVolQty"], errors="coerce").fillna(0.0)
+    raw["Payer"] = raw["Payer"].astype(str).str.strip()
+    raw["Material"] = raw["Material"].astype(str).str.strip()
 
-    # ── Dealer scoping: Payer must be a registered Yamaha dealer name ──
-    before = len(combined)
-    combined["dealer_type"] = combined["Payer"].map(name_to_type)
-    combined = combined[combined["dealer_type"].notna()].copy()
-    excluded = before - len(combined)
+    # ── Drop rows with no date or zero qty ──────────────────────
+    before = len(raw)
+    raw = raw[raw["Billing Date"].notna() & (raw["SlsVolQty"] != 0)].copy()
+    logger.info(f"After date/zero-qty filter: {len(raw):,} (dropped {before - len(raw):,})")
+
+    # ── Dealer scoping: Payer = Dealer Name (inner join) ────────
+    before = len(raw)
+    raw = raw.merge(
+        dealer_df,
+        left_on="Payer",
+        right_on="Dealer Name",
+        how="inner",
+    )
     logger.info(
-        f"Dealer-name scoping: {len(combined):,} rows kept, "
-        f"{excluded:,} excluded (non-Yamaha payers)"
-    )
-    mc_rows  = (combined["dealer_type"] == "MC").sum()
-    obm_rows = (combined["dealer_type"] == "OBM").sum()
-    logger.info(f"  MC rows: {mc_rows:,}  OBM rows: {obm_rows:,}")
-
-    # ── Product category ────────────────────────────────────────
-    combined["product_category"] = combined["Matl Group"].apply(_assign_category)
-
-    # ── Bill type classification ────────────────────────────────
-    combined["bill_class"] = combined["Bill. Type"].apply(
-        lambda t: "sale" if t in _POS_BILL_TYPES else ("return" if t in _RET_BILL_TYPES else "other")
+        f"Dealer scoping: {len(raw):,} rows kept, {before - len(raw):,} excluded  "
+        f"(MC={(raw['Type']=='MC').sum():,}, OBM={(raw['Type']=='OBM').sum():,})"
     )
 
-    combined["Year_Month_str"] = combined["Billing Date"].dt.strftime("%Y-%m")
+    # ── Rename Type → dealer_type ────────────────────────────────
+    raw.rename(columns={"Type": "dealer_type"}, inplace=True)
 
-    # ── Category summary at load time ───────────────────────────
-    logger.info("Product category breakdown (positive billings only, MC+OBM combined):")
-    pos = combined[combined["bill_class"] == "sale"]
-    for cat, grp in pos.groupby("product_category"):
-        note = "  ⚠ accounting anomaly — excluded from revenue KPIs" if cat in _LUBRICANT_CATEGORIES else ""
-        logger.info(f"  {cat:<30}: {len(grp):>7,} lines  LKR {grp['Net Sales'].sum():>16,.0f}{note}")
+    # ── Bill class from SlsVolQty sign ───────────────────────────
+    raw["bill_class"] = np.where(raw["SlsVolQty"] > 0, "sale", "return")
 
-    # ── Save parquet ────────────────────────────────────────────
-    keep_cols = [
-        "channel", "product_category", "dealer_type",
-        "Payer", "Material", "Matl Group",
-        "Billing Date", "Year_Month_str", "SlsVolQty", "Net Sales",
-        "bill_class", "Bill. Type", "Sales Office",
+    # ── MC sub-category ─────────────────────────────────────────
+    raw["mc_category"] = np.where(
+        raw["dealer_type"] == "MC",
+        raw["Material"].apply(_mc_category),
+        pd.NA,
+    )
+
+    # ── Year-Month string for trending ──────────────────────────
+    raw["Year_Month_str"] = raw["Billing Date"].dt.strftime("%Y-%m")
+
+    # ── Summary at load time ─────────────────────────────────────
+    sale_rows = raw[raw["bill_class"] == "sale"]
+    return_rows = raw[raw["bill_class"] == "return"]
+    logger.info(f"Sale lines:   {len(sale_rows):,}  LKR {sale_rows['Net Sales'].sum():,.0f}")
+    logger.info(f"Return lines: {len(return_rows):,}  LKR {return_rows['Net Sales'].sum():,.0f}")
+
+    mc_sale = sale_rows[sale_rows["dealer_type"] == "MC"]
+    for cat, grp in mc_sale.groupby("mc_category"):
+        logger.info(f"  MC {cat:<15}: {len(grp):>7,} lines  LKR {grp['Net Sales'].sum():>16,.0f}")
+
+    # ── Select columns for parquet ───────────────────────────────
+    keep = [
+        c
+        for c in [
+            "Payer",
+            "Dealer Code",
+            "dealer_type",
+            "mc_category",
+            "Province",
+            "District",
+            "ASE",
+            "RM",
+            "Material",
+            "Billing Date",
+            "Year_Month_str",
+            "Billing Document",
+            "Item",
+            "SlsVolQty",
+            "Net Sales",
+            "bill_class",
+        ]
+        if c in raw.columns
     ]
-    if "Material Description" in combined.columns:
-        keep_cols.insert(5, "Material Description")
-    keep_cols = [c for c in keep_cols if c in combined.columns]
-    out = combined[keep_cols].copy()
+    out = raw[keep].copy()
 
     for col in out.select_dtypes(include="object").columns:
         out[col] = out[col].astype(str).replace("nan", pd.NA)
 
     _CLEAN_PARQ.parent.mkdir(parents=True, exist_ok=True)
     out.to_parquet(_CLEAN_PARQ, index=False)
-    logger.info(f"Saved: {_CLEAN_PARQ}")
+    logger.info(f"Saved: {_CLEAN_PARQ}  ({len(out):,} rows)")
     return out
 
 
@@ -203,484 +210,327 @@ def load_and_clean(refresh: bool = False) -> pd.DataFrame:
 # 2. EDA computations
 # ══════════════════════════════════════════════════════════════
 
-def _revenue_df(df: pd.DataFrame, exclude_lubes: bool = True) -> pd.DataFrame:
-    """Return sale rows, optionally excluding lubricant accounting anomaly."""
-    sales = df[df["bill_class"] == "sale"]
-    if exclude_lubes:
-        sales = sales[~sales["product_category"].isin(_LUBRICANT_CATEGORIES)]
-    return sales
-
 
 def summary_kpis(df: pd.DataFrame) -> dict:
-    """Top-level KPIs — revenue excludes lubricants (accounting anomaly)."""
-    sales   = _revenue_df(df, exclude_lubes=True)
-    returns = df[(df["bill_class"] == "return") & ~df["product_category"].isin(_LUBRICANT_CATEGORIES)]
-    all_sales = df[df["bill_class"] == "sale"]
-    lube_lines = all_sales[all_sales["product_category"].isin(_LUBRICANT_CATEGORIES)]
+    """Top-level KPIs — sale value, return value, return rate, qty, unique counts."""
+    sale = df[df["bill_class"] == "sale"]
+    ret = df[df["bill_class"] == "return"]
+    sale_v = float(sale["Net Sales"].sum())
+    ret_v = float(ret["Net Sales"].sum())  # already negative
     return {
-        "Period"                              : f"{df['Billing Date'].min().date()} → {df['Billing Date'].max().date()}",
-        "Total Sale Lines (all categories)"   : len(all_sales),
-        "Sale Lines excl. Lubricants"         : len(sales),
-        "Return Lines excl. Lubricants"       : len(returns),
-        "Lubricant Lines (excl. from revenue)": len(lube_lines),
-        "Unique Payers / Dealers"             : df["Payer"].nunique(),
-        "Unique Materials (all)"              : df["Material"].nunique(),
-        f"Gross Sales excl. Lubricants ({CURRENCY})": round(sales["Net Sales"].sum()),
-        f"Returns ({CURRENCY})"               : round(returns["Net Sales"].sum()),
-        f"Net Revenue ({CURRENCY})"           : round(sales["Net Sales"].sum() + returns["Net Sales"].sum()),
-        "Return Rate %"                       : round(
-            abs(returns["Net Sales"].sum()) / max(sales["Net Sales"].sum(), 1) * 100, 2),
-        "Dealer Channel Lines"                : int((df["channel"] == "Dealer").sum()),
-        "Service Channel Lines"               : int((df["channel"] == "Service").sum()),
-        "⚠ Lubricant Net Sales (anomalous)"   : round(lube_lines["Net Sales"].sum()),
+        "Period": (f"{df['Billing Date'].min().date()} → {df['Billing Date'].max().date()}"),
+        "Total Sale Lines": int(len(sale)),
+        "Total Return Lines": int(len(ret)),
+        "Unique Dealers": int(df["Payer"].nunique()),
+        "Unique Materials (SKUs)": int(df["Material"].nunique()),
+        f"Total Sale Value ({CURRENCY})": round(sale_v),
+        f"Total Return Value ({CURRENCY})": round(abs(ret_v)),
+        f"Net Value ({CURRENCY})": round(sale_v + ret_v),
+        "Return Rate % (value)": round(abs(ret_v) / max(sale_v, 1) * 100, 2),
+        "Total Sale Qty": float(sale["SlsVolQty"].sum()),
+        "Total Return Qty": float(abs(ret["SlsVolQty"].sum())),
     }
 
 
-def category_mix(df: pd.DataFrame) -> pd.DataFrame:
-    """Revenue by product category (lubricants shown separately with anomaly flag)."""
-    all_sales = df[df["bill_class"] == "sale"]
-    agg = (
-        all_sales.groupby("product_category")
-        .agg(sale_lines=("Net Sales", "count"),
-             gross_sales=("Net Sales", "sum"),
-             unique_materials=("Material", "nunique"),
-             unique_payers=("Payer", "nunique"))
+def monthly_trend(df: pd.DataFrame) -> pd.DataFrame:
+    """Monthly sale value, return value, net value, and quantities."""
+    grp = (
+        df.groupby(["Year_Month_str", "bill_class"])
+        .agg(value=("Net Sales", "sum"), qty=("SlsVolQty", "sum"))
         .reset_index()
+        .pivot(index="Year_Month_str", columns="bill_class", values=["value", "qty"])
+        .fillna(0)
     )
-    # Share excludes lubricants from denominator (anomaly)
-    revenue_base = agg.loc[~agg["product_category"].isin(_LUBRICANT_CATEGORIES), "gross_sales"].sum()
-    agg["value_share_%"] = agg["gross_sales"].apply(
-        lambda v: round(v / max(revenue_base, 1) * 100, 2)
-    )
-    agg["data_note"] = agg["product_category"].apply(
-        lambda c: "⚠ Negative total — bulk-reseller accounting anomaly. Excluded from revenue KPIs." if c in _LUBRICANT_CATEGORIES else ""
-    )
-    return agg.sort_values("gross_sales", ascending=False).reset_index(drop=True)
+    grp.columns = pd.Index(["_".join(c) for c in grp.columns])
+    grp = grp.reset_index().rename(columns={"Year_Month_str": "period"})
 
+    for col in ["value_sale", "value_return", "qty_sale", "qty_return"]:
+        if col not in grp.columns:
+            grp[col] = 0.0
 
-def monthly_revenue_trend(df: pd.DataFrame) -> pd.DataFrame:
-    """Monthly gross sales and returns by channel (lubricants excluded)."""
-    sales = _revenue_df(df, exclude_lubes=True)
-    rets  = df[(df["bill_class"] == "return") & ~df["product_category"].isin(_LUBRICANT_CATEGORIES)]
-
-    s_mo = (
-        sales.groupby(["Year_Month_str", "channel"])
-        .agg(sale_lines=("Net Sales", "count"), gross_sales=("Net Sales", "sum"))
-        .reset_index()
-    )
-    r_mo = (
-        rets.groupby(["Year_Month_str", "channel"])
-        .agg(return_lines=("Net Sales", "count"), returns=("Net Sales", "sum"))
-        .reset_index()
-    )
-    mo = s_mo.merge(r_mo, on=["Year_Month_str", "channel"], how="left").fillna(0)
-    mo["net_revenue"]   = mo["gross_sales"] + mo["returns"]
-    mo["return_rate_%"] = (mo["returns"].abs() / mo["gross_sales"].replace(0, np.nan) * 100).round(2).fillna(0)
-    mo.rename(columns={"Year_Month_str": "Month"}, inplace=True)
-    return mo.sort_values(["Month", "channel"]).reset_index(drop=True)
-
-
-def monthly_by_category(df: pd.DataFrame) -> pd.DataFrame:
-    """Monthly gross sales split by product category (all categories, lubricants flagged)."""
-    all_sales = df[df["bill_class"] == "sale"]
-    mo = (
-        all_sales.groupby(["Year_Month_str", "product_category"])
-        .agg(gross_sales=("Net Sales", "sum"), lines=("Net Sales", "count"))
-        .reset_index()
-        .rename(columns={"Year_Month_str": "Month"})
-    )
-    return mo.sort_values(["Month", "product_category"]).reset_index(drop=True)
-
-
-def top_dealers(df: pd.DataFrame, top_n: int = 30) -> pd.DataFrame:
-    """Top N dealers by gross sales (lubricants excluded)."""
-    sales   = _revenue_df(df, exclude_lubes=True)
-    returns = df[(df["bill_class"] == "return") & ~df["product_category"].isin(_LUBRICANT_CATEGORIES)]
-
-    s_agg = (
-        sales.groupby("Payer")
-        .agg(gross_sales=("Net Sales", "sum"), sale_lines=("Net Sales", "count"),
-             last_order=("Billing Date", "max"))
-        .reset_index()
-    )
-    r_agg = (
-        returns.groupby("Payer")
-        .agg(return_value=("Net Sales", "sum"), return_lines=("Net Sales", "count"))
-        .reset_index()
-    )
-    merged = s_agg.merge(r_agg, on="Payer", how="left").fillna(0)
-    merged["net_revenue"]   = merged["gross_sales"] + merged["return_value"]
-    merged["return_rate_%"] = (merged["return_value"].abs() / merged["gross_sales"].replace(0, np.nan) * 100).round(2).fillna(0)
-    return merged.sort_values("gross_sales", ascending=False).head(top_n).reset_index(drop=True)
-
-
-def top_materials(df: pd.DataFrame, category: str = "Yamaha Spare Parts", top_n: int = 50) -> pd.DataFrame:
-    """Top N materials by gross sales for a given product category."""
-    sales = df[(df["bill_class"] == "sale") & (df["product_category"] == category)]
-    mat_col = "Material Description" if "Material Description" in df.columns else "Material"
-    agg = (
-        sales.groupby("Material")
-        .agg(
-            description  = (mat_col, "first"),
-            matl_group   = ("Matl Group", "first"),
-            total_qty    = ("SlsVolQty", "sum"),
-            gross_sales  = ("Net Sales", "sum"),
-            sale_lines   = ("Net Sales", "count"),
-        )
-        .reset_index()
-    )
-    agg["value_share_%"] = (agg["gross_sales"] / agg["gross_sales"].sum() * 100).round(3)
-    return agg.sort_values("gross_sales", ascending=False).head(top_n).reset_index(drop=True)
-
-
-def accessories_sample(df: pd.DataFrame, top_n: int = 40) -> pd.DataFrame:
-    """Top materials in the Accessories & Filters category with sub-group label.
-
-    Business meaning: AWPMA is a mixed bag — oil filters and Yamaha motorcycle
-    parts sit alongside Suzuki Alto body panels.  This table surfaces the full
-    contents so the category can be re-scoped or renamed if needed.
-    """
-    sales = df[(df["bill_class"] == "sale") & (df["product_category"] == "Accessories & Filters")]
-    mat_col = "Material Description" if "Material Description" in df.columns else "Material"
-    agg = (
-        sales.groupby(["Matl Group", "Material"])
-        .agg(
-            description = (mat_col, "first"),
-            total_qty   = ("SlsVolQty",  "sum"),
-            gross_sales = ("Net Sales",  "sum"),
-            lines       = ("Net Sales",  "count"),
-        )
-        .reset_index()
-        .sort_values("gross_sales", ascending=False)
-        .head(top_n)
+    grp["return_value_lkr"] = grp["value_return"].abs()
+    grp["sale_value_lkr"] = grp["value_sale"]
+    grp["net_value_lkr"] = grp["value_sale"] + grp["value_return"]
+    grp["sale_qty"] = grp["qty_sale"]
+    grp["return_qty"] = grp["qty_return"].abs()
+    return (
+        grp[
+            [
+                "period",
+                "sale_value_lkr",
+                "return_value_lkr",
+                "net_value_lkr",
+                "sale_qty",
+                "return_qty",
+            ]
+        ]
+        .sort_values("period")
         .reset_index(drop=True)
     )
-    total = agg["gross_sales"].sum()
-    agg["value_share_%"] = (agg["gross_sales"] / max(total, 1) * 100).round(2)
-    return agg
 
 
-def dealer_churn_analysis(df: pd.DataFrame) -> pd.DataFrame:
-    """Classify each dealer by last-activity recency (all categories).
+def mc_monthly_by_category(df: pd.DataFrame) -> pd.DataFrame:
+    """Monthly sale value split by MC sub-category (MC dealers only, sale lines)."""
+    mc_sale = df[
+        (df["dealer_type"] == "MC") & (df["bill_class"] == "sale") & df["mc_category"].notna()
+    ].copy()
+    if mc_sale.empty:
+        return pd.DataFrame(columns=["period", "Lubricant", "Battery", "Tyre", "Spare Parts"])
+    pivot = (
+        mc_sale.groupby(["Year_Month_str", "mc_category"])["Net Sales"]
+        .sum()
+        .reset_index()
+        .pivot(index="Year_Month_str", columns="mc_category", values="Net Sales")
+        .fillna(0)
+        .reset_index()
+        .rename(columns={"Year_Month_str": "period"})
+    )
+    for col in ["Lubricant", "Battery", "Tyre", "Spare Parts"]:
+        if col not in pivot.columns:
+            pivot[col] = 0.0
+    return (
+        pivot[["period", "Lubricant", "Battery", "Tyre", "Spare Parts"]]
+        .sort_values("period")
+        .reset_index(drop=True)
+    )
 
-    Business meaning: identify dealers at risk of disengagement so the sales
-    team can intervene before they stop stocking Yamaha parts altogether.
-    """
-    reference_date = df["Billing Date"].max()
-    sales = _revenue_df(df, exclude_lubes=True)
 
-    agg = (
-        sales.groupby("Payer")
+def part_analysis(df: pd.DataFrame) -> pd.DataFrame:
+    """Part-wise analysis: qty, value, return rate per Material description."""
+    sale = df[df["bill_class"] == "sale"]
+    ret = df[df["bill_class"] == "return"]
+
+    s = sale.groupby("Material").agg(
+        sale_lines=("SlsVolQty", "count"),
+        sale_qty=("SlsVolQty", "sum"),
+        sale_value_lkr=("Net Sales", "sum"),
+    )
+    r = ret.groupby("Material").agg(
+        return_lines=("SlsVolQty", "count"),
+        return_qty=("SlsVolQty", lambda x: abs(x.sum())),
+        return_value_lkr=("Net Sales", lambda x: abs(x.sum())),
+    )
+    agg = s.join(r, how="left").fillna(0).reset_index()
+    agg["net_value_lkr"] = agg["sale_value_lkr"] - agg["return_value_lkr"]
+    agg["net_qty"] = agg["sale_qty"] - agg["return_qty"]
+    agg["return_rate_pct"] = (
+        (agg["return_value_lkr"] / agg["sale_value_lkr"].replace(0, np.nan) * 100)
+        .fillna(0)
+        .round(2)
+    )
+    return agg.sort_values("sale_value_lkr", ascending=False).reset_index(drop=True)
+
+
+def dealer_performance(df: pd.DataFrame) -> pd.DataFrame:
+    """Dealer-level performance: sale value, return value, return rate, SKU count."""
+    sale = df[df["bill_class"] == "sale"]
+    ret = df[df["bill_class"] == "return"]
+
+    dim_cols = ["Payer"] + [
+        c
+        for c in ["Dealer Code", "dealer_type", "Province", "District", "ASE", "RM"]
+        if c in df.columns
+    ]
+
+    s = (
+        sale.groupby(dim_cols, dropna=False)
         .agg(
-            first_order  = ("Billing Date", "min"),
-            last_order   = ("Billing Date", "max"),
-            total_orders = ("Net Sales",    "count"),
-            total_value  = ("Net Sales",    "sum"),
+            sale_qty=("SlsVolQty", "sum"),
+            sale_value_lkr=("Net Sales", "sum"),
+            unique_skus=("Material", "nunique"),
         )
         .reset_index()
     )
-    agg["days_since_last_order"] = (reference_date - agg["last_order"]).dt.days
 
-    def _classify(days: float) -> str:
-        if days <= _CHURN_ACTIVE_DAYS:
-            return "Active"
-        elif days <= _CHURN_AT_RISK_DAYS:
-            return "At-Risk"
-        elif days <= _CHURN_DORMANT_DAYS:
-            return "Dormant"
-        return "Churned"
+    r = (
+        ret.groupby("Payer", dropna=False)
+        .agg(
+            return_qty=("SlsVolQty", lambda x: abs(x.sum())),
+            return_value_lkr=("Net Sales", lambda x: abs(x.sum())),
+        )
+        .reset_index()
+    )
 
-    agg["status"] = agg["days_since_last_order"].apply(_classify)
-    agg["last_order_date"] = agg["last_order"].dt.date
-    return agg.sort_values("days_since_last_order").reset_index(drop=True)
+    agg = s.merge(r, on="Payer", how="left").fillna(0)
+    agg["return_rate_pct"] = (
+        (agg["return_value_lkr"] / agg["sale_value_lkr"].replace(0, np.nan) * 100)
+        .fillna(0)
+        .round(2)
+    )
+    return (
+        agg.rename(columns={"Payer": "dealer_name"})
+        .sort_values("sale_value_lkr", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
-def channel_comparison(df: pd.DataFrame) -> pd.DataFrame:
-    """Side-by-side KPIs for Dealer vs Service channels (lubricants excluded)."""
-    sales = _revenue_df(df, exclude_lubes=True)
-    rows = []
-    for ch in ["Dealer", "Service"]:
-        ch_df = sales[sales["channel"] == ch]
-        rows.append({
-            "Channel"                         : ch,
-            "Sale Lines"                      : len(ch_df),
-            "Unique Payers"                   : ch_df["Payer"].nunique(),
-            "Unique Materials"                : ch_df["Material"].nunique(),
-            f"Gross Sales ({CURRENCY})"       : round(ch_df["Net Sales"].sum()),
-            "Avg Line Value (LKR)"            : round(ch_df["Net Sales"].mean(), 2) if len(ch_df) else 0,
-        })
-    return pd.DataFrame(rows)
+def _hierarchy_perf(
+    df: pd.DataFrame, group_col: str, extra_cols: list[str] | None = None
+) -> pd.DataFrame:
+    """Generic hierarchy-level aggregation (RM, ASE, District, Province)."""
+    if group_col not in df.columns:
+        return pd.DataFrame()
+    sale = df[df["bill_class"] == "sale"]
+    ret = df[df["bill_class"] == "return"]
+    cols = [group_col] + (extra_cols or [])
+    cols = [c for c in cols if c in df.columns]
+
+    s = (
+        sale.groupby(cols, dropna=False)
+        .agg(
+            sale_qty=("SlsVolQty", "sum"),
+            sale_value_lkr=("Net Sales", "sum"),
+            dealer_count=("Payer", "nunique"),
+            unique_skus=("Material", "nunique"),
+        )
+        .reset_index()
+    )
+
+    r = (
+        ret.groupby(group_col, dropna=False)
+        .agg(
+            return_qty=("SlsVolQty", lambda x: abs(x.sum())),
+            return_value_lkr=("Net Sales", lambda x: abs(x.sum())),
+        )
+        .reset_index()
+    )
+
+    agg = s.merge(r, on=group_col, how="left").fillna(0)
+    agg["return_rate_pct"] = (
+        (agg["return_value_lkr"] / agg["sale_value_lkr"].replace(0, np.nan) * 100)
+        .fillna(0)
+        .round(2)
+    )
+    return agg.sort_values("sale_value_lkr", ascending=False).reset_index(drop=True)
+
+
+def rm_performance(df: pd.DataFrame) -> pd.DataFrame:
+    """RM-level performance."""
+    return _hierarchy_perf(df, "RM")
+
+
+def ase_performance(df: pd.DataFrame) -> pd.DataFrame:
+    """ASE-level performance (with RM context)."""
+    return _hierarchy_perf(df, "ASE", extra_cols=["RM"])
+
+
+def district_performance(df: pd.DataFrame) -> pd.DataFrame:
+    """District-level performance (with Province context)."""
+    return _hierarchy_perf(df, "District", extra_cols=["Province"])
+
+
+def province_performance(df: pd.DataFrame) -> pd.DataFrame:
+    """Province-level performance."""
+    return _hierarchy_perf(df, "Province")
+
+
+def mc_category_breakdown(df: pd.DataFrame) -> pd.DataFrame:
+    """MC sub-category summary: Lubricant, Battery, Tyre, Spare Parts."""
+    mc = df[(df["dealer_type"] == "MC") & df["mc_category"].notna()].copy()
+    if mc.empty:
+        return pd.DataFrame()
+    sale = mc[mc["bill_class"] == "sale"]
+    ret = mc[mc["bill_class"] == "return"]
+
+    s = (
+        sale.groupby("mc_category")
+        .agg(
+            sale_lines=("Net Sales", "count"),
+            sale_qty=("SlsVolQty", "sum"),
+            sale_value_lkr=("Net Sales", "sum"),
+            unique_skus=("Material", "nunique"),
+        )
+        .reset_index()
+    )
+    r = (
+        ret.groupby("mc_category")
+        .agg(
+            return_value_lkr=("Net Sales", lambda x: abs(x.sum())),
+        )
+        .reset_index()
+    )
+
+    agg = s.merge(r, on="mc_category", how="left").fillna(0)
+    total_sale = agg["sale_value_lkr"].sum()
+    agg["value_share_pct"] = (agg["sale_value_lkr"] / max(total_sale, 1) * 100).round(2)
+    agg["return_rate_pct"] = (
+        (agg["return_value_lkr"] / agg["sale_value_lkr"].replace(0, np.nan) * 100)
+        .fillna(0)
+        .round(2)
+    )
+    cat_order = {"Lubricant": 0, "Battery": 1, "Tyre": 2, "Spare Parts": 3}
+    agg["_ord"] = agg["mc_category"].map(cat_order).fillna(99)
+    return agg.sort_values("_ord").drop(columns="_ord").reset_index(drop=True)
 
 
 # ══════════════════════════════════════════════════════════════
 # 3. Excel report
 # ══════════════════════════════════════════════════════════════
 
-def _wb_fmts(wb: xlsxwriter.Workbook) -> dict:
-    return {
-        "title":   wb.add_format({"bold": True, "font_size": 14, "font_color": "#003087"}),
-        "sub":     wb.add_format({"italic": True, "font_color": "#555555"}),
-        "warn":    wb.add_format({"bold": True, "italic": True, "font_color": "#B71C1C"}),
-        "hdr":     wb.add_format({"bold": True, "bg_color": "#003087", "font_color": "white", "border": 1, "align": "center"}),
-        "hdr_warn":wb.add_format({"bold": True, "bg_color": "#B71C1C", "font_color": "white", "border": 1, "align": "center"}),
-        "num":     wb.add_format({"num_format": "#,##0",    "border": 1}),
-        "num2":    wb.add_format({"num_format": "#,##0.00", "border": 1}),
-        "cell":    wb.add_format({"border": 1}),
-        "label":   wb.add_format({"bold": True, "bg_color": "#E3F2FD", "border": 1}),
-        "lube":    wb.add_format({"border": 1, "bg_color": "#FFF3E0", "italic": True, "font_color": "#E65100"}),
-        "active":  wb.add_format({"border": 1, "bg_color": "#E8F5E9", "font_color": "#1B7E24"}),
-        "atrisk":  wb.add_format({"border": 1, "bg_color": "#FFF9C4", "font_color": "#F57F17"}),
-        "dormant": wb.add_format({"border": 1, "bg_color": "#FFE0B2", "font_color": "#E65100"}),
-        "churned": wb.add_format({"border": 1, "bg_color": "#FFEBEE", "font_color": "#B71C1C"}),
-    }
 
+def write_excel(df: pd.DataFrame) -> None:
+    """Write stage05 EDA report to Excel."""
 
-def _write_df(ws: Any, df: pd.DataFrame, fmts: dict, row0: int = 0, hdr: str = "hdr") -> None:
-    for c, col in enumerate(df.columns):
-        ws.write(row0, c, col, fmts[hdr])
-    for r, (_, row) in enumerate(df.iterrows(), 1):
-        for c, val in enumerate(row):
-            if isinstance(val, (int, np.integer)):
-                ws.write(row0 + r, c, int(val), fmts["num"])
-            elif isinstance(val, (float, np.floating)):
-                ws.write(row0 + r, c, round(float(val), 2), fmts["num2"])
-            else:
-                ws.write(row0 + r, c, str(val) if pd.notna(val) else "", fmts["cell"])
+    kpis = summary_kpis(df)
+    monthly = monthly_trend(df)
+    parts = part_analysis(df)
+    dealers = dealer_performance(df)
+    rms = rm_performance(df)
+    ases = ase_performance(df)
+    districts = district_performance(df)
+    provinces = province_performance(df)
+    mc_cats = mc_category_breakdown(df)
+    mc_monthly = mc_monthly_by_category(df)
 
-
-def _write_kv(ws: Any, row: int, key: str, val: Any, fmts: dict, warn: bool = False) -> None:
-    ws.write(row, 0, key, fmts["label"])
-    fmt = fmts["num"] if isinstance(val, (int, np.integer)) else (
-          fmts["num2"] if isinstance(val, float) else fmts["cell"])
-    if warn:
-        fmt = fmts["lube"]
-    if isinstance(val, (int, np.integer)):
-        ws.write(row, 1, int(val), fmt)
-    elif isinstance(val, float):
-        ws.write(row, 1, val, fmt)
-    else:
-        ws.write(row, 1, str(val), fmt)
-
-
-def write_excel_report(
-    kpis:          dict,
-    cat_mix:       pd.DataFrame,
-    monthly:       pd.DataFrame,
-    monthly_cat:   pd.DataFrame,
-    dealers:       pd.DataFrame,
-    ym_materials:  pd.DataFrame,
-    acc_sample:    pd.DataFrame,
-    churn:         pd.DataFrame,
-    channel_cmp:   pd.DataFrame,
-) -> None:
     _OUTPUT_EXCEL.parent.mkdir(parents=True, exist_ok=True)
-    wb   = xlsxwriter.Workbook(str(_OUTPUT_EXCEL))
-    fmts = _wb_fmts(wb)
+    with pd.ExcelWriter(_OUTPUT_EXCEL, engine="xlsxwriter") as writer:
+        # KPIs sheet
+        kpi_df = pd.DataFrame(list(kpis.items()), columns=["Metric", "Value"])
+        kpi_df.to_excel(writer, sheet_name="Summary KPIs", index=False)
 
-    # ── Sheet 1: Summary KPIs ────────────────────────────────
-    ws = wb.add_worksheet("Summary")
-    ws.set_column("A:A", 45)
-    ws.set_column("B:B", 26)
-    ws.write("A1", "Stage 5 — Parts & Tyres Sales EDA (All Product Categories)", fmts["title"])
-    ws.write("A2", "Dealer channel (Seeduwa PDC) + Service channel (Yamaha service centres)", fmts["sub"])
-    ws.write("A3", "⚠ Lubricants excluded from revenue KPIs — bulk-reseller accounting records negative Net Sales", fmts["warn"])
-    for r, (k, v) in enumerate(kpis.items()):
-        _write_kv(ws, r + 5, k, v, fmts, warn="Lubricant" in k or "anomalous" in k)
+        monthly.to_excel(writer, sheet_name="Monthly Trend", index=False)
+        mc_monthly.to_excel(writer, sheet_name="MC Monthly Category", index=False)
+        mc_cats.to_excel(writer, sheet_name="MC Category Mix", index=False)
+        parts.head(500).to_excel(writer, sheet_name="Part Analysis", index=False)
+        dealers.to_excel(writer, sheet_name="Dealer Performance", index=False)
+        rms.to_excel(writer, sheet_name="RM Performance", index=False)
+        ases.to_excel(writer, sheet_name="ASE Performance", index=False)
+        districts.to_excel(writer, sheet_name="District Performance", index=False)
+        provinces.to_excel(writer, sheet_name="Province Performance", index=False)
 
-    # ── Sheet 2: Product Category Mix ────────────────────────
-    ws = wb.add_worksheet("Category Mix")
-    ws.set_column("A:A", 30)
-    ws.set_column("B:G", 20)
-    ws.write("A1", "Revenue by Product Category", fmts["title"])
-    ws.write("A2", "Lubricants shown with ⚠ flag — negative gross sales are an accounting anomaly", fmts["warn"])
-
-    headers = list(cat_mix.columns)
-    for c, h in enumerate(headers):
-        ws.write(3, c, h, fmts["hdr"])
-    for r, (_, row) in enumerate(cat_mix.iterrows(), 1):
-        is_lube = row["product_category"] in _LUBRICANT_CATEGORIES
-        row_fmt = fmts["lube"] if is_lube else fmts["cell"]
-        for c, val in enumerate(row):
-            if isinstance(val, (int, np.integer)):
-                ws.write(3 + r, c, int(val), fmts["num"] if not is_lube else fmts["lube"])
-            elif isinstance(val, (float, np.floating)):
-                ws.write(3 + r, c, round(float(val), 2), fmts["num2"] if not is_lube else fmts["lube"])
-            else:
-                ws.write(3 + r, c, str(val) if pd.notna(val) else "", row_fmt)
-
-    # Pie chart — excl lubricants
-    non_lube = cat_mix[~cat_mix["product_category"].isin(_LUBRICANT_CATEGORIES)].reset_index(drop=True)
-    pie = wb.add_chart({"type": "pie"})
-    n_cat = len(non_lube)
-    # Write temp data for pie
-    ws2 = wb.add_worksheet("_cat_chart_data")
-    ws2.hide()
-    for i, (_, row) in enumerate(non_lube.iterrows()):
-        ws2.write(i, 0, row["product_category"])
-        ws2.write(i, 1, float(row["gross_sales"]))
-    pie.add_series({
-        "name":       "Category Mix",
-        "categories": ["_cat_chart_data", 0, 0, n_cat - 1, 0],
-        "values":     ["_cat_chart_data", 0, 1, n_cat - 1, 1],
-    })
-    pie.set_title({"name": "Revenue Mix (excl. Lubricants)"})
-    pie.set_size({"width": 420, "height": 320})
-    ws.insert_chart("I4", pie)
-
-    # ── Sheet 3: Monthly Trend by Category ───────────────────
-    ws = wb.add_worksheet("Monthly by Category")
-    ws.set_column("A:A", 12)
-    ws.set_column("B:D", 28)
-    ws.write("A1", "Monthly Sales by Product Category", fmts["title"])
-    ws.write("A2", "Lubricants shown for reference — negative values are accounting anomaly", fmts["warn"])
-    _write_df(ws, monthly_cat, fmts, row0=3)
-
-    # ── Sheet 4: Monthly Trend (excl. Lubricants) ────────────
-    ws = wb.add_worksheet("Monthly Trend")
-    ws.set_column("A:A", 12)
-    ws.set_column("B:I", 18)
-    ws.write("A1", "Monthly Revenue Trend by Channel (Lubricants excluded)", fmts["title"])
-    _write_df(ws, monthly, fmts, row0=2)
-    n = len(monthly[monthly["channel"] == "Dealer"])
-    if n > 0:
-        chart = wb.add_chart({"type": "column"})
-        chart.add_series({
-            "name":       "Gross Sales",
-            "categories": ["Monthly Trend", 3, 0, 2 + n, 0],
-            "values":     ["Monthly Trend", 3, 3, 2 + n, 3],
-            "fill":       {"color": "#003087"},
-        })
-        chart.add_series({
-            "name":       "Returns",
-            "categories": ["Monthly Trend", 3, 0, 2 + n, 0],
-            "values":     ["Monthly Trend", 3, 4, 2 + n, 4],
-            "fill":       {"color": "#B71C1C"},
-        })
-        chart.set_title({"name": "Monthly Revenue — Dealer Channel (excl. Lubricants)"})
-        chart.set_y_axis({"name": f"Value ({CURRENCY})", "num_format": "#,##0"})
-        chart.set_size({"width": 720, "height": 340})
-        ws.insert_chart("K3", chart)
-
-    # ── Sheet 5: Channel Comparison ──────────────────────────
-    ws = wb.add_worksheet("Channel Comparison")
-    ws.set_column("A:F", 22)
-    ws.write("A1", "Channel Comparison: Dealer vs Service (lubricants excluded)", fmts["title"])
-    _write_df(ws, channel_cmp, fmts, row0=3)
-
-    # ── Sheet 6: Top Dealers ─────────────────────────────────
-    ws = wb.add_worksheet("Top Dealers")
-    ws.set_column("A:A", 38)
-    ws.set_column("B:H", 18)
-    ws.write("A1", f"Top {len(dealers)} Dealers by Gross Sales (lubricants excluded)", fmts["title"])
-    _write_df(ws, dealers, fmts, row0=2)
-
-    # ── Sheet 7: Top Yamaha Parts ────────────────────────────
-    ws = wb.add_worksheet("Top Yamaha Parts")
-    ws.set_column("A:A", 22)
-    ws.set_column("B:B", 50)
-    ws.set_column("C:G", 18)
-    ws.write("A1", f"Top {len(ym_materials)} Yamaha Spare Parts by Gross Sales", fmts["title"])
-    _write_df(ws, ym_materials, fmts, row0=2)
-
-    # ── Sheet 8: Accessories & Filters Sample ────────────────
-    ws = wb.add_worksheet("Accessories Sample")
-    ws.set_column("A:A", 16)
-    ws.set_column("B:B", 22)
-    ws.set_column("C:C", 50)
-    ws.set_column("D:G", 18)
-    ws.write("A1", "Accessories & Filters (AWPMA) — Top Materials Breakdown", fmts["title"])
-    ws.write(
-        "A2",
-        "Note: AWPMA mixes oil filters / Yamaha parts with Suzuki Alto 800 body panels. "
-        "Review and re-scope this category as needed.",
-        fmts["sub"],
-    )
-    _write_df(ws, acc_sample, fmts, row0=3)
-
-    # ── Sheet 10: Dealer Churn ───────────────────────────────
-    ws = wb.add_worksheet("Dealer Churn")
-    ws.set_column("A:A", 38)
-    ws.set_column("B:H", 18)
-    ws.write("A1", "Dealer Churn Analysis — Activity Classification", fmts["title"])
-    ws.write("A2", "Active ≤90 days | At-Risk 91–180d | Dormant 181–365d | Churned >365d", fmts["sub"])
-    status_fmt = {"Active": "active", "At-Risk": "atrisk", "Dormant": "dormant", "Churned": "churned"}
-    headers = list(churn.columns)
-    status_col = headers.index("status") if "status" in headers else -1
-    for c, h in enumerate(headers):
-        ws.write(3, c, h, fmts["hdr"])
-    for r, (_, row) in enumerate(churn.iterrows(), 1):
-        sfmt_key = status_fmt.get(str(row.get("status", "")), "cell")
-        for c, val in enumerate(row):
-            fmt = fmts[sfmt_key] if c == status_col else fmts["cell"]
-            if isinstance(val, (int, np.integer)):
-                ws.write(3 + r, c, int(val), fmts["num"])
-            elif isinstance(val, (float, np.floating)):
-                ws.write(3 + r, c, round(float(val), 2), fmts["num2"])
-            else:
-                ws.write(3 + r, c, str(val) if pd.notna(val) else "", fmt)
-
-    # ── Sheet 11: Churn Summary ──────────────────────────────
-    sum_ws = wb.add_worksheet("Churn Summary")
-    sum_ws.write("A1", "Dealer Activity Summary", fmts["title"])
-    status_counts = churn["status"].value_counts()
-    for r, (status, count) in enumerate(status_counts.items()):
-        sum_ws.write(r + 2, 0, status, fmts["label"])
-        sum_ws.write(r + 2, 1, int(count), fmts["num"])
-    pie2 = wb.add_chart({"type": "pie"})
-    n_s = len(status_counts)
-    pie2.add_series({
-        "name":       "Dealer Status",
-        "categories": ["Churn Summary", 2, 0, 1 + n_s, 0],
-        "values":     ["Churn Summary", 2, 1, 1 + n_s, 1],
-    })
-    pie2.set_title({"name": "Dealer Activity Distribution"})
-    pie2.set_size({"width": 400, "height": 300})
-    sum_ws.insert_chart("D2", pie2)
-
-    wb.close()
     logger.info(f"Excel report: {_OUTPUT_EXCEL}")
 
 
 # ══════════════════════════════════════════════════════════════
-# 4. Main entry point
+# 4. Pipeline entry point
 # ══════════════════════════════════════════════════════════════
 
-def run(refresh: bool = False) -> None:
-    """Execute Stage 5: Sales EDA + Dealer Churn Analysis."""
-    logger.info("=" * 55)
-    logger.info("STAGE 5 — SALES EDA + DEALER CHURN (ALL CATEGORIES)")
-    logger.info("=" * 55)
 
+def run(refresh: bool = False) -> dict[str, Any]:
+    """Run Stage 5 — Sales EDA pipeline.
+
+    Args:
+        refresh: Re-read raw Excel files even if parquet cache exists.
+
+    Returns:
+        Summary KPI dict.
+    """
+    logger.info("=== Stage 5: Sales EDA ===")
     df = load_and_clean(refresh=refresh)
+    kpis = summary_kpis(df)
 
-    kpis         = summary_kpis(df)
-    cat_df       = category_mix(df)
-    monthly      = monthly_revenue_trend(df)
-    monthly_cat  = monthly_by_category(df)
-    dealers_df   = top_dealers(df)
-    ym_mats      = top_materials(df, category="Yamaha Spare Parts")
-    acc_df       = accessories_sample(df)
-    churn_df     = dealer_churn_analysis(df)
-    channel_df   = channel_comparison(df)
-
-    write_excel_report(
-        kpis, cat_df, monthly, monthly_cat,
-        dealers_df, ym_mats, acc_df, churn_df, channel_df,
-    )
-
-    logger.info("=" * 55)
-    logger.info("STAGE 5 SUMMARY")
-    logger.info("=" * 55)
+    logger.info("--- KPIs ---")
     for k, v in kpis.items():
-        logger.info(f"  {k:<45}: {v}")
+        logger.info(f"  {k}: {v}")
 
-    logger.info("  Category breakdown (all):")
-    for _, row in cat_df.iterrows():
-        flag = "  ⚠ anomaly" if row["product_category"] in _LUBRICANT_CATEGORIES else ""
-        logger.info(f"    {row['product_category']:<30}: LKR {int(row['gross_sales']):>16,}{flag}")
-
-    logger.info("  Churn breakdown:")
-    for status, cnt in churn_df["status"].value_counts().items():
-        logger.info(f"    {status:<10}: {cnt:>4} dealers")
-
+    write_excel(df)
     logger.info("Stage 5 complete.")
+    return kpis
+
+
+if __name__ == "__main__":
+    from loguru import logger as _log
+
+    _log.remove()
+    _log.add(lambda msg: print(msg, end=""), level="INFO")
+    run(refresh=True)

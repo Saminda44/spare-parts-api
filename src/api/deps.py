@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from functools import lru_cache
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import pandas as pd
 
@@ -16,7 +19,8 @@ _TARGETS_PATH = DATA_INTERIM / "sales_targets.json"
 
 def get_sales_targets() -> dict[str, Any]:
     if _TARGETS_PATH.exists():
-        return json.loads(_TARGETS_PATH.read_text())
+        result: dict[str, Any] = json.loads(_TARGETS_PATH.read_text())
+        return result
     return {"yearly_target": 40000, "monthly_overrides": {}}
 
 
@@ -30,6 +34,7 @@ def _load(path: Path) -> pd.DataFrame:
 
 
 # ── Stages 1-8 ────────────────────────────────────────────────────────────────
+
 
 def get_mcsi_clean() -> pd.DataFrame:
     return _load(DATA_INTERIM / "mcsi_clean.parquet")
@@ -89,6 +94,7 @@ def get_ingestion_log() -> pd.DataFrame:
 
 # ── Stages 9-14 ───────────────────────────────────────────────────────────────
 
+
 def get_classification() -> pd.DataFrame:
     return _load(DATA_INTERIM / "abc_xyz_fsn.parquet")
 
@@ -122,20 +128,20 @@ def get_catalog_parts() -> pd.DataFrame:
 
 
 _STAGE_ARTIFACTS: dict[str, Path] = {
-    "stage1_mcsi":             DATA_INTERIM / "mcsi_clean.parquet",
-    "stage2_sales_forecast":   DATA_INTERIM / "unit_sales_forecast.parquet",
-    "stage3_uio_forecast":     DATA_INTERIM / "uio_forecast.parquet",
-    "stage4_orders_eda":       DATA_INTERIM / "orders_clean.parquet",
-    "stage5_sales_eda":        DATA_INTERIM / "sales_clean.parquet",
-    "stage6_part_master":      DATA_INTERIM / "part_master.parquet",
-    "stage7_stock_movements":  DATA_INTERIM / "stock_movements.parquet",
-    "stage8_spare_parts_eda":  DATA_INTERIM / "spare_parts_features.parquet",
-    "stage9_classification":   DATA_INTERIM / "abc_xyz_fsn.parquet",
+    "stage1_mcsi": DATA_INTERIM / "mcsi_clean.parquet",
+    "stage2_sales_forecast": DATA_INTERIM / "unit_sales_forecast.parquet",
+    "stage3_uio_forecast": DATA_INTERIM / "uio_forecast.parquet",
+    "stage4_orders_eda": DATA_INTERIM / "orders_clean.parquet",
+    "stage5_sales_eda": DATA_INTERIM / "sales_clean.parquet",
+    "stage6_part_master": DATA_INTERIM / "part_master.parquet",
+    "stage7_stock_movements": DATA_INTERIM / "stock_movements.parquet",
+    "stage8_spare_parts_eda": DATA_INTERIM / "spare_parts_features.parquet",
+    "stage9_classification": DATA_INTERIM / "abc_xyz_fsn.parquet",
     "stage10_demand_forecast": DATA_INTERIM / "demand_forecast.parquet",
-    "stage11_stock_tracker":   DATA_INTERIM / "stock_tracker.parquet",
-    "stage12_policy":          DATA_INTERIM / "inventory_policy.parquet",
+    "stage11_stock_tracker": DATA_INTERIM / "stock_tracker.parquet",
+    "stage12_policy": DATA_INTERIM / "inventory_policy.parquet",
     "stage13_shipment_report": DATA_OUTPUTS / "stage13_shipment_report.xlsx",
-    "stage14_rl_policy":       DATA_INTERIM / "rl_policy.parquet",
+    "stage14_rl_policy": DATA_INTERIM / "rl_policy.parquet",
 }
 
 
@@ -145,11 +151,12 @@ def pipeline_status() -> dict[str, bool]:
 
 def pipeline_freshness() -> dict[str, str | None]:
     """Return ISO-format mtime for each stage artifact, or None if not present."""
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     result: dict[str, str | None] = {}
     for k, p in _STAGE_ARTIFACTS.items():
         if p.exists():
-            mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+            mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=UTC)
             result[k] = mtime.isoformat()
         else:
             result[k] = None

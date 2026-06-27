@@ -433,7 +433,7 @@ export const rebuildPartMaster = (runMissingAgents = true) =>
 // ── Stages 4,5,7,8: EDA ────────────────────────────────────────────────────
 
 export interface OrdersEdaDealer { dealer: string; order_count: number; total_value_lkr: number; }
-export interface OrdersEdaMonthlyPoint { period: string; po_count: number; return_count: number; total_value_lkr: number; }
+export interface OrdersEdaMonthlyPoint { period: string; po_count: number; return_count: number; total_value_lkr: number; confirmed_value_lkr: number; }
 export interface OrdersEdaRejectionRow {
   material: string; description: string; customer: string; document_date: string;
   order_qty: number; lost_qty: number; fill_rate: number;
@@ -441,21 +441,234 @@ export interface OrdersEdaRejectionRow {
 export interface OrdersEdaRejectionReasonRow {
   reason: string; rejected_lines: number; rejected_qty: number; share_pct: number;
 }
+export interface CategoryMixRow {
+  segment: string; order_lines: number; value_lkr: number;
+  value_share_pct: number; fill_rate_pct: number;
+}
+export interface YoYGrowthRow {
+  segment: string;
+  year_prev: number;
+  year_curr: number;
+  value_year_prev: number;
+  value_year_curr: number;
+  yoy_pct: number;
+  lines_year_prev: number;
+  lines_year_curr: number;
+}
+export interface ProvincePerformanceRow {
+  province: string; order_value_lkr: number;
+  value_share_pct: number; fill_rate_pct: number; dealer_count: number;
+}
+export interface ShortShipRow {
+  material: string; description: string;
+  short_qty: number; fill_rate_pct: number; occurrences: number;
+}
+export interface FillRateBandRow {
+  segment: string; above_98: number; between_95_98: number;
+  between_90_95: number; below_90: number;
+}
+export interface PartAnalysisRow {
+  material: string; description: string;
+  order_lines: number; order_qty: number; confirmed_qty: number;
+  total_value_lkr: number; fill_rate_pct: number; value_share_pct: number; short_qty: number;
+}
+export interface DealerPerfRow {
+  dealer_code: string; dealer_name: string; province: string; district: string; rm: string; ase: string;
+  po_lines: number; order_value_lkr: number; fill_rate_pct: number;
+  return_rate_pct: number; dealer_tier: string; value_share_pct: number;
+}
+export interface RmPerfRow {
+  rm: string;
+  province: string;
+  unique_dealers: number;
+  po_lines: number;
+  order_value_lkr: number;
+  fill_rate_pct: number;
+  return_rate_pct: number;
+  value_share_pct: number;
+}
+export interface AsePerfRow {
+  ase: string; rm: string; province: string; unique_dealers: number; po_lines: number;
+  order_value_lkr: number; fill_rate_pct: number; return_rate_pct: number;
+}
+export interface DistrictPerfRow {
+  province: string;
+  district: string;
+  unique_dealers: number;
+  po_lines: number;
+  order_value_lkr: number;
+  fill_rate_pct: number;
+  value_share_pct: number;
+  return_rate_pct: number;
+}
+export interface ProvinceAnalysisRow {
+  province: string; unique_dealers: number; po_lines: number;
+  order_value_lkr: number; fill_rate_pct: number; return_rate_pct: number; value_share_pct: number;
+}
+
+export interface McMonthlyCategoryPoint {
+  period: string;
+  lubricant_lkr: number;
+  battery_lkr: number;
+  tyre_lkr: number;
+  spare_parts_lkr: number;
+  total_lkr: number;
+}
+
+export interface FulfillmentLineBucket {
+  lines: number;
+  pct_of_lines: number;
+  order_qty: number;
+  confirmed_qty: number;
+  confirmed_value_lkr: number;
+}
+
+export interface FulfillmentAnalysis {
+  total_lines: number;
+  fully_confirmed: FulfillmentLineBucket;
+  partially_confirmed: FulfillmentLineBucket;
+  fully_rejected: FulfillmentLineBucket;
+  total_docs: number;
+  docs_fully_filled: number;
+  docs_fully_filled_pct: number;
+  docs_partially_filled: number;
+  docs_partially_filled_pct: number;
+  docs_complete_zero: number;
+  docs_complete_zero_pct: number;
+}
+
 export interface OrdersEdaData {
   total_po: number; total_returns: number; avg_fill_rate: number;
   avg_lead_time_days: number; fill_rate_lt1_count: number;
+  total_order_value_lkr: number;    // Order Received value (all PO lines incl. rejected)
+  total_confirmed_value_lkr: number; // Total Sales value (confirmed qty × unit price)
+  value_fill_rate_pct: number;       // total_confirmed / total_order × 100
+  total_return_value_lkr: number;   // Net value of all return order lines (H + cancelled C)
+  return_rate_value_pct: number;    // return_value / order_value × 100
+  return_order_reasons: OrdersEdaRejectionReasonRow[];
+  return_type_breakdown: Record<string, number>;
   top_dealers: OrdersEdaDealer[];
   monthly_trend: OrdersEdaMonthlyPoint[];
   rejections: OrdersEdaRejectionRow[];
   orders_received_breakdown: { total_documents: number; fully_filled: number; partial_fill: number; complete_zero: number; };
   rejection_reasons: OrdersEdaRejectionReasonRow[];
+  // Per-segment analysis tables
+  part_analysis: PartAnalysisRow[];
+  dealer_perf: DealerPerfRow[];
+  rm_perf: RmPerfRow[];
+  ase_perf: AsePerfRow[];
+  district_perf: DistrictPerfRow[];
+  province_analysis: ProvinceAnalysisRow[];
+  // Business insights (full dataset)
+  category_mix: CategoryMixRow[];
+  yoy_growth: YoYGrowthRow[];
+  province_perf: ProvincePerformanceRow[];
+  top_short_shipped: ShortShipRow[];
+  fill_rate_bands: FillRateBandRow[];
+  dealer_health_summary: { a_tier: number; b_tier: number; c_tier: number; dormant_count: number; total_dealers: number; };
+  pareto_summary: { sku_80pct_count: number; total_skus: number; dealer_80pct_count: number; total_dealers: number; };
+  category_cross: { multi_category: number; single_category: number; total_mc_dealers: number; };
+  rejection_rate_pct: number;
+  fraud_alerts: Array<{ dealer_code: string; dealer_name: string; month: string; return_share_pct: number; }>;
+  mc_monthly_category: McMonthlyCategoryPoint[];
+  fulfillment?: FulfillmentAnalysis;
 }
 
-export interface SalesEdaMonthlyPoint { period: string; revenue_lkr: number; qty: number; return_count: number; }
+export interface SalesEdaMonthlyPoint {
+  period: string;
+  sale_value_lkr: number;
+  return_value_lkr: number;
+  net_value_lkr: number;
+  sale_qty: number;
+  return_qty: number;
+  order_received_lkr: number;
+}
+
+export interface SalesPartRow {
+  material: string;
+  sale_lines: number;
+  sale_qty: number;
+  sale_value_lkr: number;
+  return_lines: number;
+  return_qty: number;
+  return_value_lkr: number;
+  net_qty: number;
+  net_value_lkr: number;
+  return_rate_pct: number;
+}
+
+export interface SalesDealerRow {
+  dealer_name: string;
+  dealer_type: string;
+  province: string;
+  district: string;
+  ase: string;
+  rm: string;
+  sale_qty: number;
+  sale_value_lkr: number;
+  return_qty: number;
+  return_value_lkr: number;
+  return_rate_pct: number;
+  unique_skus: number;
+  order_received_lkr: number;
+  fulfillment_pct: number;
+}
+
+export interface SalesHierRow {
+  rm?: string; ase?: string; district?: string; province?: string;
+  sale_value_lkr: number;
+  return_value_lkr: number;
+  return_rate_pct: number;
+  sale_qty: number;
+  dealer_count: number;
+  unique_skus: number;
+  order_received_lkr?: number;
+}
+
+export interface SalesMcCategoryRow {
+  mc_category: string;
+  sale_lines: number;
+  sale_qty: number;
+  sale_value_lkr: number;
+  return_value_lkr: number;
+  value_share_pct: number;
+  return_rate_pct: number;
+  unique_skus: number;
+}
+
+export interface SalesMcMonthlyPoint {
+  period: string;
+  lubricant_lkr: number;
+  battery_lkr: number;
+  tyre_lkr: number;
+  spare_parts_lkr: number;
+  total_lkr: number;
+}
+
 export interface SalesEdaData {
-  total_revenue_lkr: number; total_units: number;
-  by_channel: Record<string, number>; by_category: Record<string, number>;
+  data_year: number;
+  available_years: number[];
+  total_sale_value_lkr: number;
+  total_return_value_lkr: number;
+  net_sale_value_lkr: number;
+  return_rate_pct: number;
+  total_sale_qty: number;
+  total_return_qty: number;
+  unique_parts: number;
+  unique_dealers: number;
+  total_sale_lines: number;
+  total_return_lines: number;
+  order_received_lkr: number;
+  fulfillment_pct: number;
   monthly_trend: SalesEdaMonthlyPoint[];
+  part_analysis: SalesPartRow[];
+  dealer_perf: SalesDealerRow[];
+  rm_perf: SalesHierRow[];
+  ase_perf: SalesHierRow[];
+  district_perf: SalesHierRow[];
+  province_perf: SalesHierRow[];
+  mc_category_mix: SalesMcCategoryRow[];
+  mc_monthly_category: SalesMcMonthlyPoint[];
 }
 
 export interface MovementMonthlyPoint { period: string; movement_class: string; qty: number; value_lkr: number; }
@@ -645,10 +858,11 @@ export const fetchCatalogParts = (model: string, limit = 500) =>
   api.get<CatalogPartRow[]>(`/catalog/parts/${encodeURIComponent(model)}`, { params: { limit } }).then(r => r.data);
 
 export type DealerType = "MC" | "OBM" | "ALL";
+export type McCategoryType = "ALL" | "Lubricant" | "Battery" | "Tyre" | "SpareParts";
 
-export const fetchOrdersEda   = (dealerType: DealerType = "MC") =>
-  api.get<OrdersEdaData>("/eda/orders", { params: { dealer_type: dealerType } }).then(r => r.data);
-export const fetchSalesEda    = (dealerType: DealerType = "MC") =>
-  api.get<SalesEdaData>("/eda/sales", { params: { dealer_type: dealerType } }).then(r => r.data);
+export const fetchOrdersEda = (dealerType: DealerType = "MC", mcCategory: McCategoryType = "ALL") =>
+  api.get<OrdersEdaData>("/eda/orders", { params: { dealer_type: dealerType, mc_category: mcCategory } }).then(r => r.data);
+export const fetchSalesEda    = (dealerType: DealerType = "MC", mcCategory: string = "ALL", year: number = 0) =>
+  api.get<SalesEdaData>("/eda/sales", { params: { dealer_type: dealerType, mc_category: mcCategory, year } }).then(r => r.data);
 export const fetchMovements   = () => api.get<MovementsData>("/eda/movements").then(r => r.data);
 export const fetchSparePartsEda = () => api.get<SparePartsEdaData>("/eda/spare-parts").then(r => r.data);

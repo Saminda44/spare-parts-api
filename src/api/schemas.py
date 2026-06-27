@@ -6,10 +6,10 @@ from typing import Any
 
 from pydantic import BaseModel
 
-
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
+
 
 class PipelineStatus(BaseModel):
     stage1_mcsi: bool
@@ -32,6 +32,7 @@ class PipelineStatus(BaseModel):
 # Overview / KPIs
 # ---------------------------------------------------------------------------
 
+
 class KpiResponse(BaseModel):
     total_skus: int
     active_skus: int
@@ -46,7 +47,7 @@ class KpiResponse(BaseModel):
     excess_stock_value_lkr: float
     avg_coverage_months: float
     sanity_flag_count: int
-    rl_avg_order_reduction_pct: float   # average % order reduction vs rule-based
+    rl_avg_order_reduction_pct: float  # average % order reduction vs rule-based
 
 
 class StockStatusBreakdown(BaseModel):
@@ -63,12 +64,13 @@ class OverviewResponse(BaseModel):
     abc_counts: dict[str, int]
     tier_counts: dict[str, int]
     urgency_counts: dict[str, int]
-    ss_method_counts: dict[str, int]   # ML vs classical safety stock breakdown
+    ss_method_counts: dict[str, int]  # ML vs classical safety stock breakdown
 
 
 # ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
+
 
 class ClassificationRow(BaseModel):
     material_9: str
@@ -78,13 +80,13 @@ class ClassificationRow(BaseModel):
     fsn: str
     abc_xyz_fsn: str
     policy_tier: str
-    demand_category: str | None = None   # fast / slow / intermittent / non-moving
-    demand_cluster: int | None = None    # K-Means cluster number
-    demand_segment: str | None = None    # human-readable K-Means label
-    in_ssop: bool | None = None          # appears in SSOP supersession table
+    demand_category: str | None = None  # fast / slow / intermittent / non-moving
+    demand_cluster: int | None = None  # K-Means cluster number
+    demand_segment: str | None = None  # human-readable K-Means label
+    in_ssop: bool | None = None  # appears in SSOP supersession table
     avg_monthly_demand: float
     cv: float
-    p_zero: float                        # probability of zero-demand month
+    p_zero: float  # probability of zero-demand month
     active_months: int
     total_months: int
     total_issue_qty: float
@@ -108,6 +110,7 @@ class ClassificationResponse(BaseModel):
 # Demand Forecast
 # ---------------------------------------------------------------------------
 
+
 class ForecastRow(BaseModel):
     material_9: str
     description: str
@@ -123,7 +126,7 @@ class ForecastRow(BaseModel):
     avg_monthly_demand: float
     demand_std_monthly: float
     demand_std_lt: float
-    cv_hist: float                       # historical coefficient of variation
+    cv_hist: float  # historical coefficient of variation
     total_issue_value_lkr: float
     active_months: int
 
@@ -145,6 +148,7 @@ class MonthlyDemandPoint(BaseModel):
 # ---------------------------------------------------------------------------
 # Inventory Status
 # ---------------------------------------------------------------------------
+
 
 class InventoryRow(BaseModel):
     material_9: str
@@ -209,6 +213,7 @@ class ExcessRow(BaseModel):
 # Policy / Orders
 # ---------------------------------------------------------------------------
 
+
 class PolicyRow(BaseModel):
     material_9: str
     description: str
@@ -219,11 +224,11 @@ class PolicyRow(BaseModel):
     stock_status: str
     coverage_months: float
     days_of_stock: float
-    method: str                    # forecast method used for this SKU's policy
-    service_level: float           # target service level (e.g. 0.99 for critical)
-    z_score: float                 # safety stock z-score
+    method: str  # forecast method used for this SKU's policy
+    service_level: float  # target service level (e.g. 0.99 for critical)
+    z_score: float  # safety stock z-score
     safety_stock: float
-    ss_method: str                 # "ML-Quantile" or "Classical"
+    ss_method: str  # "ML-Quantile" or "Classical"
     rol: float
     roq: float
     net_requirement: float
@@ -261,6 +266,7 @@ class SanityRow(BaseModel):
 # RL Policy
 # ---------------------------------------------------------------------------
 
+
 class RLRow(BaseModel):
     material_9: str
     description: str
@@ -282,7 +288,7 @@ class RLSummary(BaseModel):
     scored_skus: int
     flagged_skus: int
     avg_multiplier: float
-    avg_order_reduction_pct: float   # average % reduction vs rule-based
+    avg_order_reduction_pct: float  # average % reduction vs rule-based
     skus_reduce_order: int
     skus_increase_order: int
     skus_unchanged: int
@@ -296,6 +302,7 @@ class RLResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # SKU detail (aggregates all stages)
 # ---------------------------------------------------------------------------
+
 
 class SKUDetail(BaseModel):
     material_9: str
@@ -354,6 +361,7 @@ class SKUDetail(BaseModel):
 # ---------------------------------------------------------------------------
 # Bikes — Stages 1-3 (MCSI, Unit Sales Forecast, UIO Forecast)
 # ---------------------------------------------------------------------------
+
 
 class McsiModelRow(BaseModel):
     model: str
@@ -421,8 +429,8 @@ class UIOSummaryRow(BaseModel):
 
 
 class UIOComparisonResponse(BaseModel):
-    external: list[UIOExternalRow]   # from UIO.xlsx (historical cohort model)
-    mcsi: list[UIOSummaryRow]        # from MCSI.xlsx (recent VIN-verified sales)
+    external: list[UIOExternalRow]  # from UIO.xlsx (historical cohort model)
+    mcsi: list[UIOSummaryRow]  # from MCSI.xlsx (recent VIN-verified sales)
 
 
 class UIODemandRow(BaseModel):
@@ -496,6 +504,7 @@ class CrosstabResponse(BaseModel):
 # MCSI EDA — Stage 1 detailed analytics
 # ---------------------------------------------------------------------------
 
+
 class McsiEdaKpis(BaseModel):
     total_vins: int
     sold: int
@@ -547,6 +556,7 @@ class McsiEdaResponse(BaseModel):
 # Part Master — Stage 6
 # ---------------------------------------------------------------------------
 
+
 class PartMasterRow(BaseModel):
     part_number: str
     description: str
@@ -580,6 +590,7 @@ class PartMasterResponse(BaseModel):
 # EDA — Stages 4, 5, 7, 8
 # ---------------------------------------------------------------------------
 
+
 class OrdersEdaDealer(BaseModel):
     dealer: str
     order_count: int
@@ -590,7 +601,8 @@ class OrdersEdaMonthlyPoint(BaseModel):
     period: str
     po_count: int
     return_count: int
-    total_value_lkr: float
+    total_value_lkr: float  # sum of Net Value (Item) — order received value
+    confirmed_value_lkr: float = 0.0  # Confirmed Qty × unit price — actual sales value
 
 
 class OrdersEdaRejectionRow(BaseModel):
@@ -610,32 +622,334 @@ class OrdersEdaRejectionReasonRow(BaseModel):
     share_pct: float
 
 
+class CategoryMixRow(BaseModel):
+    segment: str
+    order_lines: int
+    value_lkr: float
+    value_share_pct: float
+    fill_rate_pct: float
+
+
+class YoYGrowthRow(BaseModel):
+    segment: str
+    year_prev: int
+    year_curr: int
+    value_year_prev: float
+    value_year_curr: float
+    yoy_pct: float
+    lines_year_prev: int
+    lines_year_curr: int
+
+
+class ProvincePerformanceRow(BaseModel):
+    province: str
+    order_value_lkr: float
+    value_share_pct: float
+    fill_rate_pct: float
+    dealer_count: int
+
+
+class ShortShipRow(BaseModel):
+    material: str
+    description: str
+    short_qty: float
+    fill_rate_pct: float
+    occurrences: int
+
+
+class FillRateBandRow(BaseModel):
+    segment: str
+    above_98: int
+    between_95_98: int
+    between_90_95: int
+    below_90: int
+
+
+# ---------------------------------------------------------------------------
+# Orders EDA — per-segment analysis tables
+# ---------------------------------------------------------------------------
+
+
+class PartAnalysisRow(BaseModel):
+    material: str
+    description: str
+    order_lines: int
+    order_qty: float
+    confirmed_qty: float
+    total_value_lkr: float
+    fill_rate_pct: float
+    value_share_pct: float
+    short_qty: float
+
+
+class DealerPerfRow(BaseModel):
+    dealer_code: str
+    dealer_name: str
+    province: str
+    district: str
+    rm: str
+    ase: str
+    po_lines: int
+    order_value_lkr: float
+    fill_rate_pct: float
+    return_rate_pct: float
+    dealer_tier: str
+    value_share_pct: float
+
+
+class RmPerfRow(BaseModel):
+    rm: str
+    province: str = ""
+    unique_dealers: int
+    po_lines: int
+    order_value_lkr: float
+    fill_rate_pct: float
+    return_rate_pct: float
+    value_share_pct: float
+
+
+class AsePerfRow(BaseModel):
+    ase: str
+    rm: str
+    province: str
+    unique_dealers: int
+    po_lines: int
+    order_value_lkr: float
+    fill_rate_pct: float
+    return_rate_pct: float
+
+
+class DistrictPerfRow(BaseModel):
+    province: str
+    district: str
+    unique_dealers: int
+    po_lines: int
+    order_value_lkr: float
+    fill_rate_pct: float
+    value_share_pct: float
+    return_rate_pct: float = 0.0
+
+
+class ProvinceAnalysisRow(BaseModel):
+    province: str
+    unique_dealers: int
+    po_lines: int
+    order_value_lkr: float
+    fill_rate_pct: float
+    return_rate_pct: float
+    value_share_pct: float
+
+
+class McMonthlyCategoryPoint(BaseModel):
+    period: str
+    lubricant_lkr: float = 0.0
+    battery_lkr: float = 0.0
+    tyre_lkr: float = 0.0
+    spare_parts_lkr: float = 0.0
+    total_lkr: float = 0.0
+
+
+class FulfillmentLineBucket(BaseModel):
+    lines: int
+    pct_of_lines: float
+    order_qty: float
+    confirmed_qty: float
+    confirmed_value_lkr: float
+
+
+class FulfillmentAnalysis(BaseModel):
+    """Qty/value breakdown by fulfillment status at line and document level."""
+
+    total_lines: int
+    fully_confirmed: FulfillmentLineBucket  # Confirmed Qty >= Order Qty
+    partially_confirmed: FulfillmentLineBucket  # 0 < Confirmed Qty < Order Qty
+    fully_rejected: FulfillmentLineBucket  # Confirmed Qty == 0 (from rejection log)
+    total_docs: int
+    docs_fully_filled: int
+    docs_fully_filled_pct: float
+    docs_partially_filled: int
+    docs_partially_filled_pct: float
+    docs_complete_zero: int
+    docs_complete_zero_pct: float
+
+
 class OrdersEdaResponse(BaseModel):
     total_po: int
     total_returns: int
-    avg_fill_rate: float
+    avg_fill_rate: float  # qty-based fill rate including rejected lines (true overall)
     avg_lead_time_days: float
     fill_rate_lt1_count: int
+    total_order_value_lkr: float = (
+        0.0  # sum of PO Net Value — "Order Received" (all lines incl. rejected)
+    )
+    total_confirmed_value_lkr: float = 0.0  # Confirmed Qty × unit price — "Total Sales"
+    value_fill_rate_pct: float = 0.0  # total_confirmed_value / total_order_value × 100
+    total_return_value_lkr: float = (
+        0.0  # sum of Net Value for all Return-doc lines (H + cancelled C)
+    )
+    return_rate_value_pct: float = 0.0  # return_value / order_value × 100
+    return_order_reasons: list[OrdersEdaRejectionReasonRow] = []  # reasons for return orders
+    return_type_breakdown: dict[str, int] = {}  # {"Return Order": n, "Cancelled Order": n}
     top_dealers: list[OrdersEdaDealer]
     monthly_trend: list[OrdersEdaMonthlyPoint]
     rejections: list[OrdersEdaRejectionRow]
     orders_received_breakdown: dict[str, int]
     rejection_reasons: list[OrdersEdaRejectionReasonRow]
+    fulfillment: FulfillmentAnalysis | None = None
+    # Per-segment analysis tables (filtered by dealer_type + mc_category)
+    part_analysis: list[PartAnalysisRow] = []
+    dealer_perf: list[DealerPerfRow] = []
+    rm_perf: list[RmPerfRow] = []
+    ase_perf: list[AsePerfRow] = []
+    district_perf: list[DistrictPerfRow] = []
+    province_analysis: list[ProvinceAnalysisRow] = []
+    # Business insights (computed from full dataset, not filtered by dealer_type)
+    category_mix: list[CategoryMixRow] = []
+    yoy_growth: list[YoYGrowthRow] = []
+    province_perf: list[ProvincePerformanceRow] = []
+    top_short_shipped: list[ShortShipRow] = []
+    fill_rate_bands: list[FillRateBandRow] = []
+    dealer_health_summary: dict[str, int] = {}
+    pareto_summary: dict[str, int] = {}
+    category_cross: dict[str, int] = {}
+    rejection_rate_pct: float = 0.0
+    fraud_alerts: list[dict[str, Any]] = []
+    mc_monthly_category: list[McMonthlyCategoryPoint] = []
 
 
 class SalesEdaMonthlyPoint(BaseModel):
     period: str
-    revenue_lkr: float
-    qty: int
-    return_count: int
+    sale_value_lkr: float = 0.0
+    return_value_lkr: float = 0.0
+    net_value_lkr: float = 0.0
+    sale_qty: float = 0.0
+    return_qty: float = 0.0
+    order_received_lkr: float = 0.0  # PO value from orders.xlsx (dealer orders to Yamaha)
+
+
+class SalesPartRow(BaseModel):
+    material: str
+    sale_lines: int = 0
+    sale_qty: float = 0.0
+    sale_value_lkr: float = 0.0
+    return_lines: int = 0
+    return_qty: float = 0.0
+    return_value_lkr: float = 0.0
+    net_qty: float = 0.0
+    net_value_lkr: float = 0.0
+    return_rate_pct: float = 0.0
+
+
+class SalesDealerRow(BaseModel):
+    dealer_name: str
+    dealer_type: str = ""
+    province: str = ""
+    district: str = ""
+    ase: str = ""
+    rm: str = ""
+    sale_qty: float = 0.0
+    sale_value_lkr: float = 0.0
+    return_qty: float = 0.0
+    return_value_lkr: float = 0.0
+    return_rate_pct: float = 0.0
+    unique_skus: int = 0
+    order_received_lkr: float = 0.0  # PO value placed by this dealer
+    fulfillment_pct: float = 0.0  # sale_value / order_received × 100
+
+
+class SalesRmRow(BaseModel):
+    rm: str
+    sale_value_lkr: float = 0.0
+    return_value_lkr: float = 0.0
+    return_rate_pct: float = 0.0
+    sale_qty: float = 0.0
+    dealer_count: int = 0
+    unique_skus: int = 0
+
+
+class SalesAseRow(BaseModel):
+    ase: str
+    rm: str = ""
+    sale_value_lkr: float = 0.0
+    return_value_lkr: float = 0.0
+    return_rate_pct: float = 0.0
+    sale_qty: float = 0.0
+    dealer_count: int = 0
+    unique_skus: int = 0
+
+
+class SalesDistrictRow(BaseModel):
+    district: str
+    province: str = ""
+    sale_value_lkr: float = 0.0
+    return_value_lkr: float = 0.0
+    return_rate_pct: float = 0.0
+    sale_qty: float = 0.0
+    dealer_count: int = 0
+    unique_skus: int = 0
+    order_received_lkr: float = 0.0
+
+
+class SalesProvinceRow(BaseModel):
+    province: str
+    sale_value_lkr: float = 0.0
+    return_value_lkr: float = 0.0
+    return_rate_pct: float = 0.0
+    sale_qty: float = 0.0
+    dealer_count: int = 0
+    unique_skus: int = 0
+
+
+class SalesMcCategoryRow(BaseModel):
+    mc_category: str
+    sale_lines: int = 0
+    sale_qty: float = 0.0
+    sale_value_lkr: float = 0.0
+    return_value_lkr: float = 0.0
+    value_share_pct: float = 0.0
+    return_rate_pct: float = 0.0
+    unique_skus: int = 0
+
+
+class SalesMcMonthlyPoint(BaseModel):
+    period: str
+    lubricant_lkr: float = 0.0
+    battery_lkr: float = 0.0
+    tyre_lkr: float = 0.0
+    spare_parts_lkr: float = 0.0
+    total_lkr: float = 0.0
 
 
 class SalesEdaResponse(BaseModel):
-    total_revenue_lkr: float
-    total_units: int
-    by_channel: dict[str, float]
-    by_category: dict[str, float]
-    monthly_trend: list[SalesEdaMonthlyPoint]
+    # Year context
+    data_year: int = 0  # the year all KPIs are computed for (0 = unknown)
+    available_years: list[int] = []  # years available in the dataset for the picker
+    # KPIs
+    total_sale_value_lkr: float = 0.0
+    total_return_value_lkr: float = 0.0
+    net_sale_value_lkr: float = 0.0
+    return_rate_pct: float = 0.0
+    total_sale_qty: float = 0.0
+    total_return_qty: float = 0.0
+    unique_parts: int = 0
+    unique_dealers: int = 0
+    total_sale_lines: int = 0
+    total_return_lines: int = 0
+    order_received_lkr: float = 0.0  # total PO value from orders.xlsx for same dealer scope
+    fulfillment_pct: float = 0.0  # net_sale_value / order_received × 100
+    # Trend
+    monthly_trend: list[SalesEdaMonthlyPoint] = []
+    # Part-wise
+    part_analysis: list[SalesPartRow] = []
+    # Hierarchy performance
+    dealer_perf: list[SalesDealerRow] = []
+    rm_perf: list[SalesRmRow] = []
+    ase_perf: list[SalesAseRow] = []
+    district_perf: list[SalesDistrictRow] = []
+    province_perf: list[SalesProvinceRow] = []
+    # MC category (MC dealer_type only)
+    mc_category_mix: list[SalesMcCategoryRow] = []
+    mc_monthly_category: list[SalesMcMonthlyPoint] = []
 
 
 class MovementMonthlyPoint(BaseModel):

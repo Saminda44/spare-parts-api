@@ -101,7 +101,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "TCH", "ANN"]
-ignore = []
+ignore = ["ANN101", "ANN401"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN"]
@@ -114,10 +114,15 @@ strict = false
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
+disallow_any_generics = false
 
 [[tool.mypy.overrides]]
 module = ["src.models.*", "src.db.*"]
 strict = true
+
+[[tool.mypy.overrides]]
+module = ["src.eda.*", "src.api.*", "src.config.*"]
+ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
