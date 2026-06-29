@@ -12,6 +12,7 @@ DATA_OUTPUTS = ROOT / "data" / "outputs"
 DOCS = ROOT / "docs"
 NOTEBOOKS = ROOT / "notebooks"
 MLRUNS = ROOT / "mlruns"
+SRC_CONFIG = ROOT / "src" / "config"
 
 # Ensure runtime dirs exist (raw is read-only; others can be created)
 for _d in (DATA_INTERIM, DATA_PROCESSED, DATA_OUTPUTS, MLRUNS):

@@ -27,8 +27,30 @@ function fmt(n: number) {
   return n.toLocaleString();
 }
 
+function RetBadge({ pct }: { pct: number }) {
+  const [bg, color] = pct > 10 ? ["#FEE2E2","#DC2626"] : pct > 5 ? ["#FEF9C3","#B45309"] : ["#F1F5F9","#64748B"];
+  return <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold tabular-nums" style={{ background: bg, color }}>{pct.toFixed(1)}%</span>;
+}
+
+function FulfillBadge({ pct }: { pct: number }) {
+  if (!pct) return <span className="text-slate-300 text-xs">—</span>;
+  const [bg, color] = pct >= 80 ? ["#DCFCE7","#16A34A"] : pct >= 50 ? ["#FEF9C3","#B45309"] : ["#FEE2E2","#DC2626"];
+  return <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold tabular-nums" style={{ background: bg, color }}>{pct.toFixed(1)}%</span>;
+}
+
+function ValueBar({ pct }: { pct: number }) {
+  return (
+    <div className="flex items-center gap-1 mt-0.5">
+      <div className="w-12 flex-shrink-0 bg-slate-100 rounded-full h-[3px]">
+        <div className="h-[3px] rounded-full bg-brand-blue" style={{ width: `${Math.min(pct, 100)}%` }}/>
+      </div>
+      <span className="text-[10px] text-slate-400 tabular-nums">{pct.toFixed(1)}%</span>
+    </div>
+  );
+}
+
 type Tab = "orders" | "sales" | "movements" | "spare";
-type OrdersView = "analysis" | "performance";
+type OrdersView = "overview" | "parts" | "dealers" | "geography";
 type OrdersAnalysisSeg = "parts" | "geography";
 
 export function EDA() {
@@ -41,13 +63,15 @@ export function EDA() {
   const [ordersMcCat,     setOrdersMcCat]     = useState<McCategoryType>("ALL");
   const [ordersYear,      setOrdersYear]      = useState<number | "All">("All");
   const [ordersRange,     setOrdersRange]     = useState<TimeRange>("YTD");
-  const [ordersView,      setOrdersView]      = useState<OrdersView>("analysis");
+  const [ordersView,      setOrdersView]      = useState<OrdersView>("overview");
   const [ordersAnalysisSeg, setOrdersAnalysisSeg] = useState<OrdersAnalysisSeg>("parts");
   const [salesDt,     setSalesDt]     = useState<DealerType>("MC");
   const [salesMcCat,  setSalesMcCat]  = useState<string>("ALL");
   const [salesYear,   setSalesYear]   = useState<number>(0);   // 0 = latest year (API resolves)
   const [salesRange,  setSalesRange]  = useState<TimeRange>("YTD");
   const [salesView,   setSalesView]   = useState<"kpi" | "parts" | "dealers" | "hierarchy">("kpi");
+  const [salesPartSearch,   setSalesPartSearch]   = useState("");
+  const [salesDealerSearch, setSalesDealerSearch] = useState("");
   const [movYear,     setMovYear]     = useState<number | "All">("All");
   const [movRange,    setMovRange]    = useState<TimeRange>("YTD");
 
@@ -113,24 +137,18 @@ export function EDA() {
         {/* ── Orders EDA ── */}
         {tab === "orders" && (
           <div className="space-y-5">
-            {/* Segment selector */}
+            {/* Segment + view + category selectors */}
             <div className="space-y-2">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide w-20">Segment</span>
-                {(["MC","OBM"] as DealerType[]).map(dt => (
-                  <button key={dt} onClick={() => { setOrdersDt(dt); setOrdersMcCat("ALL"); setOrdersView("analysis"); }}
-                    className={`px-3 py-1 text-xs rounded-lg font-semibold border transition-colors ${ordersView==="analysis" && ordersDt===dt ? "bg-brand-blue text-white border-brand-blue" : "border-slate-200 text-slate-500 hover:border-brand-blue"}`}>
-                    {dt === "MC" ? "MC Spare Parts" : "OBM Spare Parts"}
+              <div className="flex gap-1 flex-wrap">
+                {([["ALL","All"],["MC","MC Spare Parts"],["OBM","OBM Spare Parts"]] as [DealerType,string][]).map(([dt,label]) => (
+                  <button key={dt} onClick={() => { setOrdersDt(dt); setOrdersMcCat("ALL"); }}
+                    className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${ordersDt===dt ? "bg-brand-blue text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>
+                    {label}
                   </button>
                 ))}
-                <button onClick={() => setOrdersView("performance")}
-                  className={`px-3 py-1 text-xs rounded-lg font-semibold border transition-colors ${ordersView==="performance" ? "bg-brand-blue text-white border-brand-blue" : "border-slate-200 text-slate-500 hover:border-brand-blue"}`}>
-                  Performance
-                </button>
               </div>
-              {ordersView === "analysis" && ordersDt === "MC" && (
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide w-20">Category</span>
+              {(ordersView === "overview" || ordersView === "parts") && ordersDt === "MC" && (
+                <div className="flex gap-1 flex-wrap">
                   {([
                     { key: "ALL" as McCategoryType, label: "All MC" },
                     { key: "Lubricant" as McCategoryType, label: "Lubricant" },
@@ -139,17 +157,33 @@ export function EDA() {
                     { key: "SpareParts" as McCategoryType, label: "Spare Parts" },
                   ]).map(({ key, label }) => (
                     <button key={key} onClick={() => setOrdersMcCat(key)}
-                      className={`px-3 py-1 text-xs rounded-lg font-medium border transition-colors ${ordersMcCat===key ? "bg-slate-700 text-white border-slate-700" : "border-slate-200 text-slate-500 hover:border-slate-400"}`}>
+                      className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${ordersMcCat===key ? "bg-purple-600 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>
                       {label}
                     </button>
                   ))}
                 </div>
               )}
+              <div className="flex gap-1 flex-wrap">
+                {([
+                  { key: "overview"  as OrdersView, label: "Overview" },
+                  { key: "parts"     as OrdersView, label: "Parts" },
+                  { key: "dealers"   as OrdersView, label: "Dealers" },
+                  { key: "geography" as OrdersView, label: "RM/ASE/Geography" },
+                ]).map(({ key, label }) => (
+                  <button key={key} onClick={() => {
+                    if (key === "dealers" || key === "geography") setOrdersMcCat("ALL");
+                    setOrdersView(key);
+                  }}
+                    className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${ordersView===key ? "bg-slate-700 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
 
           {ordersData ? (
             <div className="space-y-5">
-              {ordersView === "analysis" && ordersDt === "MC" && ordersMcCat === "ALL" && (
+              {ordersView === "overview" && ordersDt === "MC" && ordersMcCat === "ALL" && (
                 <>
                   {/* Row 1: Value KPIs — Order Received, Total Sales, Value Fill Rate */}
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -211,7 +245,7 @@ export function EDA() {
               )}
 
               {/* Rejection reasons pie — MC only */}
-              {ordersView === "analysis" && ordersDt === "MC" && ordersMcCat === "ALL" && ordersData.rejection_reasons.length > 0 && (
+              {ordersView === "overview" && ordersDt === "MC" && ordersMcCat === "ALL" && ordersData.rejection_reasons.length > 0 && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <h3 className="text-sm font-semibold text-slate-700 mb-1">Rejection Reasons</h3>
@@ -256,7 +290,7 @@ export function EDA() {
 
 
               {/* ══ Fulfillment Analysis (Qty & Value) ══════════════════════ */}
-              {ordersView === "analysis" && ordersData.fulfillment && (
+              {ordersView === "overview" && ordersData.fulfillment && (
                 <div className="pt-3 border-t border-slate-200 space-y-4">
                   <div>
                     <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Fulfillment Analysis</p>
@@ -344,7 +378,7 @@ export function EDA() {
               )}
 
               {/* ══ Return Orders Analysis ════════════════════════════════════ */}
-              {ordersView === "analysis" && ordersData.total_returns > 0 && (
+              {ordersView === "overview" && ordersData.total_returns > 0 && (
                 <div className="pt-3 border-t border-slate-200 space-y-4">
                   <div>
                     <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Return Orders Analysis</p>
@@ -360,33 +394,7 @@ export function EDA() {
 
                   {/* Detailed breakdown — MC + ALL category only */}
                   {ordersDt === "MC" && ordersMcCat === "ALL" && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {/* Return type breakdown */}
-                      {Object.keys(ordersData.return_type_breakdown).length > 0 && (
-                        <div>
-                          <h3 className="text-sm font-semibold text-slate-700 mb-1">Return Type Breakdown</h3>
-                          <p className="text-xs text-slate-400 mb-3">H Return Orders vs Cancelled C-Orders</p>
-                          <div className="space-y-2">
-                            {Object.entries(ordersData.return_type_breakdown).map(([type, count], i) => {
-                              const total = Object.values(ordersData.return_type_breakdown).reduce((a, b) => a + b, 0);
-                              const pct = total > 0 ? (count / total * 100).toFixed(1) : "0.0";
-                              return (
-                                <div key={type} className="flex items-center justify-between bg-slate-50 rounded-lg px-4 py-2.5">
-                                  <span className="flex items-center gap-2 text-sm text-slate-700">
-                                    <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: i === 0 ? "#EF4444" : "#F97316" }}/>
-                                    {type}
-                                  </span>
-                                  <span className="flex items-center gap-3 text-sm">
-                                    <span className="font-bold text-slate-700">{count.toLocaleString()}</span>
-                                    <span className="text-slate-400 w-14 text-right">{pct}%</span>
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
+                    <>
                       {/* Return reasons list */}
                       {ordersData.return_order_reasons.length > 0 && (
                         <div>
@@ -408,13 +416,13 @@ export function EDA() {
                           </div>
                         </div>
                       )}
-                    </div>
+                    </>
                   )}
                 </div>
               )}
 
-              {/* ══ Performance view — Dealer, RM, ASE ═══════════════════════ */}
-              {ordersView === "performance" && (
+              {/* ══ Dealers view ══════════════════════════════════════════════ */}
+              {ordersView === "dealers" && (
                 <div className="space-y-5">
                   {ordersData.dealer_perf.length > 0 && (
                       <div>
@@ -465,7 +473,12 @@ export function EDA() {
                         </div>
                       </div>
                     )}
+                </div>
+              )}
 
+              {/* ══ RM/ASE/Geography view ════════════════════════════════════ */}
+              {ordersView === "geography" && (
+                <div className="space-y-5">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {ordersData.rm_perf.length > 0 && (
                       <div>
@@ -622,14 +635,14 @@ export function EDA() {
               )}
 
               {/* ══ Per-Segment Analysis Tables ════════════════════════════════ */}
-              {ordersView === "analysis" && ordersData.part_analysis.length > 0 && (<>
+              {ordersView === "parts" && ordersData.part_analysis.length > 0 && (<>
 
                 <div className="pt-3 border-t border-slate-200">
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div>
                       <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Segment Analysis</p>
                       <p className="text-xs text-slate-400 mt-0.5">
-                        {ordersDt === "MC" && ordersMcCat !== "ALL" ? `MC – ${ordersMcCat === "SpareParts" ? "Spare Parts" : ordersMcCat}` : ordersDt === "OBM" ? "OBM Spare Parts" : "All MC Spare Parts"}
+                        {ordersDt === "MC" && ordersMcCat !== "ALL" ? `MC – ${ordersMcCat === "SpareParts" ? "Spare Parts" : ordersMcCat}` : ordersDt === "OBM" ? "OBM Spare Parts" : ordersDt === "ALL" ? "All Spare Parts (MC + OBM)" : "All MC Spare Parts"}
                       </p>
                     </div>
                     <div className="flex gap-1">
@@ -637,7 +650,7 @@ export function EDA() {
                         { key: "parts" as OrdersAnalysisSeg, label: "Parts" },
                       ]).map(s => (
                         <button key={s.key} onClick={() => setOrdersAnalysisSeg(s.key)}
-                          className={`px-3 py-1 text-xs rounded-lg font-semibold border transition-colors ${ordersAnalysisSeg === s.key ? "bg-brand-blue text-white border-brand-blue" : "border-slate-200 text-slate-500 hover:border-brand-blue"}`}>
+                          className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${ordersAnalysisSeg === s.key ? "bg-brand-blue text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>
                           {s.label}
                         </button>
                       ))}
@@ -689,7 +702,7 @@ export function EDA() {
               </>)}
 
               {/* ══ MC Monthly Order Value by Category ════════════════════════ */}
-              {ordersView === "analysis" && ordersDt === "MC" && ordersMcCat === "ALL" && ordersData.mc_monthly_category.length > 0 && (
+              {ordersView === "overview" && ordersDt === "MC" && ordersMcCat === "ALL" && ordersData.mc_monthly_category.length > 0 && (
                 <div>
                   <div className="pt-3 border-t border-slate-200 mb-3">
                     <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">MC Monthly Order Value by Category</p>
@@ -713,7 +726,7 @@ export function EDA() {
               )}
 
               {/* ══ Fraud Alerts ══════════════════════════════════════════════ */}
-              {ordersView === "performance" && ordersData.fraud_alerts.length > 0 && (
+              {ordersView === "dealers" && ordersData.fraud_alerts.length > 0 && (
                 <div className="border border-red-200 bg-red-50 rounded-xl p-4">
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-red-600 font-bold text-sm">⚠ Concentration Alert</span>
@@ -745,7 +758,7 @@ export function EDA() {
               )}
 
               {/* ══ Business Insights ══════════════════════════════════════════ */}
-              {ordersView === "analysis" && ordersDt === "MC" && ordersMcCat === "ALL" && ordersData.category_mix.length > 0 && (<>
+              {ordersView === "overview" && ordersDt === "MC" && ordersMcCat === "ALL" && ordersData.category_mix.length > 0 && (<>
 
                 <div className="pt-3 border-t border-slate-200">
                   <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Business Insights</p>
@@ -971,10 +984,10 @@ export function EDA() {
             {/* Dealer type + MC sub-category selectors */}
             <div className="space-y-2">
               <div className="flex gap-1">
-                {(["MC","OBM"] as DealerType[]).map(dt => (
+                {([["ALL","All"],["MC","MC Spare Parts"],["OBM","OBM Spare Parts"]] as [DealerType,string][]).map(([dt,label]) => (
                   <button key={dt} onClick={() => { setSalesDt(dt); setSalesMcCat("ALL"); }}
                     className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${salesDt===dt?"bg-brand-blue text-white":"bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>
-                    {dt} Spare Parts
+                    {label}
                   </button>
                 ))}
               </div>
@@ -982,9 +995,9 @@ export function EDA() {
                 <div className="flex gap-1 flex-wrap">
                   {[
                     { key: "ALL",          label: "All MC" },
-                    { key: "Lubricant",    label: "Lubricant (YAMALUBE)" },
-                    { key: "Battery",      label: "Battery (KARATE)" },
-                    { key: "Tyre",         label: "Tyre (KATANA)" },
+                    { key: "Lubricant",    label: "Lubricant" },
+                    { key: "Battery",      label: "Battery" },
+                    { key: "Tyre",         label: "Tyre" },
                     { key: "Spare Parts",  label: "Spare Parts" },
                   ].map(o => (
                     <button key={o.key} onClick={() => setSalesMcCat(o.key)}
@@ -1003,8 +1016,8 @@ export function EDA() {
                   <div className="flex gap-1">
                     {[
                       { key: "kpi" as const,       label: "Overview" },
-                      { key: "parts" as const,      label: `Parts (${salesData.unique_parts.toLocaleString()})` },
-                      { key: "dealers" as const,    label: `Dealers (${salesData.unique_dealers})` },
+                      { key: "parts" as const,      label: "Parts" },
+                      { key: "dealers" as const,    label: "Dealers" },
                       { key: "hierarchy" as const,  label: "RM / ASE / Geography" },
                     ].map(v => (
                       <button key={v.key} onClick={() => setSalesView(v.key)}
@@ -1026,8 +1039,8 @@ export function EDA() {
                     {/* KPI cards — row 1: mirrors dashboard gauges */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                       <KpiCard label="Order Received"   value={`LKR ${fmt(salesData.order_received_lkr)}`}     sub="All orders placed (incl. cancelled/rejected)"               color="blue"/>
-                      <KpiCard label="Total Sales"      value={`LKR ${fmt(salesData.total_sale_value_lkr)}`}   sub="Fulfilled orders (orders.xlsx)"                             color="purple"/>
-                      <KpiCard label="Order Fulfillment" value={`${salesData.fulfillment_pct.toFixed(1)}%`}    sub="Total Sales ÷ Order Received"                               color="green"/>
+                      <KpiCard label="Billed Revenue"   value={`LKR ${fmt(salesData.total_sale_value_lkr)}`}   sub="Gross billed sales (sales.xlsx)"                            color="purple"/>
+                      <KpiCard label="Order Fulfillment" value={`${salesData.fulfillment_pct.toFixed(1)}%`}    sub="Confirmed fulfilled ÷ Order Received"                        color="green"/>
                       <KpiCard label="Return Rate"      value={`${salesData.return_rate_pct.toFixed(1)}%`}      sub="Returns ÷ Billed Revenue"                                   color="amber"/>
                     </div>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -1042,8 +1055,8 @@ export function EDA() {
                       <div>
                         <div className="flex items-center justify-between mb-3">
                           <div>
-                            <h3 className="text-sm font-semibold text-slate-700">Monthly: Order Received vs Sales vs Returns (LKR)</h3>
-                            <p className="text-xs text-slate-400 mt-0.5">Order Received · Sale Value · Return Value</p>
+                            <h3 className="text-sm font-semibold text-slate-700">Monthly: Sales vs Returns (LKR)</h3>
+                            <p className="text-xs text-slate-400 mt-0.5">Sale Value · Return Value</p>
                           </div>
                           <div className="flex items-center gap-2">
                             <YearPicker years={salesData.available_years} value={salesYear} onChange={y => setSalesYear(typeof y === "number" ? y : salesData.data_year)}/>
@@ -1058,8 +1071,7 @@ export function EDA() {
                             <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt}/>
                             <Tooltip formatter={(v: unknown, n: unknown) => [`LKR ${fmt(Number(v))}`, String(n)]} labelFormatter={p => String(p)}/>
                             <Legend wrapperStyle={{ fontSize: 10 }}/>
-                            <Bar dataKey="order_received_lkr" fill="#94A3B8" name="Order Received" radius={[2,2,0,0]}/>
-                            <Bar dataKey="sale_value_lkr"     fill="#7C3AED" name="Total Sales (Fulfilled)" radius={[2,2,0,0]}/>
+                            <Bar dataKey="sale_value_lkr"     fill="#7C3AED" name="Billed Revenue" radius={[2,2,0,0]}/>
                             <Bar dataKey="return_value_lkr"   fill="#EF4444" name="Return Value"    radius={[2,2,0,0]}/>
                           </BarChart>
                         </ResponsiveContainer>
@@ -1156,216 +1168,330 @@ export function EDA() {
                 {/* ── Parts analysis ── */}
                 {salesView === "parts" && (
                   <div>
-                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Part-wise Sales Analysis</h3>
-                    <p className="text-xs text-slate-400 mb-3">Top 300 parts by sale value · {salesData.unique_parts.toLocaleString()} total SKUs</p>
-                    <div className="overflow-auto max-h-[520px]">
-                      <table className="w-full text-xs border-collapse">
-                        <thead className="sticky top-0 bg-white z-10">
-                          <tr className="border-b border-slate-200">
-                            <th className="text-left py-2 px-2 text-slate-500 font-medium">#</th>
-                            <th className="text-left py-2 px-2 text-slate-500 font-medium">Material</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Sale Lines</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Sale Qty</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Sale Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Return Qty</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Return Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Net Qty</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Net Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Ret %</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {salesData.part_analysis.map((p, i) => (
-                            <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
-                              <td className="py-1.5 px-2 text-slate-400">{i+1}</td>
-                              <td className="py-1.5 px-2 text-slate-700 max-w-[220px] truncate" title={p.material}>{p.material}</td>
-                              <td className="py-1.5 px-2 text-right text-slate-600">{p.sale_lines.toLocaleString()}</td>
-                              <td className="py-1.5 px-2 text-right text-slate-600">{p.sale_qty.toLocaleString('en-US',{maximumFractionDigits:0})}</td>
-                              <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(p.sale_value_lkr)}</td>
-                              <td className="py-1.5 px-2 text-right text-red-500">{p.return_qty.toLocaleString('en-US',{maximumFractionDigits:0})}</td>
-                              <td className="py-1.5 px-2 text-right text-red-500">{fmt(p.return_value_lkr)}</td>
-                              <td className="py-1.5 px-2 text-right text-slate-600">{p.net_qty.toLocaleString('en-US',{maximumFractionDigits:0})}</td>
-                              <td className="py-1.5 px-2 text-right font-semibold text-green-700">{fmt(p.net_value_lkr)}</td>
-                              <td className="py-1.5 px-2 text-right">
-                                <span className={p.return_rate_pct > 10 ? "text-red-600 font-bold" : p.return_rate_pct > 5 ? "text-amber-600" : "text-slate-400"}>
-                                  {p.return_rate_pct.toFixed(1)}%
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-700">Part-wise Sales Analysis</h3>
+                        <p className="text-xs text-slate-400 mt-0.5">{salesData.unique_parts.toLocaleString()} total SKUs · top 300 by sale value</p>
+                      </div>
+                      <input
+                        type="search" placeholder="Filter by part…" value={salesPartSearch}
+                        onChange={e => setSalesPartSearch(e.target.value)}
+                        className="text-xs border border-slate-200 rounded-lg px-3 py-1.5 w-48 focus:outline-none focus:ring-2 focus:ring-brand-blue/30"
+                      />
                     </div>
+                    {(() => {
+                      const totalSale = salesData.part_analysis.reduce((s, p) => s + p.sale_value_lkr, 0) || 1;
+                      const rows = salesData.part_analysis
+                        .filter(p => !salesPartSearch || p.material.toLowerCase().includes(salesPartSearch.toLowerCase()));
+                      return (
+                        <div className="overflow-auto max-h-[560px] rounded-lg border border-slate-100">
+                          <table className="w-full text-xs border-collapse">
+                            <thead className="sticky top-0 z-10">
+                              <tr className="bg-slate-50 border-b border-slate-200">
+                                <th className="text-left py-2.5 px-3 text-slate-500 font-medium w-8">#</th>
+                                <th className="text-left py-2.5 px-3 text-slate-500 font-medium">Material</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Lines</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Sale Qty</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Sale Value (LKR)</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Ret Qty</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Ret Value (LKR)</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Net Qty</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Net Value (LKR)</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Ret %</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {rows.map((p, i) => (
+                                <tr key={i} className={`border-b border-slate-50 hover:bg-blue-50/30 transition-colors ${i % 2 === 1 ? "bg-slate-50/40" : ""}`}>
+                                  <td className="py-2 px-3">
+                                    <span className={`font-mono ${i < 3 ? "text-amber-500 font-bold" : i < 10 ? "text-slate-500 font-medium" : "text-slate-300"}`}>{i+1}</span>
+                                  </td>
+                                  <td className="py-2 px-3 max-w-[240px]">
+                                    <span className="font-mono text-slate-700 truncate block" title={p.material}>{p.material}</span>
+                                  </td>
+                                  <td className="py-2 px-3 text-right tabular-nums text-slate-500">{p.sale_lines.toLocaleString()}</td>
+                                  <td className="py-2 px-3 text-right tabular-nums text-slate-600">{p.sale_qty.toLocaleString('en-US',{maximumFractionDigits:0})}</td>
+                                  <td className="py-2 px-3 text-right">
+                                    <div className="font-semibold text-slate-800 tabular-nums">{fmt(p.sale_value_lkr)}</div>
+                                    <ValueBar pct={p.sale_value_lkr / totalSale * 100}/>
+                                  </td>
+                                  <td className="py-2 px-3 text-right tabular-nums">
+                                    {p.return_qty > 0 ? <span className="text-rose-500">{p.return_qty.toLocaleString('en-US',{maximumFractionDigits:0})}</span> : <span className="text-slate-200">—</span>}
+                                  </td>
+                                  <td className="py-2 px-3 text-right tabular-nums">
+                                    {p.return_value_lkr > 0 ? <span className="text-rose-500">{fmt(p.return_value_lkr)}</span> : <span className="text-slate-200">—</span>}
+                                  </td>
+                                  <td className="py-2 px-3 text-right tabular-nums text-slate-600">{p.net_qty.toLocaleString('en-US',{maximumFractionDigits:0})}</td>
+                                  <td className="py-2 px-3 text-right">
+                                    <span className="font-semibold text-emerald-700 tabular-nums">{fmt(p.net_value_lkr)}</span>
+                                  </td>
+                                  <td className="py-2 px-3 text-right"><RetBadge pct={p.return_rate_pct}/></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
 
                 {/* ── Dealer performance ── */}
                 {salesView === "dealers" && (
                   <div>
-                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Dealer Performance</h3>
-                    <p className="text-xs text-slate-400 mb-3">{salesData.unique_dealers} dealers · sorted by sale value</p>
-                    <div className="overflow-auto max-h-[520px]">
-                      <table className="w-full text-xs border-collapse">
-                        <thead className="sticky top-0 bg-white z-10">
-                          <tr className="border-b border-slate-200">
-                            <th className="text-left py-2 px-2 text-slate-500 font-medium">#</th>
-                            <th className="text-left py-2 px-2 text-slate-500 font-medium">Dealer</th>
-                            <th className="text-left py-2 px-2 text-slate-500 font-medium">Province</th>
-                            <th className="text-left py-2 px-2 text-slate-500 font-medium">ASE</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Order Rec. (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Sale Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Fulfill %</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Return Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">Ret %</th>
-                            <th className="text-right py-2 px-2 text-slate-500 font-medium">SKUs</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {salesData.dealer_perf.map((d, i) => (
-                            <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
-                              <td className="py-1.5 px-2 text-slate-400">{i+1}</td>
-                              <td className="py-1.5 px-2 text-slate-700 max-w-[180px] truncate" title={d.dealer_name}>{d.dealer_name}</td>
-                              <td className="py-1.5 px-2 text-slate-500">{d.province || "—"}</td>
-                              <td className="py-1.5 px-2 text-slate-500 max-w-[100px] truncate" title={d.ase}>{d.ase || "—"}</td>
-                              <td className="py-1.5 px-2 text-right text-slate-500">{fmt(d.order_received_lkr)}</td>
-                              <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(d.sale_value_lkr)}</td>
-                              <td className="py-1.5 px-2 text-right">
-                                <span className={d.fulfillment_pct < 50 ? "text-red-600 font-bold" : d.fulfillment_pct < 80 ? "text-amber-600" : "text-green-600 font-medium"}>
-                                  {d.fulfillment_pct > 0 ? `${d.fulfillment_pct.toFixed(1)}%` : "—"}
-                                </span>
-                              </td>
-                              <td className="py-1.5 px-2 text-right text-red-500">{fmt(d.return_value_lkr)}</td>
-                              <td className="py-1.5 px-2 text-right">
-                                <span className={d.return_rate_pct > 10 ? "text-red-600 font-bold" : d.return_rate_pct > 5 ? "text-amber-600" : "text-slate-400"}>
-                                  {d.return_rate_pct.toFixed(1)}%
-                                </span>
-                              </td>
-                              <td className="py-1.5 px-2 text-right text-slate-500">{d.unique_skus}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-700">Dealer Performance</h3>
+                        <p className="text-xs text-slate-400 mt-0.5">{salesData.unique_dealers} dealers · sorted by sale value</p>
+                      </div>
+                      <input
+                        type="search" placeholder="Filter by dealer or province…" value={salesDealerSearch}
+                        onChange={e => setSalesDealerSearch(e.target.value)}
+                        className="text-xs border border-slate-200 rounded-lg px-3 py-1.5 w-52 focus:outline-none focus:ring-2 focus:ring-brand-blue/30"
+                      />
                     </div>
+                    {(() => {
+                      const totalSale = salesData.dealer_perf.reduce((s, d) => s + d.sale_value_lkr, 0) || 1;
+                      const rows = salesData.dealer_perf
+                        .filter(d => !salesDealerSearch ||
+                          d.dealer_name.toLowerCase().includes(salesDealerSearch.toLowerCase()) ||
+                          (d.province || "").toLowerCase().includes(salesDealerSearch.toLowerCase()));
+                      return (
+                        <div className="overflow-auto max-h-[560px] rounded-lg border border-slate-100">
+                          <table className="w-full text-xs border-collapse">
+                            <thead className="sticky top-0 z-10">
+                              <tr className="bg-slate-50 border-b border-slate-200">
+                                <th className="text-left py-2.5 px-3 text-slate-500 font-medium w-8">#</th>
+                                <th className="text-left py-2.5 px-3 text-slate-500 font-medium">Dealer</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Order Rec. (LKR)</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Sale Value (LKR)</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Fulfill</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Ret %</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Return (LKR)</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">SKUs</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {rows.map((d, i) => (
+                                <tr key={i} className={`border-b border-slate-50 hover:bg-blue-50/30 transition-colors ${i % 2 === 1 ? "bg-slate-50/40" : ""}`}>
+                                  <td className="py-2 px-3">
+                                    <span className={`font-mono ${i < 3 ? "text-amber-500 font-bold" : i < 10 ? "text-slate-500 font-medium" : "text-slate-300"}`}>{i+1}</span>
+                                  </td>
+                                  <td className="py-2 px-3 max-w-[220px]">
+                                    <div className="font-medium text-slate-700 truncate" title={d.dealer_name}>{d.dealer_name}</div>
+                                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                                      {d.province && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 font-medium">{d.province}</span>}
+                                      {d.ase && <span className="text-[10px] text-slate-400 truncate max-w-[100px]" title={d.ase}>{d.ase}</span>}
+                                    </div>
+                                  </td>
+                                  <td className="py-2 px-3 text-right tabular-nums text-slate-400">{fmt(d.order_received_lkr)}</td>
+                                  <td className="py-2 px-3 text-right">
+                                    <div className="font-semibold text-slate-800 tabular-nums">{fmt(d.sale_value_lkr)}</div>
+                                    <ValueBar pct={d.sale_value_lkr / totalSale * 100}/>
+                                  </td>
+                                  <td className="py-2 px-3 text-right"><FulfillBadge pct={d.fulfillment_pct}/></td>
+                                  <td className="py-2 px-3 text-right"><RetBadge pct={d.return_rate_pct}/></td>
+                                  <td className="py-2 px-3 text-right tabular-nums">
+                                    {d.return_value_lkr > 0 ? <span className="text-rose-500">{fmt(d.return_value_lkr)}</span> : <span className="text-slate-200">—</span>}
+                                  </td>
+                                  <td className="py-2 px-3 text-right tabular-nums text-slate-500">{d.unique_skus.toLocaleString()}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
 
-                {/* ── Hierarchy (RM / ASE / District / Province) ── */}
+                {/* ── Hierarchy (Province / RM / ASE / District) ── */}
                 {salesView === "hierarchy" && (
-                  <div className="space-y-6">
+                  <div className="space-y-5">
                     {/* Province */}
-                    <div>
-                      <h3 className="text-sm font-semibold text-slate-700 mb-1">Province Performance</h3>
-                      <div className="overflow-auto">
-                        <table className="w-full text-xs border-collapse">
-                          <thead><tr className="border-b border-slate-200">
-                            <th className="text-left py-2 px-2 text-slate-500">Province</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Dealers</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Sale Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Return Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Ret %</th>
-                            <th className="text-right py-2 px-2 text-slate-500">SKUs</th>
-                          </tr></thead>
-                          <tbody>
-                            {salesData.province_perf.map((p, i) => (
-                              <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
-                                <td className="py-1.5 px-2 font-medium text-slate-700">{p.province || "—"}</td>
-                                <td className="py-1.5 px-2 text-right text-slate-500">{p.dealer_count}</td>
-                                <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(p.sale_value_lkr)}</td>
-                                <td className="py-1.5 px-2 text-right text-red-500">{fmt(p.return_value_lkr)}</td>
-                                <td className="py-1.5 px-2 text-right text-slate-500">{p.return_rate_pct.toFixed(1)}%</td>
-                                <td className="py-1.5 px-2 text-right text-slate-500">{p.unique_skus?.toLocaleString()}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                    <div className="rounded-lg border border-slate-100 overflow-hidden">
+                      <div className="bg-slate-50 border-b border-slate-200 px-3 py-2.5">
+                        <h3 className="text-sm font-semibold text-slate-700">Province Performance</h3>
+                        <p className="text-xs text-slate-400 mt-0.5">{salesData.province_perf.length} provinces · sorted by sale value</p>
                       </div>
+                      {(() => {
+                        const totalSale = salesData.province_perf.reduce((s, p) => s + p.sale_value_lkr, 0) || 1;
+                        const sorted = [...salesData.province_perf].sort((a, b) => b.sale_value_lkr - a.sale_value_lkr);
+                        return (
+                          <table className="w-full text-xs border-collapse">
+                            <thead>
+                              <tr className="border-b border-slate-100">
+                                <th className="text-left py-2.5 px-3 text-slate-500 font-medium w-8">#</th>
+                                <th className="text-left py-2.5 px-3 text-slate-500 font-medium">Province</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Dealers</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Sale Value (LKR)</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Return (LKR)</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Ret %</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">SKUs</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sorted.map((p, i) => (
+                                <tr key={i} className={`border-b border-slate-50 hover:bg-blue-50/30 transition-colors ${i % 2 === 1 ? "bg-slate-50/40" : ""}`}>
+                                  <td className="py-2.5 px-3 text-slate-300 font-mono text-xs">{i+1}</td>
+                                  <td className="py-2.5 px-3 font-semibold text-slate-700">{p.province || "—"}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-slate-500">{p.dealer_count}</td>
+                                  <td className="py-2.5 px-3 text-right">
+                                    <div className="font-semibold text-slate-800 tabular-nums">{fmt(p.sale_value_lkr)}</div>
+                                    <ValueBar pct={p.sale_value_lkr / totalSale * 100}/>
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums">
+                                    {p.return_value_lkr > 0 ? <span className="text-rose-500">{fmt(p.return_value_lkr)}</span> : <span className="text-slate-200">—</span>}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right"><RetBadge pct={p.return_rate_pct}/></td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-slate-500">{p.unique_skus?.toLocaleString()}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        );
+                      })()}
                     </div>
 
                     {/* RM */}
-                    <div>
-                      <h3 className="text-sm font-semibold text-slate-700 mb-1">RM Performance</h3>
-                      <div className="overflow-auto">
-                        <table className="w-full text-xs border-collapse">
-                          <thead><tr className="border-b border-slate-200">
-                            <th className="text-left py-2 px-2 text-slate-500">RM</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Dealers</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Sale Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Return Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Ret %</th>
-                          </tr></thead>
-                          <tbody>
-                            {salesData.rm_perf.map((r, i) => (
-                              <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
-                                <td className="py-1.5 px-2 font-medium text-slate-700">{r.rm || "—"}</td>
-                                <td className="py-1.5 px-2 text-right text-slate-500">{r.dealer_count}</td>
-                                <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(r.sale_value_lkr)}</td>
-                                <td className="py-1.5 px-2 text-right text-red-500">{fmt(r.return_value_lkr)}</td>
-                                <td className="py-1.5 px-2 text-right text-slate-500">{r.return_rate_pct.toFixed(1)}%</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                    <div className="rounded-lg border border-slate-100 overflow-hidden">
+                      <div className="bg-slate-50 border-b border-slate-200 px-3 py-2.5">
+                        <h3 className="text-sm font-semibold text-slate-700">Regional Manager (RM) Performance</h3>
+                        <p className="text-xs text-slate-400 mt-0.5">{salesData.rm_perf.length} RMs · sorted by sale value</p>
                       </div>
+                      {(() => {
+                        const totalSale = salesData.rm_perf.reduce((s, r) => s + r.sale_value_lkr, 0) || 1;
+                        const sorted = [...salesData.rm_perf].sort((a, b) => b.sale_value_lkr - a.sale_value_lkr);
+                        return (
+                          <table className="w-full text-xs border-collapse">
+                            <thead>
+                              <tr className="border-b border-slate-100">
+                                <th className="text-left py-2.5 px-3 text-slate-500 font-medium w-8">#</th>
+                                <th className="text-left py-2.5 px-3 text-slate-500 font-medium">RM</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Dealers</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Sale Value (LKR)</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Return (LKR)</th>
+                                <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Ret %</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sorted.map((r, i) => (
+                                <tr key={i} className={`border-b border-slate-50 hover:bg-blue-50/30 transition-colors ${i % 2 === 1 ? "bg-slate-50/40" : ""}`}>
+                                  <td className="py-2.5 px-3 text-slate-300 font-mono text-xs">{i+1}</td>
+                                  <td className="py-2.5 px-3 font-medium text-slate-700">{r.rm || "—"}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-slate-500">{r.dealer_count}</td>
+                                  <td className="py-2.5 px-3 text-right">
+                                    <div className="font-semibold text-slate-800 tabular-nums">{fmt(r.sale_value_lkr)}</div>
+                                    <ValueBar pct={r.sale_value_lkr / totalSale * 100}/>
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums">
+                                    {r.return_value_lkr > 0 ? <span className="text-rose-500">{fmt(r.return_value_lkr)}</span> : <span className="text-slate-200">—</span>}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right"><RetBadge pct={r.return_rate_pct}/></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        );
+                      })()}
                     </div>
 
                     {/* ASE */}
-                    <div>
-                      <h3 className="text-sm font-semibold text-slate-700 mb-1">ASE Performance</h3>
-                      <div className="overflow-auto">
-                        <table className="w-full text-xs border-collapse">
-                          <thead><tr className="border-b border-slate-200">
-                            <th className="text-left py-2 px-2 text-slate-500">ASE</th>
-                            <th className="text-left py-2 px-2 text-slate-500">RM</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Dealers</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Sale Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Return Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Ret %</th>
-                          </tr></thead>
-                          <tbody>
-                            {salesData.ase_perf.map((a, i) => (
-                              <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
-                                <td className="py-1.5 px-2 font-medium text-slate-700">{a.ase || "—"}</td>
-                                <td className="py-1.5 px-2 text-slate-500">{a.rm || "—"}</td>
-                                <td className="py-1.5 px-2 text-right text-slate-500">{a.dealer_count}</td>
-                                <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(a.sale_value_lkr)}</td>
-                                <td className="py-1.5 px-2 text-right text-red-500">{fmt(a.return_value_lkr)}</td>
-                                <td className="py-1.5 px-2 text-right text-slate-500">{a.return_rate_pct.toFixed(1)}%</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                    <div className="rounded-lg border border-slate-100 overflow-hidden">
+                      <div className="bg-slate-50 border-b border-slate-200 px-3 py-2.5">
+                        <h3 className="text-sm font-semibold text-slate-700">Area Sales Executive (ASE) Performance</h3>
+                        <p className="text-xs text-slate-400 mt-0.5">{salesData.ase_perf.length} ASEs · sorted by sale value</p>
                       </div>
+                      {(() => {
+                        const totalSale = salesData.ase_perf.reduce((s, a) => s + a.sale_value_lkr, 0) || 1;
+                        const sorted = [...salesData.ase_perf].sort((a, b) => b.sale_value_lkr - a.sale_value_lkr);
+                        return (
+                          <div className="overflow-auto max-h-[320px]">
+                            <table className="w-full text-xs border-collapse">
+                              <thead className="sticky top-0 bg-white z-10">
+                                <tr className="border-b border-slate-100">
+                                  <th className="text-left py-2.5 px-3 text-slate-500 font-medium w-8">#</th>
+                                  <th className="text-left py-2.5 px-3 text-slate-500 font-medium">ASE</th>
+                                  <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Dealers</th>
+                                  <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Sale Value (LKR)</th>
+                                  <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Return (LKR)</th>
+                                  <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Ret %</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {sorted.map((a, i) => (
+                                  <tr key={i} className={`border-b border-slate-50 hover:bg-blue-50/30 transition-colors ${i % 2 === 1 ? "bg-slate-50/40" : ""}`}>
+                                    <td className="py-2.5 px-3 text-slate-300 font-mono text-xs">{i+1}</td>
+                                    <td className="py-2.5 px-3">
+                                      <div className="font-medium text-slate-700">{a.ase || "—"}</div>
+                                      {a.rm && <div className="text-[10px] text-slate-400 mt-0.5">{a.rm}</div>}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-slate-500">{a.dealer_count}</td>
+                                    <td className="py-2.5 px-3 text-right">
+                                      <div className="font-semibold text-slate-800 tabular-nums">{fmt(a.sale_value_lkr)}</div>
+                                      <ValueBar pct={a.sale_value_lkr / totalSale * 100}/>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">
+                                      {a.return_value_lkr > 0 ? <span className="text-rose-500">{fmt(a.return_value_lkr)}</span> : <span className="text-slate-200">—</span>}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right"><RetBadge pct={a.return_rate_pct}/></td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     {/* District */}
-                    <div>
-                      <h3 className="text-sm font-semibold text-slate-700 mb-1">District Performance</h3>
-                      <div className="overflow-auto max-h-[320px]">
-                        <table className="w-full text-xs border-collapse">
-                          <thead className="sticky top-0 bg-white"><tr className="border-b border-slate-200">
-                            <th className="text-left py-2 px-2 text-slate-500">District</th>
-                            <th className="text-left py-2 px-2 text-slate-500">Province</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Dealers</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Order Rec. (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Sale Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Return Value (LKR)</th>
-                            <th className="text-right py-2 px-2 text-slate-500">Ret %</th>
-                          </tr></thead>
-                          <tbody>
-                            {salesData.district_perf.map((d, i) => (
-                              <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
-                                <td className="py-1.5 px-2 font-medium text-slate-700">{d.district || "—"}</td>
-                                <td className="py-1.5 px-2 text-slate-500">{d.province || "—"}</td>
-                                <td className="py-1.5 px-2 text-right text-slate-500">{d.dealer_count}</td>
-                                <td className="py-1.5 px-2 text-right text-slate-500">{fmt(d.order_received_lkr ?? 0)}</td>
-                                <td className="py-1.5 px-2 text-right font-medium text-slate-700">{fmt(d.sale_value_lkr)}</td>
-                                <td className="py-1.5 px-2 text-right text-red-500">{fmt(d.return_value_lkr)}</td>
-                                <td className="py-1.5 px-2 text-right text-slate-500">{d.return_rate_pct.toFixed(1)}%</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                    <div className="rounded-lg border border-slate-100 overflow-hidden">
+                      <div className="bg-slate-50 border-b border-slate-200 px-3 py-2.5">
+                        <h3 className="text-sm font-semibold text-slate-700">District Performance</h3>
+                        <p className="text-xs text-slate-400 mt-0.5">{salesData.district_perf.length} districts · sorted by sale value</p>
                       </div>
+                      {(() => {
+                        const totalSale = salesData.district_perf.reduce((s, d) => s + d.sale_value_lkr, 0) || 1;
+                        const sorted = [...salesData.district_perf].sort((a, b) => b.sale_value_lkr - a.sale_value_lkr);
+                        return (
+                          <div className="overflow-auto max-h-[320px]">
+                            <table className="w-full text-xs border-collapse">
+                              <thead className="sticky top-0 bg-white z-10">
+                                <tr className="border-b border-slate-100">
+                                  <th className="text-left py-2.5 px-3 text-slate-500 font-medium w-8">#</th>
+                                  <th className="text-left py-2.5 px-3 text-slate-500 font-medium">District</th>
+                                  <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Dealers</th>
+                                  <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Order Rec. (LKR)</th>
+                                  <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Sale Value (LKR)</th>
+                                  <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Return (LKR)</th>
+                                  <th className="text-right py-2.5 px-3 text-slate-500 font-medium">Ret %</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {sorted.map((d, i) => (
+                                  <tr key={i} className={`border-b border-slate-50 hover:bg-blue-50/30 transition-colors ${i % 2 === 1 ? "bg-slate-50/40" : ""}`}>
+                                    <td className="py-2.5 px-3 text-slate-300 font-mono text-xs">{i+1}</td>
+                                    <td className="py-2.5 px-3">
+                                      <div className="font-medium text-slate-700">{d.district || "—"}</div>
+                                      {d.province && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 font-medium mt-0.5 inline-block">{d.province}</span>}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-slate-500">{d.dealer_count}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-slate-400">{fmt(d.order_received_lkr ?? 0)}</td>
+                                    <td className="py-2.5 px-3 text-right">
+                                      <div className="font-semibold text-slate-800 tabular-nums">{fmt(d.sale_value_lkr)}</div>
+                                      <ValueBar pct={d.sale_value_lkr / totalSale * 100}/>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">
+                                      {d.return_value_lkr > 0 ? <span className="text-rose-500">{fmt(d.return_value_lkr)}</span> : <span className="text-slate-200">—</span>}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right"><RetBadge pct={d.return_rate_pct}/></td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 )}

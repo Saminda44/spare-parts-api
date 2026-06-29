@@ -5,6 +5,38 @@ Extracts the seven-column parts table from Yamaha motorcycle PDF catalogues:
 
 Output matches the structure of GPD155D-A_Parts_Catalogue.xlsx exactly.
 
+Supported catalogue formats
+---------------------------
+Four distinct page layouts are found across the Yamaha catalogue range.
+Use ``_detect_type()`` to identify which layout applies before parsing.
+
+  Type A — Multi-model all-alphanumeric (ALPHA, SALUTO):
+    REF.NO. | EXISTING PART NO. | PART NAME | 4LS1 | 4LS2 | 4LS3 | 4LS4
+           | 9 DIGIT PART NO. | SUPERSEDED PART NO. | REMARKS
+    Markers: header contains "EXISTING" and "SUPERSEDED".
+    Part numbers: 12-char no-hyphen, e.g. 4LSE11110100, 4LSW66020100.
+    9-digit and superseded columns flow into the ``remarks`` output field.
+    Multiple variant qty columns (detected via _is_variant_code).
+
+  Type B — Standard single/few-variant (FAZER, AEROX, most models):
+    REF.NO. | PART NO. | PART NAME | <variant-code>... | REMARKS
+    Markers: header contains "PART NO." / "PART NAME" — no Spanish or 12-digit labels.
+    Part numbers: 3-segment (2GS-E1102-00) or 2-segment (95022-06012).
+    Variant columns hold per-variant Q'ty (e.g. "2WS1", "B65J").
+
+  Type C — Bilingual Spanish/English (IS73 and similar export catalogues):
+    REF.Nº | CODIGO Nº / PART NO. | DESCRIPCION / DESCRIPTION | <variant> | OBSERVACIONES / REMARKS
+    Markers: header contains "CODIGO", "DESCRIPCION", or "OBSERVACIONES".
+    Part numbers: standard hyphenated format — same as Type B.
+    Structurally identical to Type B; only the header tokens differ.
+    "OBSERVACIONES" is treated as the REMARKS-column anchor.
+
+  Type D — 12-digit hyphenated with 9-digit remarks (YBX, ENTICER, 5S1 series):
+    REF.NO. | PART NO. (12 DIGIT) | DESCRIPTION | <variant> | REMARKS (9 DIGIT)
+    Markers: header contains "12 DIGIT" (possibly with surrounding parentheses).
+    Part numbers: 4-segment, e.g. 5TS-E1111-00-00, 93210-71462-00.
+    REMARKS column contains the matching 9-digit short part number.
+
 Strategy
 --------
 Primary: word-position clustering.
@@ -20,7 +52,7 @@ Fallback: text-line regex.
 Column boundary detection
 --------------------------
 Each "parts page" starts with a header band containing the words
-  "PART NO." (or "12 DIGIT") and "REMARKS".
+  "PART NO." (or "12 DIGIT" / "12 DIGITS") and optionally "REMARKS".
 The extractor reads the first 25 word-rows of every page to locate these
 anchors and derive the five column X-ranges:
     [ref_start, pn_start, desc_start, qty_start, rem_start]
@@ -32,6 +64,7 @@ Part-number pattern
 -------------------
 Yamaha standard:  XYZ-ABCDE-NN  or  XYZ-ABCDE-NN-CC  (last two-char segment
 always digits for the revision, optional two-char colour/variant suffix).
+Also handles 12-char all-alphanumeric format (ALPHA/SALUTO/YBX125 style).
 The regex is strict enough to avoid matching model-version stamps (e.g. 1BV2).
 """
 
@@ -52,11 +85,14 @@ from loguru import logger
 
 COLUMNS: list[str] = [
     "section", "fig_no", "ref_no", "part_no",
-    "description", "qty", "remarks",
+    "description", "qty",
+    "nine_digit_part_no",   # Type A: "9 DIGIT PART NO." column — abbreviated PN
+    "superseded_part_no",   # Type A: "SUPERSEDED PART NO." column — old/replaced PN
+    "remarks",
 ]
 DISPLAY_HEADERS: list[str] = [
     "Section", "Ref. No.", "Part No.",
-    "Description", "Q'ty", "Remarks",
+    "Description", "Q'ty", "9-Digit P/N", "Superseded P/N", "Remarks",
 ]
 
 # Yamaha part numbers.  Some PDFs encode hyphens as U+2013 (en-dash) instead
@@ -86,12 +122,20 @@ _PN_PAT = re.compile(
 _FIG_PAT = re.compile(
     r'^FIG\.\s+(\d+[A-Z]?)\s*(?:\([^)]+\)\s*)?(.+)$', re.IGNORECASE
 )
-# Lines to skip (header labels, noise)
+# Lines to skip (header labels, noise).
+# Covers all four catalogue format header tokens including Spanish bilingual (Type C):
+#   Type A: EXISTING (PART NO.), SUPERSEDED (PART NO.), 9 DIGIT (PART NO.)
+#   Type B: PART NO., PART NAME, REMARKS
+#   Type C: CODIGO (Nº), DESCRIPCION, OBSERVACIONES  ← Spanish bilingual
+#   Type D: 12 DIGITS (PART NO.), DESCRIPTION, QTY.
 _SKIP_PAT = re.compile(
     r'^(REF\.?|PART\s+NO\.?|PART\s+NAME|DESCRIPTION|REMARKS|NO\.?|'
-    r'CONTENTS?|Q\'?TY\.?|12\s+DIGIT|9\s+DIGIT)$',
+    r'CONTENTS?|Q\'?TY\.?|12\s+DIGITS?|9\s+DIGIT|EXISTING|SUPERSEDED|'
+    r'CODIGO|DESCRIPCION|OBSERVACIONES|N[º°o]?)$',   # Type C Spanish headers
     re.IGNORECASE,
 )
+# REMARKS-column keyword set — includes Spanish equivalent for Type C catalogues.
+_REMARKS_TOKENS: frozenset[str] = frozenset({"REMARKS", "OBSERVACIONES"})
 # Model-code stamps at top of page, e.g. "1BV2", "21C1", "5AK5"
 _MODEL_STAMP_PAT = re.compile(r'^[A-Z0-9]{2,5}\d[A-Z]?$')
 # Copyright line injected by some PDFs
@@ -214,8 +258,10 @@ class ColBounds:
                    produce a "/" -separated qty string with "" for absent variants,
                    e.g. "1//1/" for a part that only applies to variants 0 and 2.
     """
-    rem_start:   float      = 9999.0
-    qty_col_xs:  list[float] = field(default_factory=list)
+    rem_start:    float       = 9999.0
+    qty_col_xs:   list[float] = field(default_factory=list)
+    nine_digit_x: float       = 9999.0   # x-start of "9 DIGIT PART NO." col (Type A only)
+    superseded_x: float       = 9999.0   # x-start of "SUPERSEDED PART NO." col (Type A only)
 
 
 @dataclass
@@ -237,6 +283,7 @@ class ExtractionResult:
     # empty when result comes directly from the extractor without agent post-processing.
     available_colour_map: dict[str, str] = field(default_factory=dict)
     manufacture_year:  str | None = None   # e.g. "2019" from ©2019 on the cover page
+    catalogue_type:    str = "B"          # "A" | "B" | "C" | "D" — see module docstring
     warnings:          list[str] = field(default_factory=list)
     error:             str | None = None
 
@@ -298,6 +345,10 @@ class YamahaCatalogueExtractor:
         last_bounds: ColBounds | None = None
         variant_counter: _Counter[tuple[str, ...]] = _Counter()
 
+        # Detect catalogue type first — governs column-bound and skip logic.
+        cat_type = self._detect_type(pdf_path)
+        logger.info(f"{pdf_path.name}: catalogue type = {cat_type}")
+
         # Pre-detect variant count from cover page so _split_after pops exactly
         # N qty digits per row (preventing trailing description digits from being
         # consumed, e.g. "GUIDE, VALVE 1" kept intact instead of "GUIDE, VALVE").
@@ -349,6 +400,10 @@ class YamahaCatalogueExtractor:
                                 new_bounds.rem_start = last_bounds.rem_start
                             if not new_bounds.qty_col_xs:
                                 new_bounds.qty_col_xs = last_bounds.qty_col_xs
+                            if new_bounds.nine_digit_x >= 9000:
+                                new_bounds.nine_digit_x = last_bounds.nine_digit_x
+                            if new_bounds.superseded_x >= 9000:
+                                new_bounds.superseded_x = last_bounds.superseded_x
                         bounds = new_bounds
 
                     page_rows, new_section, new_fig, page_sects = (
@@ -369,7 +424,8 @@ class YamahaCatalogueExtractor:
             return ExtractionResult(
                 pdf_path=pdf_path, model=model, rows=rows,
                 pages_scanned=pages_scanned, sections_found=len(sections_seen),
-                ocr_flagged=ocr_flagged, warnings=warnings, error=str(exc),
+                ocr_flagged=ocr_flagged, catalogue_type=cat_type,
+                warnings=warnings, error=str(exc),
             )
 
         # Fallback: if positional extraction found nothing, try text-line parser
@@ -403,7 +459,7 @@ class YamahaCatalogueExtractor:
             pages_scanned=pages_scanned, sections_found=len(sections_seen),
             ocr_flagged=ocr_flagged, variants=variants,
             colour_codes=colour_codes, available_colours=available_colours,
-            manufacture_year=manufacture_year,
+            manufacture_year=manufacture_year, catalogue_type=cat_type,
             warnings=warnings,
         )
 
@@ -438,7 +494,7 @@ class YamahaCatalogueExtractor:
 
         if not pdf_files:
             empty = pd.DataFrame(
-                columns=COLUMNS + ["model", "source_file", "ocr_used"]
+                columns=COLUMNS + ["model", "source_file", "catalogue_type", "ocr_used"]
             )
             if save_path:
                 empty.to_parquet(save_path, index=False)
@@ -465,6 +521,7 @@ class YamahaCatalogueExtractor:
                 df = result.df.copy()
                 df["model"] = model_name
                 df["source_file"] = pdf_file.name
+                df["catalogue_type"] = result.catalogue_type
                 df["ocr_used"] = False
                 return (pdf_file, model_name, df)
             except Exception as exc:  # noqa: BLE001
@@ -487,33 +544,7 @@ class YamahaCatalogueExtractor:
 
         if not all_dfs:
             empty = pd.DataFrame(
-                columns=COLUMNS + ["model", "source_file", "ocr_used"]
-            )
-            if save_path:
-                empty.to_parquet(save_path, index=False)
-            return empty
-
-        merged = pd.concat(all_dfs, ignore_index=True)
-        merged = merged.drop_duplicates(
-            subset=["model", "source_file", "part_no", "ref_no", "fig_no"],
-        )
-
-        logger.info(
-            f"Extraction complete: {len(merged)} total rows | "
-            f"{merged['part_no'].nunique()} distinct part numbers | "
-            f"{merged['model'].nunique()} models"
-        )
-
-        if save_path:
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            merged.to_parquet(save_path, index=False)
-            logger.info(f"Saved → {save_path}")
-
-        return merged
-
-        if not all_dfs:
-            empty = pd.DataFrame(
-                columns=COLUMNS + ["model", "source_file", "ocr_used"]
+                columns=COLUMNS + ["model", "source_file", "catalogue_type", "ocr_used"]
             )
             if save_path:
                 empty.to_parquet(save_path, index=False)
@@ -582,22 +613,50 @@ class YamahaCatalogueExtractor:
         detection missed the second row.  We now accumulate codes from ALL
         header rows and sort by x-position, so every qty column is captured.
         """
-        rem_start = 9999.0
+        rem_start    = 9999.0
+        nine_digit_x = 9999.0
+        superseded_x = 9999.0
         raw_vc_xs: list[float] = []   # accumulate variant-code x-centres
+
+        def _bare(t: str) -> str:
+            return t.strip("()")
 
         for _y, ws in word_rows[:25]:
             texts = [w["text"].upper() for w in ws]
             joined_up = " ".join(texts)
 
-            # REMARKS anchor
-            rem_idx = next((i for i, t in enumerate(texts) if t == "REMARKS"), None)
+            # REMARKS anchor — also recognise Spanish "OBSERVACIONES" (Type C).
+            rem_idx = next(
+                (i for i, t in enumerate(texts) if t in _REMARKS_TOKENS),
+                None,
+            )
             if rem_idx is not None:
                 rem_start = ws[rem_idx]["x0"]
 
-            # CRUX-style "9 DIGIT" header
-            digit_indices = [i for i, t in enumerate(texts) if t == "DIGIT"]
+            # Type D / old Type 3: header "12 DIGIT(S) PART NO." and "9 DIGIT PART NO."
+            # Normalise tokens by stripping surrounding parentheses so "DIGIT)" is matched.
+            digit_indices = [
+                i for i, t in enumerate(texts)
+                if _bare(t) in ("DIGIT", "DIGITS")
+            ]
             if len(digit_indices) >= 2:
                 rem_start = ws[digit_indices[-1] - 1]["x0"]
+
+            # Type A: "SUPERSEDED PART NO." column.
+            # Always capture superseded_x; additionally use it as rem_start fallback
+            # when no REMARKS column is present.
+            sup_idx = next((i for i, t in enumerate(texts) if t == "SUPERSEDED"), None)
+            if sup_idx is not None:
+                superseded_x = min(superseded_x, ws[sup_idx]["x0"])
+                if rem_start >= 9000:
+                    rem_start = ws[sup_idx]["x0"]
+
+            # Type A: "9 DIGIT PART NO." column — the literal "9" token immediately
+            # before a DIGIT/DIGITS token marks the left edge of this column.
+            for i in range(len(texts) - 1):
+                if texts[i] == "9" and _bare(texts[i + 1]) in ("DIGIT", "DIGITS"):
+                    nine_digit_x = min(nine_digit_x, ws[i]["x0"])
+                    break
 
             # Skip data rows (contain part numbers) — only collect codes from
             # column-header rows.  Remark qualifiers (DBNM8, MBL2, etc.) appear
@@ -616,8 +675,13 @@ class YamahaCatalogueExtractor:
             if not qty_col_xs or cx - qty_col_xs[-1] > 8.0:
                 qty_col_xs.append(cx)
 
-        if rem_start < 9000 or qty_col_xs:
-            return ColBounds(rem_start=rem_start, qty_col_xs=qty_col_xs)
+        if rem_start < 9000 or qty_col_xs or nine_digit_x < 9000 or superseded_x < 9000:
+            return ColBounds(
+                rem_start=rem_start,
+                qty_col_xs=qty_col_xs,
+                nine_digit_x=nine_digit_x,
+                superseded_x=superseded_x,
+            )
         return None
 
     @staticmethod
@@ -628,6 +692,36 @@ class YamahaCatalogueExtractor:
                 and any(c.isalpha() for c in s))
 
     @staticmethod
+    def _maybe_unreverse_variants(codes: tuple[str, ...]) -> tuple[str, ...]:
+        """Correct character-reversed variant codes from rotated PDF column headers.
+
+        Yamaha Type A catalogues (ALPHA, SALUTO, YBX) have variant-code column
+        headers printed vertically (rotated 90°).  pdfplumber reads the characters
+        from bottom-to-top, producing reversed strings:
+            4LS1 → 1SL4,  4LS2 → 2SL4,  4LS3 → 3SL4,  4LS4 → 4SL4
+
+        Detection heuristic: a genuine Yamaha variant set shares a common PREFIX
+        (e.g. "4LS").  A reversed set shares a common SUFFIX (e.g. "SL4").
+        If the reversed copies have a longer common prefix than the originals, the
+        originals must be reversed — flip every code.
+        """
+        if len(codes) < 2:
+            return codes
+
+        def _cpfx(strings: tuple[str, ...]) -> int:
+            if not strings:
+                return 0
+            for i in range(min(len(s) for s in strings)):
+                if len({s[i] for s in strings}) > 1:
+                    return i
+            return min(len(s) for s in strings)
+
+        rev = tuple(c[::-1] for c in codes)
+        if _cpfx(rev) > _cpfx(codes) and _cpfx(rev) >= 2:
+            return rev
+        return codes
+
+    @staticmethod
     def _collect_variant_row(
         word_rows: list[tuple[float, list[dict]]],
         counter: _Counter,
@@ -635,17 +729,17 @@ class YamahaCatalogueExtractor:
         """Scan word-rows for a QTY column-header row containing 3+ variant codes.
 
         In multi-variant catalogues Yamaha prints the variant codes as rotated
-        column headers (e.g. J56B L56B M56B N56B for AEROX variants B65J–B65N).
-        The rotated rendering means pdfplumber may read the chars bottom-to-top,
-        but the tokens are still short mixed alphanumeric strings — same shape as
-        real variant codes.  We count co-occurring tuples across pages so the most
-        frequent combination wins.
+        column headers (e.g. 4LS1 4LS2 4LS3 4LS4 for ALPHA/SALUTO variants).
+        pdfplumber may read these bottom-to-top, yielding reversed tokens
+        (1SL4, 2SL4, ...).  _maybe_unreverse_variants detects and corrects this
+        so the stored tuple always uses the canonical top-to-bottom reading.
         """
         for _y, ws in word_rows:
             texts = [w["text"].upper() for w in ws]
             vc = [t for t in texts if YamahaCatalogueExtractor._is_variant_code(t)]
             if len(vc) >= 3:
-                counter[tuple(vc)] += 1
+                corrected = YamahaCatalogueExtractor._maybe_unreverse_variants(tuple(vc))
+                counter[corrected] += 1
 
     @staticmethod
     def _extract_manufacture_year(pdf_path: Path) -> str | None:
@@ -681,6 +775,43 @@ class YamahaCatalogueExtractor:
         except Exception:  # noqa: BLE001
             pass
         return None
+
+    @staticmethod
+    def _detect_type(pdf_path: Path) -> str:
+        """Identify which of the four catalogue layout types this PDF uses.
+
+        Scans the first ten pages and returns the earliest match:
+
+          "A" — Multi-model all-alphanumeric (ALPHA/SALUTO):
+                Header contains "EXISTING" and "SUPERSEDED".
+          "C" — Bilingual Spanish/English (IS73 export catalogues):
+                Header contains "CODIGO", "DESCRIPCION", or "OBSERVACIONES".
+          "D" — 12-digit hyphenated with 9-digit remarks (YBX/ENTICER/5S1):
+                Header contains "12 DIGIT" (with or without surrounding parens).
+          "B" — Standard (all other models): default fallback.
+
+        Business meaning: determines which column layout to use so that part
+        numbers, quantities, and remarks are extracted from the correct PDF columns.
+        """
+        import pdfplumber as _plumber
+
+        _TYPE_A = re.compile(r'\bEXISTING\b.*\bSUPERSEDED\b|\bSUPERSEDED\b.*\bEXISTING\b', re.IGNORECASE | re.DOTALL)
+        _TYPE_C = re.compile(r'\b(CODIGO|DESCRIPCION|OBSERVACIONES)\b', re.IGNORECASE)
+        _TYPE_D = re.compile(r'12\s*DIGIT', re.IGNORECASE)
+
+        try:
+            with _plumber.open(str(pdf_path)) as pdf:
+                for page in pdf.pages[:10]:
+                    text = page.extract_text() or ""
+                    if _TYPE_A.search(text):
+                        return "A"
+                    if _TYPE_C.search(text):
+                        return "C"
+                    if _TYPE_D.search(text):
+                        return "D"
+        except Exception:  # noqa: BLE001
+            pass
+        return "B"
 
     @staticmethod
     def _extract_colour_codes(pdf_path: Path) -> list[dict]:
@@ -1181,57 +1312,87 @@ class YamahaCatalogueExtractor:
             # Two modes depending on whether variant column positions are known.
             #
             # POSITIONAL MODE (qty_col_xs available):
-            #   Classify every word after the part number by its x-centre:
-            #     • x0 ≥ rem_start              → remarks
-            #     • x_centre ≥ qty_zone_x AND digit → qty (assigned to nearest col)
-            #     • everything else              → description
-            #   This is the only reliable way to keep description digits (e.g. the
-            #   "1" in "STAY 1") from being confused with qty digits, because their
-            #   x-positions place them firmly in the description zone.
+            #   Words after the part number are routed right-to-left by x0:
+            #     x0 ≥ rem_start                        → remarks
+            #     x0 ≥ superseded_x  (Type A only)      → superseded_part_no
+            #     x0 ≥ nine_digit_x  (Type A only)      → nine_digit_part_no
+            #     x_centre ≥ qty_zone_x, digit, ≤3 ch   → nearest qty slot
+            #     x_centre > max_qty_cx (gap zone)      → pre_rem_parts
+            #     everything else                       → description
             #
             # TEXT-BASED FALLBACK (no column bounds / single-variant):
             #   Use _split_after heuristics (existing behaviour).
 
+            # Initialise per-row accumulators for both branches.
+            nine_digit_out: str = ""
+            superseded_out: str = ""
+
             if bounds and bounds.qty_col_xs and pn_word:
                 n_cols     = len(bounds.qty_col_xs)
                 qty_zone_x = min(bounds.qty_col_xs) - 15.0
-                max_qty_cx = max(bounds.qty_col_xs)   # x-centre of rightmost qty col
-                slots:         list[str] = [""] * n_cols
-                desc_parts:    list[str] = []
-                rem_parts:     list[str] = []
-                # Words in the gap between the last qty column and the REMARKS
-                # column header (e.g. colour codes like "DBNM8", market qualifiers).
-                # They are appended AFTER explicit-remarks words so that the reading
-                # order is preserved: "FOR YB" (from REMARKS zone) + "DBNM8" (gap).
+                max_qty_cx = max(bounds.qty_col_xs)
+                slots:            list[str] = [""] * n_cols
+                desc_parts:       list[str] = []
+                rem_parts:        list[str] = []
+                nine_digit_parts: list[str] = []
+                superseded_parts: list[str] = []
+                # Words in the gap between the last qty column and the left-most
+                # extra column (or REMARKS when no extra columns exist).
+                # Colour codes / market qualifiers land here for Type B/C/D.
                 pre_rem_parts: list[str] = []
-                # Only use the gap-zone when the REMARKS boundary is known;
-                # without rem_start we cannot define the gap reliably.
                 use_gap_zone = bounds.rem_start < 9000
+                has_superseded = bounds.superseded_x < 9000
+                has_nine_digit  = bounds.nine_digit_x < 9000
 
                 for w in ws_filtered:
-                    if w["x0"] < pn_word["x1"]:          # ref-no / part-number
+                    if w["x0"] < pn_word["x1"]:      # ref-no / part-number zone
                         continue
+                    # Route right-to-left so each zone is checked from widest x
                     if use_gap_zone and w["x0"] >= bounds.rem_start:
                         rem_parts.append(w["text"])
                         continue
+                    if has_superseded and w["x0"] >= bounds.superseded_x:
+                        superseded_parts.append(w["text"])
+                        continue
+                    if has_nine_digit and w["x0"] >= bounds.nine_digit_x:
+                        nine_digit_parts.append(w["text"])
+                        continue
                     w_cx = (w["x0"] + w["x1"]) / 2
-                    if w_cx >= qty_zone_x and re.match(r'^\d+$', w["text"]):
+                    if (w_cx >= qty_zone_x
+                            and re.match(r'^\d+$', w["text"])
+                            and len(w["text"]) <= 3):
+                        # Real qty ≤ 3 digits.  9-digit / 12-digit PN strings in
+                        # "9 DIGIT PART NO." / "SUPERSEDED" columns already
+                        # caught above; this guard is a safety net for PDFs where
+                        # those boundaries weren't detected.
                         nearest = min(
                             range(n_cols),
                             key=lambda i: abs(bounds.qty_col_xs[i] - w_cx),
                         )
                         slots[nearest] = w["text"]
                     elif use_gap_zone and w_cx > max_qty_cx:
-                        # Non-digit word past the last qty column: colour/market
-                        # qualifier that belongs in remarks, not description.
-                        pre_rem_parts.append(w["text"])
+                        # Gap zone: between the last variant qty column and REMARKS.
+                        # For Type A (has_superseded=True): this gap is the
+                        # "9 DIGIT PART NO." zone.  nine_digit_x may not be
+                        # detected when "9" and "DIGIT" tokens split across Y-rows
+                        # in pdfplumber; but superseded_x IS reliably detected, and
+                        # values in that zone were already caught by the superseded
+                        # check above — so everything remaining in the gap belongs
+                        # to the nine_digit column.
+                        # For Type B/C/D (has_superseded=False): old behaviour —
+                        # colour codes / market qualifiers → remarks.
+                        if has_superseded:
+                            nine_digit_parts.append(w["text"])
+                        else:
+                            pre_rem_parts.append(w["text"])
                     else:
                         desc_parts.append(w["text"])
 
                 # Lookahead: pn and description on different Y-rows.
-                # Only needed when the current row has no description AND no
-                # gap-zone qualifiers (i.e. effectively empty after the pn).
-                if not desc_parts and not pre_rem_parts and idx < len(word_rows):
+                # Triggered whenever description is empty — even when nine_digit_parts
+                # or pre_rem_parts are non-empty (Type A places the part name on the
+                # next Y-row when the 9-digit PN fills the current row's tail).
+                if not desc_parts and idx < len(word_rows):
                     _ny, next_ws = word_rows[idx]
                     next_joined = " ".join(w["text"] for w in next_ws).strip()
                     if (next_joined
@@ -1242,23 +1403,17 @@ class YamahaCatalogueExtractor:
                         idx += 1
 
                 desc_raw = " ".join(desc_parts)
-                # Truncate at any embedded PN: indicates a supersession code or
-                # merged Y-row from tight typesetting (e.g. CRUX 5KA1 PDF).
-                # Yamaha descriptions are plain English — they never legitimately
-                # contain a part number.
+                # Truncate at any embedded PN: supersession code or merged Y-row.
                 _pn_in_desc = _PN_PAT.search(desc_raw)
                 desc = desc_raw[: _pn_in_desc.start()].strip() if _pn_in_desc else desc_raw
                 qty  = "/".join(slots)
                 filled = [s for s in slots if s]
-                # Collapse "1/1/1/1" → "1" only when EVERY slot is filled identically
                 if filled and len(set(filled)) == 1 and len(filled) == n_cols:
                     qty = filled[0]
-                # Combine gap-zone words with explicit-remarks words.
-                # Gap-zone words (pre_rem_parts) appear to the LEFT of the
-                # REMARKS column in the PDF, so they always come first.
-                # e.g. gap=["DBNM8"] rem=["FOR","YB"] → "DBNM8 FOR YB"
-                # e.g. gap=["FOR"]   rem=["SM12"]     → "FOR SM12"
+                # Combine gap-zone qualifiers with explicit remarks text.
                 remarks = " ".join(pre_rem_parts + rem_parts)
+                nine_digit_out = " ".join(nine_digit_parts).strip()
+                superseded_out = " ".join(superseded_parts).strip()
 
             else:
                 # ── Text-based fallback ─────────────────────────────────────
@@ -1304,13 +1459,15 @@ class YamahaCatalogueExtractor:
                 ref_no = last_ref_no
 
             rows.append({
-                "section":     new_section,
-                "fig_no":      new_fig,
-                "ref_no":      ref_no,
-                "part_no":     pn,
-                "description": desc.strip(),
-                "qty":         qty,
-                "remarks":     remarks,
+                "section":            new_section,
+                "fig_no":             new_fig,
+                "ref_no":             ref_no,
+                "part_no":            pn,
+                "description":        desc.strip(),
+                "qty":                qty,
+                "nine_digit_part_no": nine_digit_out,
+                "superseded_part_no": superseded_out,
+                "remarks":            remarks,
             })
 
         return rows, new_section, new_fig, sections_seen
@@ -1329,6 +1486,7 @@ class YamahaCatalogueExtractor:
         sections_seen: set[str] = set()
         current_section = ""
         current_fig = ""
+        last_ref_no = ""  # carry-forward for Type 3 sub-rows (no ref on continuation lines)
 
         try:
             with pdfplumber.open(str(pdf_path)) as pdf:
@@ -1358,6 +1516,7 @@ class YamahaCatalogueExtractor:
                             current_fig = f"FIG. {fig_m.group(1)}"
                             current_section = _CID_PAT.sub("", fig_m.group(2)).strip()
                             sections_seen.add(current_section)
+                            last_ref_no = ""  # reset ref carry at each new FIG section
                             continue
 
                         pn_m = _PN_PAT.search(line)
@@ -1372,16 +1531,26 @@ class YamahaCatalogueExtractor:
 
                         ref_m = re.match(r'^(\d{1,3})\s*$', before)
                         ref_no = ref_m.group(1) if ref_m else before
+
+                        # Carry-forward: Type 3 sub-rows (oversize pistons, ring sets etc.)
+                        # share a ref number with the preceding row but print it blank.
+                        if ref_no:
+                            last_ref_no = ref_no
+                        elif last_ref_no:
+                            ref_no = last_ref_no
+
                         desc, qty, remarks = self._split_after(after, num_variants=0)
 
                         rows.append({
-                            "section":     current_section,
-                            "fig_no":      current_fig,
-                            "ref_no":      ref_no,
-                            "part_no":     pn,
-                            "description": desc,
-                            "qty":         qty,
-                            "remarks":     remarks,
+                            "section":            current_section,
+                            "fig_no":             current_fig,
+                            "ref_no":             ref_no,
+                            "part_no":            pn,
+                            "description":        desc,
+                            "qty":                qty,
+                            "nine_digit_part_no": "",  # not recoverable from text fallback
+                            "superseded_part_no": "",
+                            "remarks":            remarks,
                         })
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Text fallback failed for {pdf_path}: {exc}")

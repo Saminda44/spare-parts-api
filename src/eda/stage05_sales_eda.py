@@ -44,7 +44,7 @@ import pandas as pd
 from loguru import logger
 
 from src.config.constants import CURRENCY
-from src.config.paths import DATA_INTERIM, DATA_OUTPUTS, DATA_RAW
+from src.config.paths import DATA_INTERIM, DATA_OUTPUTS, DATA_RAW, SRC_CONFIG
 
 warnings.filterwarnings("ignore")
 
@@ -80,16 +80,18 @@ def _mc_category(material: str) -> str:
 def load_dealer_map() -> pd.DataFrame:
     """Load dealers.xlsx with all hierarchy attributes.
 
-    Returns all dealers (Active and Inactive) whose Dealer Name is non-empty.
+    Returns ALL dealers (Active and Inactive) whose Dealer Name is non-empty,
+    including duplicate-named rows. Callers that need a unique-name map must
+    handle deduplication themselves (e.g. load_and_clean uses ASE disambiguation).
+
     Columns returned: Dealer Code, Dealer Name, Type, Province, District, ASE, RM.
     """
     df = pd.read_excel(_DEALERS_RAW, dtype=str)
     for col in df.columns:
         df[col] = df[col].fillna("").str.strip()
-    # Normalise expected columns
-    col_map = {c: c for c in df.columns}
-    df = df.rename(columns=col_map)
     df = df[df["Dealer Name"] != ""].copy()
+    # Drop rows with placeholder or non-numeric Dealer Codes
+    df = df[df["Dealer Code"].str.strip().str.match(r"^\d+$", na=False)].copy()
     logger.info(
         f"Dealer master: {len(df)} dealers  "
         f"(MC={(df['Type']=='MC').sum()}, OBM={(df['Type']=='OBM').sum()})"
@@ -99,7 +101,16 @@ def load_dealer_map() -> pd.DataFrame:
         for c in ["Dealer Code", "Dealer Name", "Type", "Province", "District", "ASE", "RM"]
         if c in df.columns
     ]
-    return df[keep].drop_duplicates("Dealer Name")
+    df = df[keep]
+    dup_names = df[df.duplicated("Dealer Name", keep=False)]["Dealer Name"].unique()
+    if len(dup_names):
+        logger.info(
+            f"dealers.xlsx has {len(dup_names)} duplicate Dealer Names "
+            f"(will be split by Sales Employee = ASE match): "
+            + ", ".join(sorted(dup_names)[:5])
+            + (f" ... and {len(dup_names)-5} more" if len(dup_names) > 5 else "")
+        )
+    return df
 
 
 def load_and_clean(refresh: bool = False) -> pd.DataFrame:
@@ -133,14 +144,102 @@ def load_and_clean(refresh: bool = False) -> pd.DataFrame:
     raw = raw[raw["Billing Date"].notna() & (raw["SlsVolQty"] != 0)].copy()
     logger.info(f"After date/zero-qty filter: {len(raw):,} (dropped {before - len(raw):,})")
 
-    # ── Dealer scoping: Payer = Dealer Name (inner join) ────────
+    # ── Remove exact duplicates from SAP export artefact ────────
+    # Each billing line (Billing Document + Item) appears twice in the raw
+    # export with identical data. Drop the duplicate before any aggregation.
+    before_dedup = len(raw)
+    raw = raw.drop_duplicates(subset=["Billing Document", "Item"])
+    logger.info(f"Dedup (Billing Document, Item): {before_dedup - len(raw):,} duplicates removed, {len(raw):,} rows remain")
+
+    # ── Payer aliases: name-mismatch dealers not fixed by dealers.xlsx ──────
+    # src/config/payer_aliases.csv maps Payer strings in sales.xlsx that don't
+    # match any Dealer Name in dealers.xlsx (e.g. name suffix differences).
+    _ALIASES_FILE = SRC_CONFIG / "payer_aliases.csv"
+    aliases: dict[str, str] = {}
+    if _ALIASES_FILE.exists():
+        alias_df = pd.read_csv(_ALIASES_FILE, dtype=str)
+        aliases = dict(
+            zip(alias_df["payer_name"].str.lower(), alias_df["dealer_code"])
+        )
+        logger.info(f"Loaded {len(aliases)} payer alias(es) from payer_aliases.csv")
+
+    # ── Dealer scoping: Payer = Dealer Name (inner join, case-insensitive) ────
+    # dealer_df may have duplicate Dealer Names (same name, different codes for
+    # different regions). We join ALL matching rows then disambiguate by ASE.
+    raw["_payer_key"] = raw["Payer"].str.lower()
+    raw["_se_key"] = raw["Sales Employee"].astype(str).str.lower().str.strip()
+    dealer_df = dealer_df.copy()
+    dealer_df["_name_key"] = dealer_df["Dealer Name"].str.lower()
+    dealer_df["_ase_key"] = dealer_df["ASE"].astype(str).str.lower().str.strip()
+
+    # Apply payer aliases: remap unmatched Payers to their correct Dealer Code.
+    # Skip any alias whose payer_name already matches an existing Dealer Name
+    # (e.g. if dealers.xlsx was updated after the alias was written).
+    if aliases:
+        existing_name_keys = set(dealer_df["_name_key"].tolist())
+        alias_codes = list(aliases.values())
+        alias_dealer_rows = dealer_df[dealer_df["Dealer Code"].isin(alias_codes)].copy()
+        for payer_lower, code in aliases.items():
+            if payer_lower in existing_name_keys:
+                logger.info(
+                    f"Alias '{payer_lower}' already matched by dealers.xlsx — skipping injection"
+                )
+                continue
+            matched = alias_dealer_rows[alias_dealer_rows["Dealer Code"] == code].copy()
+            matched["_name_key"] = payer_lower
+            dealer_df = pd.concat([dealer_df, matched], ignore_index=True)
+            logger.info(f"Alias injected: '{payer_lower}' -> Dealer Code {code}")
+
     before = len(raw)
-    raw = raw.merge(
-        dealer_df,
-        left_on="Payer",
-        right_on="Dealer Name",
-        how="inner",
-    )
+    merged = raw.merge(dealer_df, left_on="_payer_key", right_on="_name_key", how="inner")
+
+    # ── Disambiguate duplicate-name matches using Sales Employee = ASE ──────
+    # When a Payer name matches multiple Dealer Codes (duplicate names in
+    # dealers.xlsx), each billing row appears duplicated in `merged`. Resolve by
+    # matching Sales Employee (the field in sales.xlsx) to ASE (dealers.xlsx).
+    # Strategy per (Billing Document, Item):
+    #   - If ANY row matches SE == ASE → keep ONLY those row(s), drop the rest
+    #   - If NO rows match SE == ASE → keep the first row (first-occurrence fallback)
+    dup_bill_mask = merged.duplicated(subset=["Billing Document", "Item"], keep=False)
+    n_ambiguous = dup_bill_mask.sum()
+    if n_ambiguous:
+        clean = merged[~dup_bill_mask].copy()
+        ambiguous = merged[dup_bill_mask].copy()
+        ambiguous["_ase_match"] = ambiguous["_se_key"] == ambiguous["_ase_key"]
+
+        # Per billing line: how many rows have an ASE match?
+        # Use transform (broadcasts back to index) so NaN Billing Document rows
+        # are handled safely — unlike groupby().any() which drops NaN keys.
+        ambiguous["_ase_cnt"] = ambiguous.groupby(
+            ["Billing Document", "Item"], dropna=False
+        )["_ase_match"].transform("sum")
+
+        # Lines with ≥1 ASE match → keep only the first ASE-matching row per line
+        resolved = (
+            ambiguous[(ambiguous["_ase_cnt"] > 0) & ambiguous["_ase_match"]]
+            .drop_duplicates(subset=["Billing Document", "Item"], keep="first")
+            .copy()
+        )
+
+        # Lines with 0 ASE matches → keep first occurrence (fallback to original code)
+        fallback = (
+            ambiguous[ambiguous["_ase_cnt"] == 0]
+            .drop_duplicates(subset=["Billing Document", "Item"], keep="first")
+            .copy()
+        )
+
+        ambiguous.drop(columns=["_ase_match", "_ase_cnt"], inplace=True)
+        resolved.drop(columns=["_ase_match", "_ase_cnt"], inplace=True, errors="ignore")
+        fallback.drop(columns=["_ase_match", "_ase_cnt"], inplace=True, errors="ignore")
+
+        merged = pd.concat([clean, resolved, fallback], ignore_index=True)
+        logger.info(
+            f"Duplicate-name disambiguation: {n_ambiguous} ambiguous rows -> "
+            f"{len(resolved)} resolved by ASE, {len(fallback)} first-occurrence fallback"
+        )
+
+    merged.drop(columns=["_payer_key", "_name_key", "_se_key", "_ase_key"], inplace=True)
+    raw = merged
     logger.info(
         f"Dealer scoping: {len(raw):,} rows kept, {before - len(raw):,} excluded  "
         f"(MC={(raw['Type']=='MC').sum():,}, OBM={(raw['Type']=='OBM').sum():,})"

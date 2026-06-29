@@ -148,6 +148,10 @@ def load_orders(dealers: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         f"Returns={(raw['doc_type']=='Return').sum():,})"
     )
 
+    # Mark all original C-orders BEFORE reclassification so downstream can recover the full demand
+    # signal (incl. cancelled C-orders that are reclassified to Return below).
+    raw["is_c_order"] = raw["doc_type"] == "PO"
+
     # ── Reclassify cancelled C-orders: SD Cat C + non-blank Rejection Reason → Return ──
     # Business rule: C-order with a filled Rejection Reason Description was cancelled before
     # fulfilment — treat as Return Order; excluded from order-value and fill-rate calculations.
@@ -221,16 +225,6 @@ def load_orders(dealers: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     obm_lines = (raw["dealer_type"] == "OBM").sum()
     logger.info(f"    MC lines: {mc_lines:,}  OBM lines: {obm_lines:,}")
 
-<<<<<<< HEAD
-    # ── Derived columns ─────────────────────────────────────────
-    raw["lead_time_days"]  = (raw["Goods Issue Date"] - raw["Created On"]).dt.days
-    raw["lost_qty"]        = raw["Confirmed Quantity (Item)"] - raw["Order Quantity (Item)"]
-    raw["fill_rate"]       = (
-        raw["Confirmed Quantity (Item)"] / raw["Order Quantity (Item)"].replace(0, np.nan)
-    ).clip(0, 1)
-    raw["confirmed_value"] = raw["Net Price"] * raw["Confirmed Quantity (Item)"]
-    raw["Year_Month"]     = raw["Created On"].dt.to_period("M")
-=======
     # ── MC sub-category ────────────────────────────────────────────────────────
     mc_mask = raw["dealer_type"] == "MC"
     raw["mc_category"] = "N/A"
@@ -246,7 +240,6 @@ def load_orders(dealers: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     # Net Value (Item) = Order Qty × Net Price (ordered value, only kept for fill-rate denominator).
     raw["confirmed_value"] = raw["Net Price"] * raw["Confirmed Quantity (Item)"]
     raw["Year_Month"] = raw["Created On"].dt.to_period("M")
->>>>>>> a905eebf82f49c9fe9ebde377a8d33e1052537f2
     raw["Year_Month_str"] = raw["Created On"].dt.strftime("%Y-%m")
 
     # ── Split fully rejected lines out of clean_df ────────────────────────────
@@ -304,19 +297,6 @@ def summary_kpis(clean: pd.DataFrame, rejected: pd.DataFrame) -> dict:
     }
 
     return {
-<<<<<<< HEAD
-        "Period"               : period,
-        "Total Order Lines"    : len(clean),
-        "PO Lines"             : len(po),
-        "Return Lines"         : len(returns),
-        "Fully Rejected Lines" : len(rejected),
-        "Unique Dealers"       : clean["Sold-to Party"].nunique(),
-        "Unique Materials"     : clean["Material"].nunique(),
-        f"Total PO Value ({CURRENCY})": round(po["confirmed_value"].sum()),
-        "Overall Fill Rate %"  : round(total_confirmed / max(total_ordered, 1) * 100, 2),
-        "Median Lead Time (days)": float(clean["lead_time_days"].median()),
-        "Avg Lead Time (days)" : round(float(clean["lead_time_days"].mean()), 1),
-=======
         "Period": period,
         "Total Order Lines (PO)": int(len(po)),
         "Total Return Lines": int(len(ret)),
@@ -332,21 +312,12 @@ def summary_kpis(clean: pd.DataFrame, rejected: pd.DataFrame) -> dict:
         "MC Battery Share %": cat_mix.get("Battery", 0),
         "MC Tyre Share %": cat_mix.get("Tyre", 0),
         "MC Spare Parts Share %": cat_mix.get("Spare Parts", 0),
->>>>>>> a905eebf82f49c9fe9ebde377a8d33e1052537f2
     }
 
 
 def category_mix(po: pd.DataFrame) -> pd.DataFrame:
     """Revenue and volume share of each MC sub-category + OBM."""
 
-<<<<<<< HEAD
-    po_monthly = (
-        po.groupby("Year_Month_str").agg(
-            po_lines      = ("Sales Document", "count"),
-            po_qty        = ("Order Quantity (Item)", "sum"),
-            confirmed_qty = ("Confirmed Quantity (Item)", "sum"),
-            po_value      = ("confirmed_value", "sum"),
-=======
     def _segment(df: pd.DataFrame, label: str) -> dict:
         return {
             "Category": label,
@@ -386,7 +357,6 @@ def part_analysis(po: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
             confirmed_qty=("Confirmed Quantity (Item)", "sum"),
             total_value_lkr=("confirmed_value", "sum"),
             short_qty=("lost_qty", lambda x: abs(x[x < 0].sum())),
->>>>>>> a905eebf82f49c9fe9ebde377a8d33e1052537f2
         )
         .reset_index()
     )
@@ -397,11 +367,7 @@ def part_analysis(po: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
     agg["cumul_share_%"] = agg["value_share_%"].cumsum().round(2)
     return agg.reset_index(drop=True)
 
-<<<<<<< HEAD
-    ret_monthly = (
-        ret.groupby("Year_Month_str")
-        .agg(return_lines=("Sales Document", "count"), return_value=("confirmed_value", "sum"))
-=======
+
 
 def dealer_performance(po: pd.DataFrame, ret: pd.DataFrame) -> pd.DataFrame:
     """Dealer-level performance: value, fill rate, return rate, order frequency.
@@ -419,7 +385,6 @@ def dealer_performance(po: pd.DataFrame, ret: pd.DataFrame) -> pd.DataFrame:
             order_value_lkr=("confirmed_value", "sum"),
             active_months=("Year_Month_str", "nunique"),
         )
->>>>>>> a905eebf82f49c9fe9ebde377a8d33e1052537f2
         .reset_index()
     )
     order_agg["fill_rate_%"] = (
@@ -631,34 +596,12 @@ def fill_rate_trend(po: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
-<<<<<<< HEAD
-    agg["fill_rate_%"] = (agg["total_confirmed"] / agg["total_ordered"].replace(0, np.nan) * 100).round(2)
-    agg["total_lost"]  = agg["total_lost"].abs()
-    return agg.sort_values("total_lost", ascending=False).head(top_n).reset_index(drop=True)
-
-
-def fill_rate_by_dealer(clean: pd.DataFrame, dealer_names: pd.DataFrame) -> pd.DataFrame:
-    """Fill rate and order stats per dealer (grouped by Sold-To Party Name)."""
-    po = clean[clean["doc_type"] == "PO"]
-    agg = (
-        po.groupby("Sold-To Party Name").agg(
-            dealer_code     = ("Dealer Code", "first"),
-            dealer_type     = ("dealer_type", "first"),
-            po_lines        = ("Sales Document", "count"),
-            total_ordered   = ("Order Quantity (Item)", "sum"),
-            total_confirmed = ("Confirmed Quantity (Item)", "sum"),
-            total_value     = ("confirmed_value", "sum"),
-        )
-        .reset_index()
-        .rename(columns={"Sold-To Party Name": "Dealer Name"})
-=======
     agg["fill_rate_%"] = (agg["confirmed_qty"] / agg["order_qty"].replace(0, np.nan) * 100).round(2)
     return (
         agg[["Year_Month_str", "segment", "fill_rate_%"]]
         .rename(columns={"Year_Month_str": "Month"})
         .sort_values(["Month", "segment"])
         .reset_index(drop=True)
->>>>>>> a905eebf82f49c9fe9ebde377a8d33e1052537f2
     )
 
 
@@ -685,15 +628,9 @@ def returns_analysis(ret: pd.DataFrame) -> pd.DataFrame:
     agg = (
         ret.groupby(["Province", "District", "Dealer Name", "segment", reason_col])
         .agg(
-<<<<<<< HEAD
-            return_lines = ("Sales Document", "count"),
-            return_qty   = ("Order Quantity (Item)", "sum"),
-            return_value = ("confirmed_value", "sum"),
-=======
             return_lines=("Sales Document", "count"),
             return_qty=("Order Quantity (Item)", "sum"),
             return_value_lkr=("confirmed_value", "sum"),
->>>>>>> a905eebf82f49c9fe9ebde377a8d33e1052537f2
         )
         .reset_index()
         .sort_values("return_value_lkr", ascending=False)
@@ -710,12 +647,6 @@ def short_ship_analysis(po: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
     if short.empty:
         return pd.DataFrame()
     agg = (
-<<<<<<< HEAD
-        po.groupby(["Material", "Material Description"]).agg(
-            total_lines     = ("Sales Document", "count"),
-            total_qty       = ("Confirmed Quantity (Item)", "sum"),
-            total_value     = ("confirmed_value", "sum"),
-=======
         short.groupby(["Material", "Material Description"])
         .agg(
             order_qty=("Order Quantity (Item)", "sum"),
@@ -723,7 +654,6 @@ def short_ship_analysis(po: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
             short_qty=("lost_qty", lambda x: abs(x.sum())),
             occurrences=("lost_qty", "count"),
             affected_dealers=("Dealer Code", "nunique"),
->>>>>>> a905eebf82f49c9fe9ebde377a8d33e1052537f2
         )
         .reset_index()
     )

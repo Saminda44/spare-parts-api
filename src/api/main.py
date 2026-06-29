@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from src.api import deps as _deps
 from src.api.routers import (
     bikes, catalog, classification, eda, forecast, inventory, overview, parts, policy, rl, sku,
 )
@@ -54,6 +55,15 @@ app.include_router(sku.router,             prefix=_PREFIX)
 @app.get("/health", tags=["Meta"])
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/api/v1/cache/clear", tags=["Meta"])
+def clear_cache() -> dict[str, str]:
+    """Clear all in-memory parquet caches so regenerated data is reloaded on next request."""
+    _deps._load.cache_clear()
+    _deps._load_orders_enriched.cache_clear()
+    _deps._load_sales_enriched.cache_clear()
+    return {"status": "cleared"}
 
 
 # Serve built React frontend — must be registered AFTER all API routes

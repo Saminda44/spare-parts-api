@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 import pandas as pd
 
-from src.config.paths import DATA_INTERIM, DATA_OUTPUTS
+from src.config.paths import DATA_INTERIM, DATA_OUTPUTS, DATA_RAW
 
 _TARGETS_PATH = DATA_INTERIM / "sales_targets.json"
 
@@ -60,16 +60,107 @@ def get_uio_forecast() -> pd.DataFrame:
     return _load(DATA_INTERIM / "uio_forecast.parquet")
 
 
+@lru_cache(maxsize=1)
+def _load_orders_enriched() -> pd.DataFrame:
+    """Load orders_clean parquet and backfill derived columns missing from older parquets."""
+    _p = DATA_INTERIM / "orders_clean.parquet"
+    df = pd.read_parquet(_p) if _p.exists() else pd.DataFrame()
+    if df.empty:
+        return df
+
+    # ── 1. Dealer master join (adds Dealer Name / Province / District / RM / ASE) ──
+    _dealer_cols = ["Dealer Code", "Dealer Name", "Province", "District", "ASE", "RM"]
+    missing_dealer_cols = [c for c in _dealer_cols[1:] if c not in df.columns]
+    if missing_dealer_cols:
+        _dealers_path = DATA_RAW / "dealers.xlsx"
+        if _dealers_path.exists():
+            dealers = pd.read_excel(_dealers_path, dtype=str)
+            dealers.columns = dealers.columns.str.strip()
+            for col in dealers.select_dtypes("object").columns:
+                dealers[col] = dealers[col].fillna("").str.strip()
+            keep = [c for c in _dealer_cols if c in dealers.columns]
+            df = df.merge(dealers[keep], on="Dealer Code", how="left")
+            for c in missing_dealer_cols:
+                if c not in df.columns:
+                    df[c] = ""
+            for c in missing_dealer_cols:
+                df[c] = df[c].fillna("")
+
+    # ── 2. confirmed_value = Net Price × Confirmed Qty ──────────────────────────
+    if "confirmed_value" not in df.columns and "Net Price" in df.columns:
+        df["confirmed_value"] = df["Net Price"] * df["Confirmed Quantity (Item)"]
+
+    # ── 3. mc_category keyword classification ───────────────────────────────────
+    if "mc_category" not in df.columns:
+        df["mc_category"] = "N/A"
+        if "dealer_type" in df.columns and "Material Description" in df.columns:
+            mc_mask = df["dealer_type"] == "MC"
+            if mc_mask.any():
+                upper = df.loc[mc_mask, "Material Description"].str.upper().fillna("")
+                cat = pd.Series("Spare Parts", index=df.loc[mc_mask].index)
+                cat = cat.where(~upper.str.contains("YAMALUBE", na=False), "Lubricant")
+                cat = cat.where(~upper.str.contains("KARATE BATTERY", na=False), "Battery")
+                cat = cat.where(~upper.str.contains("KATANA TYRE", na=False), "Tyre")
+                df.loc[mc_mask, "mc_category"] = cat
+
+    return df
+
+
 def get_orders_clean() -> pd.DataFrame:
-    return _load(DATA_INTERIM / "orders_clean.parquet")
+    return _load_orders_enriched()
 
 
 def get_orders_rejection_log() -> pd.DataFrame:
     return _load(DATA_INTERIM / "orders_rejection_log.parquet")
 
 
+@lru_cache(maxsize=1)
+def _load_sales_enriched() -> pd.DataFrame:
+    """Load sales_clean parquet; backfill Province/District/RM/ASE/mc_category if missing."""
+    df = _load(DATA_INTERIM / "sales_clean.parquet")
+    if df.empty:
+        return df
+
+    # Backfill Province / District / RM / ASE via Payer → Dealer Name join
+    _hier_cols = ["Province", "District", "ASE", "RM"]
+    missing_hier = [c for c in _hier_cols if c not in df.columns]
+    if missing_hier and "Payer" in df.columns:
+        _dealers_path = DATA_RAW / "dealers.xlsx"
+        if _dealers_path.exists():
+            dealers = pd.read_excel(_dealers_path, dtype=str)
+            dealers.columns = dealers.columns.str.strip()
+            for col in dealers.select_dtypes("object").columns:
+                dealers[col] = dealers[col].fillna("").str.strip()
+            dim_cols = ["Dealer Name"] + [c for c in _hier_cols if c in dealers.columns]
+            df = df.merge(
+                dealers[dim_cols].drop_duplicates("Dealer Name"),
+                left_on="Payer",
+                right_on="Dealer Name",
+                how="left",
+            )
+            for c in _hier_cols:
+                if c not in df.columns:
+                    df[c] = ""
+                df[c] = df[c].fillna("")
+
+    # Backfill mc_category via Material description keyword matching
+    if "mc_category" not in df.columns and "Material" in df.columns:
+        df["mc_category"] = pd.NA
+        if "dealer_type" in df.columns:
+            mc_mask = df["dealer_type"] == "MC"
+            if mc_mask.any():
+                upper = df.loc[mc_mask, "Material"].astype(str).str.upper().fillna("")
+                cat = pd.Series("Spare Parts", index=df.loc[mc_mask].index)
+                cat = cat.where(~upper.str.contains("YAMALUBE", na=False), "Lubricant")
+                cat = cat.where(~upper.str.contains("KARATE BATTERY", na=False), "Battery")
+                cat = cat.where(~upper.str.contains("KATANA TYRE", na=False), "Tyre")
+                df.loc[mc_mask, "mc_category"] = cat
+
+    return df
+
+
 def get_sales_clean() -> pd.DataFrame:
-    return _load(DATA_INTERIM / "sales_clean.parquet")
+    return _load_sales_enriched()
 
 
 def get_part_master() -> pd.DataFrame:

@@ -56,8 +56,13 @@ router = APIRouter(prefix="/eda", tags=["EDA — Stages 4-5-7-8"])
 _SEG_ORDER = ["MC – Lubricant", "MC – Battery", "MC – Tyre", "MC – Spare Parts", "OBM"]
 
 
-def _business_insights(full_po: pd.DataFrame) -> dict:
-    """Compute business insight metrics from the full (unfiltered) PO dataframe."""
+def _business_insights(full_po: pd.DataFrame, full_all_c: pd.DataFrame | None = None) -> dict:
+    """Compute business insight metrics from the full (unfiltered) PO dataframe.
+
+    Args:
+        full_po:    Non-cancelled PO lines — used for fill rate, short-ship, fill-rate bands.
+        full_all_c: All original C-orders (incl. cancelled) for province order_value_lkr.
+    """
     if full_po.empty:
         return {
             "category_mix": [],
@@ -137,16 +142,29 @@ def _business_insights(full_po: pd.DataFrame) -> dict:
             )
 
     # ── 3. Province performance ───────────────────────────────────────────────
+    _NVI = "Net Value (Item)"
     prov_agg = (
         full_po.groupby("Province", as_index=False)
         .agg(
-            order_value_lkr=("confirmed_value", "sum"),
+            order_value_lkr=("confirmed_value", "sum"),  # fallback; overwritten below if all_c available
             order_qty=("Order Quantity (Item)", "sum"),
             confirmed_qty=("Confirmed Quantity (Item)", "sum"),
             dealer_count=("Dealer Code", "nunique"),
         )
-        .sort_values("order_value_lkr", ascending=False)
     )
+    if (
+        full_all_c is not None
+        and not full_all_c.empty
+        and _NVI in full_all_c.columns
+        and "Province" in full_all_c.columns
+    ):
+        _prov_c_val = (
+            full_all_c.groupby("Province")[_NVI].sum().rename("order_value_lkr").reset_index()
+        )
+        prov_agg = prov_agg.drop(columns=["order_value_lkr"]).merge(
+            _prov_c_val, on="Province", how="left"
+        ).fillna({"order_value_lkr": 0.0})
+    prov_agg = prov_agg.sort_values("order_value_lkr", ascending=False)
     total_prov = float(prov_agg["order_value_lkr"].sum()) or 1.0
     prov_agg["value_share_pct"] = (prov_agg["order_value_lkr"] / total_prov * 100).round(2)
     prov_agg["fill_rate_pct"] = (
@@ -299,8 +317,20 @@ _MC_CAT_API_MAP = {
 }
 
 
-def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
-    """Compute the 6 per-segment analysis tables from filtered PO and return dataframes."""
+def _compute_analysis_tables(
+    po: pd.DataFrame,
+    ret: pd.DataFrame,
+    all_c: pd.DataFrame | None = None,
+) -> dict:
+    """Compute the 6 per-segment analysis tables from filtered PO and return dataframes.
+
+    Args:
+        po:    Non-cancelled PO lines (Confirmed Qty > 0) — used for fill rate / line counts.
+        ret:   Return lines (H-type + cancelled C) — used for return rate.
+        all_c: All original C-orders (non-cancelled + cancelled, clean + rejected).
+               Net Value (Item) from all_c is the true demand signal matching data.xlsx
+               Order_Received. If None, falls back to confirmed_value from po.
+    """
     empty: dict = {
         "part_analysis": [],
         "dealer_perf": [],
@@ -311,6 +341,23 @@ def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
     }
     if po.empty:
         return empty
+
+    # Pre-build order-intake value lookups from all_c (Net Value Item, demand signal)
+    _NVI = "Net Value (Item)"
+    _use_all_c = all_c is not None and not all_c.empty and _NVI in (all_c.columns if all_c is not None else [])
+
+    def _c_val_by(keys: str | list[str]) -> pd.DataFrame | None:
+        if not _use_all_c or all_c is None:
+            return None
+        key_list = [keys] if isinstance(keys, str) else keys
+        if not all(k in all_c.columns for k in key_list):
+            return None
+        return (
+            all_c.groupby(key_list)[_NVI]
+            .sum()
+            .rename("order_value_lkr")
+            .reset_index()
+        )
 
     # ── Part analysis (top 30 by value; share % relative to ALL parts) ───────
     part_agg_full = (
@@ -348,6 +395,7 @@ def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
     ]
 
     # ── Dealer performance (top 30 by value) ─────────────────────────────────
+    _c_dealer_val = _c_val_by("Dealer Code")
     dealer_agg = (
         po.groupby(
             ["Dealer Code", "Dealer Name", "Province", "District", "RM", "ASE"], as_index=False
@@ -356,10 +404,14 @@ def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
             po_lines=("Sales Document", "count"),
             order_qty=("Order Quantity (Item)", "sum"),
             confirmed_qty=("Confirmed Quantity (Item)", "sum"),
-            order_value_lkr=("confirmed_value", "sum"),
+            order_value_lkr=("confirmed_value", "sum"),  # fallback; overwritten if all_c available
         )
-        .sort_values("order_value_lkr", ascending=False)
     )
+    if _c_dealer_val is not None:
+        dealer_agg = dealer_agg.drop(columns=["order_value_lkr"]).merge(
+            _c_dealer_val, on="Dealer Code", how="left"
+        ).fillna({"order_value_lkr": 0.0})
+    dealer_agg = dealer_agg.sort_values("order_value_lkr", ascending=False)
     total_d_val = float(dealer_agg["order_value_lkr"].sum()) or 1.0
     dealer_agg["fill_rate_pct"] = (
         (dealer_agg["confirmed_qty"] / dealer_agg["order_qty"].replace(0, np.nan) * 100)
@@ -409,6 +461,7 @@ def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
         .reset_index()
         .rename(columns={"Province": "province"})
     )
+    _c_rm_val = _c_val_by("RM")
     rm_agg = po.groupby("RM", as_index=False).agg(
         unique_dealers=("Dealer Code", "nunique"),
         po_lines=("Sales Document", "count"),
@@ -416,6 +469,10 @@ def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
         confirmed_qty=("Confirmed Quantity (Item)", "sum"),
         order_value_lkr=("confirmed_value", "sum"),
     )
+    if _c_rm_val is not None:
+        rm_agg = rm_agg.drop(columns=["order_value_lkr"]).merge(
+            _c_rm_val, on="RM", how="left"
+        ).fillna({"order_value_lkr": 0.0})
     rm_agg = rm_agg.merge(rm_province, on="RM", how="left")
     rm_agg["province"] = rm_agg["province"].fillna("")
     rm_agg["fill_rate_pct"] = (
@@ -455,6 +512,7 @@ def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
     ]
 
     # ── ASE performance ───────────────────────────────────────────────────────
+    _c_ase_val = _c_val_by("ASE")
     ase_agg = po.groupby(["ASE", "RM", "Province"], as_index=False).agg(
         unique_dealers=("Dealer Code", "nunique"),
         po_lines=("Sales Document", "count"),
@@ -462,6 +520,10 @@ def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
         confirmed_qty=("Confirmed Quantity (Item)", "sum"),
         order_value_lkr=("confirmed_value", "sum"),
     )
+    if _c_ase_val is not None:
+        ase_agg = ase_agg.drop(columns=["order_value_lkr"]).merge(
+            _c_ase_val, on="ASE", how="left"
+        ).fillna({"order_value_lkr": 0.0})
     ase_agg["fill_rate_pct"] = (
         (ase_agg["confirmed_qty"] / ase_agg["order_qty"].replace(0, np.nan) * 100)
         .round(2)
@@ -499,6 +561,7 @@ def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
     ]
 
     # ── District performance ──────────────────────────────────────────────────
+    _c_dist_val = _c_val_by(["Province", "District"])
     dist_agg = (
         po.groupby(["Province", "District"], as_index=False)
         .agg(
@@ -508,8 +571,12 @@ def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
             confirmed_qty=("Confirmed Quantity (Item)", "sum"),
             order_value_lkr=("confirmed_value", "sum"),
         )
-        .sort_values("order_value_lkr", ascending=False)
     )
+    if _c_dist_val is not None:
+        dist_agg = dist_agg.drop(columns=["order_value_lkr"]).merge(
+            _c_dist_val, on=["Province", "District"], how="left"
+        ).fillna({"order_value_lkr": 0.0})
+    dist_agg = dist_agg.sort_values("order_value_lkr", ascending=False)
     total_dist_val = float(dist_agg["order_value_lkr"].sum()) or 1.0
     dist_agg["fill_rate_pct"] = (
         (dist_agg["confirmed_qty"] / dist_agg["order_qty"].replace(0, np.nan) * 100)
@@ -552,6 +619,7 @@ def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
     ]
 
     # ── Province performance ──────────────────────────────────────────────────
+    _c_prov_val = _c_val_by("Province")
     prov_agg = (
         po.groupby("Province", as_index=False)
         .agg(
@@ -561,8 +629,12 @@ def _compute_analysis_tables(po: pd.DataFrame, ret: pd.DataFrame) -> dict:
             confirmed_qty=("Confirmed Quantity (Item)", "sum"),
             order_value_lkr=("confirmed_value", "sum"),
         )
-        .sort_values("order_value_lkr", ascending=False)
     )
+    if _c_prov_val is not None:
+        prov_agg = prov_agg.drop(columns=["order_value_lkr"]).merge(
+            _c_prov_val, on="Province", how="left"
+        ).fillna({"order_value_lkr": 0.0})
+    prov_agg = prov_agg.sort_values("order_value_lkr", ascending=False)
     total_prov_val = float(prov_agg["order_value_lkr"].sum()) or 1.0
     prov_agg["fill_rate_pct"] = (
         (prov_agg["confirmed_qty"] / prov_agg["order_qty"].replace(0, np.nan) * 100)
@@ -700,6 +772,21 @@ def get_orders_eda(
     total_po = int(po_mask.sum())
     total_returns = int(ret_mask.sum())
 
+    # All original C-orders = complete demand signal (non-cancelled + cancelled, clean + rejected).
+    # Used for order_value_lkr = "Order Received" matching data.xlsx Order_Received column.
+    _has_rt = "return_type" in orders.columns
+    _has_rt_rej = not rej.empty and "return_type" in rej.columns
+    _empty_df = pd.DataFrame()
+    all_c = pd.concat(
+        [
+            orders[po_mask],
+            orders[orders["return_type"] == "Cancelled Order"] if _has_rt else _empty_df,
+            rej[rej["doc_type"] == "PO"] if not rej.empty and "doc_type" in rej.columns else _empty_df,
+            rej[rej["return_type"] == "Cancelled Order"] if _has_rt_rej else _empty_df,
+        ],
+        ignore_index=True,
+    )
+
     # Volume-weighted fill rate: total confirmed / total ordered (not per-line mean)
     po_lines = orders[po_mask]
     total_order_qty = float(po_lines["Order Quantity (Item)"].sum()) if not po_lines.empty else 0.0
@@ -733,34 +820,30 @@ def get_orders_eda(
     true_order_qty = total_order_qty + rej_order_qty
     avg_fill_rate = round(total_confirmed_qty / true_order_qty, 4) if true_order_qty > 0 else 0.0
 
-    # Value metrics: Order Received (PO Net Value incl. rejected) vs Total Sales (confirmed value)
+    # Value metrics: Order Received = Net Value (Item) for ALL C-orders (incl. cancelled + rejected)
+    # This matches data.xlsx Order_Received which counts every C-order regardless of cancellation.
     total_order_value_lkr = 0.0
     total_confirmed_value_lkr = 0.0
-    if not po_lines.empty:
-        total_order_value_lkr = float(po_lines["Net Value (Item)"].sum())
+    if not all_c.empty and "Net Value (Item)" in all_c.columns:
+        total_order_value_lkr = float(all_c["Net Value (Item)"].sum())
+    if not po_lines.empty and "confirmed_value" in po_lines.columns:
         total_confirmed_value_lkr = float(po_lines["confirmed_value"].sum())
-    if not rej_po_lines.empty and "Net Value (Item)" in rej_po_lines.columns:
-        total_order_value_lkr += float(rej_po_lines["Net Value (Item)"].sum())
     value_fill_rate_pct = (
         round(total_confirmed_value_lkr / total_order_value_lkr * 100, 2)
         if total_order_value_lkr > 0
         else 0.0
     )
 
-    # Top dealers by order value (master-data Dealer Name, deduplicated by Dealer Code)
+    # Top dealers by order intake (all original C-orders, Net Value Item)
     top_dealers: list[OrdersEdaDealer] = []
-    if "Dealer Name" in orders.columns and "Dealer Code" in orders.columns:
+    if not all_c.empty and "Dealer Name" in all_c.columns and "Dealer Code" in all_c.columns:
         dealer_grp = (
-<<<<<<< HEAD
-            orders[po_mask].groupby(dealer_col)
-            .agg(order_count=("doc_type", "count"), total_value=("confirmed_value", "sum"))
-            .sort_values("order_count", ascending=False)
-=======
-            orders[po_mask]
-            .groupby(["Dealer Code", "Dealer Name"])
-            .agg(order_count=("Sales Document", "count"), total_value=("confirmed_value", "sum"))
+            all_c.groupby(["Dealer Code", "Dealer Name"])
+            .agg(
+                order_count=("Sales Document", "count"),
+                total_value=("Net Value (Item)", "sum"),
+            )
             .sort_values("total_value", ascending=False)
->>>>>>> a905eebf82f49c9fe9ebde377a8d33e1052537f2
             .head(10)
             .reset_index()
         )
@@ -773,34 +856,41 @@ def get_orders_eda(
                 )
             )
 
-    # Monthly trend — includes confirmed_value_lkr (actual sales value per month)
+    # Monthly trend — total_value_lkr = ALL C-orders (demand signal); confirmed_value_lkr = delivered
     monthly: list[OrdersEdaMonthlyPoint] = []
     if "Year_Month_str" in orders.columns:
+        # All-C monthly intake (incl. cancelled)
+        _c_monthly = (
+            all_c.groupby("Year_Month_str")["Net Value (Item)"]
+            .sum()
+            .rename("all_c_val")
+            .reset_index()
+            if not all_c.empty and "Year_Month_str" in all_c.columns
+            else pd.DataFrame(columns=["Year_Month_str", "all_c_val"])
+        )
         grp = (
             orders.groupby(["Year_Month_str", "doc_type"])
             .agg(
                 cnt=("doc_type", "count"),
-<<<<<<< HEAD
-                val=("confirmed_value", "sum"),
-            ).reset_index()
-=======
-                val=("Net Value (Item)", "sum"),
                 conf_val=("confirmed_value", "sum"),
             )
             .reset_index()
->>>>>>> a905eebf82f49c9fe9ebde377a8d33e1052537f2
         )
-        periods = sorted(grp["Year_Month_str"].unique())
+        periods = sorted(
+            set(grp["Year_Month_str"].unique()) | set(_c_monthly["Year_Month_str"].unique())
+        )
         for p in periods:
             sub = grp[grp["Year_Month_str"] == p]
             po_r = sub[sub["doc_type"] == "PO"]
             ret_r = sub[sub["doc_type"] == "Return"]
+            _c_val_row = _c_monthly[_c_monthly["Year_Month_str"] == p]
+            _total_val = float(_c_val_row["all_c_val"].values[0]) if len(_c_val_row) else 0.0
             monthly.append(
                 OrdersEdaMonthlyPoint(
                     period=str(p),
                     po_count=int(po_r["cnt"].sum()) if len(po_r) else 0,
                     return_count=int(ret_r["cnt"].sum()) if len(ret_r) else 0,
-                    total_value_lkr=round(float(po_r["val"].sum()), 0) if len(po_r) else 0.0,
+                    total_value_lkr=round(_total_val, 0),
                     confirmed_value_lkr=round(float(po_r["conf_val"].sum()), 0)
                     if len(po_r)
                     else 0.0,
@@ -992,16 +1082,28 @@ def get_orders_eda(
                         )
                     )
 
-    # Per-segment analysis tables (filtered data)
+    # Per-segment analysis tables (filtered data) — pass all_c for accurate order_value_lkr
     po_filtered = orders[orders["doc_type"] == "PO"]
     ret_filtered = orders[orders["doc_type"] == "Return"]
-    analysis = _compute_analysis_tables(po_filtered, ret_filtered)
+    analysis = _compute_analysis_tables(po_filtered, ret_filtered, all_c=all_c)
 
     # Business insights — full dataset (no second disk read: reuse already-loaded orders_full)
     full_po_all = (
         orders_full[orders_full["doc_type"] == "PO"] if not orders_full.empty else orders_full
     )
-    insights = _business_insights(full_po_all)
+    # Build full all_c from orders_full (unfiltered) for accurate province metrics in insights
+    _has_rt_full = "return_type" in orders_full.columns
+    _has_rt_rej_full = not rej_full.empty and "return_type" in rej_full.columns
+    full_all_c = pd.concat(
+        [
+            orders_full[orders_full["doc_type"] == "PO"] if not orders_full.empty else _empty_df,
+            orders_full[orders_full["return_type"] == "Cancelled Order"] if _has_rt_full else _empty_df,
+            rej_full[rej_full["doc_type"] == "PO"] if not rej_full.empty and "doc_type" in rej_full.columns else _empty_df,
+            rej_full[rej_full["return_type"] == "Cancelled Order"] if _has_rt_rej_full else _empty_df,
+        ],
+        ignore_index=True,
+    )
+    insights = _business_insights(full_po_all, full_all_c=full_all_c)
 
     # Fraud alerts — check full return data across all segments (CLAUDE.md §15)
     full_ret_all = (
@@ -1202,6 +1304,9 @@ def get_sales_eda(
     unique_dealers = int(sales["Payer"].nunique()) if "Payer" in sales.columns else 0
 
     # ── Monthly trend ────────────────────────────────────────────
+    # All sale/return/net values come from billing (sales.xlsx) so they are internally
+    # consistent: net_value_lkr = sale_value_lkr − return_value_lkr.
+    # order_received_lkr stays on orders.xlsx (supply-chain metric).
     monthly: list[SalesEdaMonthlyPoint] = []
     if "Year_Month_str" in sales.columns:
         grp = (
@@ -1214,15 +1319,15 @@ def get_sales_eda(
         grp.columns = pd.Index(["_".join(c) for c in grp.columns])
         grp = grp.reset_index()
         for _, r in grp.sort_values("Year_Month_str").iterrows():
-            rv = float(abs(r.get("value_return", 0)))
             prd = str(r["Year_Month_str"])
-            fulfilled_v = float(_fulfilled_monthly.get(prd, 0))
+            sv = float(r.get("value_sale", 0))   # billing sales this month
+            rv = float(abs(r.get("value_return", 0)))  # billing returns this month
             monthly.append(
                 SalesEdaMonthlyPoint(
                     period=prd,
-                    sale_value_lkr=round(fulfilled_v, 0),  # fulfilled order NV (orders.xlsx)
+                    sale_value_lkr=round(sv, 0),
                     return_value_lkr=round(rv, 0),
-                    net_value_lkr=round(fulfilled_v - rv, 0),
+                    net_value_lkr=round(sv - rv, 0),
                     sale_qty=round(float(r.get("qty_sale", 0)), 0),
                     return_qty=round(float(abs(r.get("qty_return", 0))), 0),
                     order_received_lkr=round(float(_po_monthly.get(prd, 0)), 0),
@@ -1495,9 +1600,9 @@ def get_sales_eda(
     return SalesEdaResponse(
         data_year=data_year,
         available_years=available_years,
-        total_sale_value_lkr=round(total_sales_from_orders, 0),  # fulfilled PO value (orders.xlsx)
+        total_sale_value_lkr=round(net_billing_value, 0),  # billed sales (sales.xlsx)
         total_return_value_lkr=round(total_return_value, 0),
-        net_sale_value_lkr=round(net_value, 0),  # billing net revenue (sales.xlsx)
+        net_sale_value_lkr=round(net_value, 0),  # net billed revenue (sales.xlsx)
         return_rate_pct=return_rate,
         total_sale_qty=total_sale_qty,
         total_return_qty=total_return_qty,
