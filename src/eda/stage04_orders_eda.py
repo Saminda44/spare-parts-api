@@ -368,7 +368,6 @@ def part_analysis(po: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
     return agg.reset_index(drop=True)
 
 
-
 def dealer_performance(po: pd.DataFrame, ret: pd.DataFrame) -> pd.DataFrame:
     """Dealer-level performance: value, fill rate, return rate, order frequency.
 
@@ -1594,6 +1593,17 @@ def run(refresh: bool = False) -> None:
 
     dealer_master = load_dealers()
     clean, rejected = load_orders(dealer_master)
+
+    # ── Deduplicate by order line (SAP repeats Net Value per schedule line) ───
+    before_dd = len(clean)
+    clean = clean.drop_duplicates(subset=["Sales Document", "Sales Document Item"], keep="first")
+    rejected = rejected.drop_duplicates(
+        subset=["Sales Document", "Sales Document Item"], keep="first"
+    )
+    logger.info(
+        f"  Schedule-line dedup: {before_dd - len(clean):,} rows removed from clean, "
+        f"{len(clean):,} remain"
+    )
 
     # ── Save parquets ─────────────────────────────────────────────────────────
     _CLEAN_PARQUET.parent.mkdir(parents=True, exist_ok=True)

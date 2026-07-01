@@ -54,8 +54,9 @@ type OrdersView = "overview" | "parts" | "dealers" | "geography";
 type OrdersAnalysisSeg = "parts" | "geography";
 
 export function EDA() {
-  const [ordersData,  setOrdersData]  = useState<OrdersEdaData | null>(null);
-  const [salesData,   setSalesData]   = useState<SalesEdaData | null>(null);
+  const [ordersData,       setOrdersData]       = useState<OrdersEdaData | null>(null);
+  const [ordersSalesData, setOrdersSalesData] = useState<SalesEdaData | null>(null);
+  const [salesData,        setSalesData]        = useState<SalesEdaData | null>(null);
   const [movData,     setMovData]     = useState<MovementsData | null>(null);
   const [spareData,   setSpareData]   = useState<SparePartsEdaData | null>(null);
   const [tab,             setTab]             = useState<Tab>("orders");
@@ -84,6 +85,15 @@ export function EDA() {
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ordersDt, ordersMcCat]);
+
+  // Fetch companion sales data only when ALL/OBM is selected (staggered to avoid concurrent load)
+  useEffect(() => {
+    if (ordersDt === "ALL" || ordersDt === "OBM") {
+      setOrdersSalesData(null);
+      fetchSalesEda(ordersDt, "ALL").then(setOrdersSalesData);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ordersDt]);
 
   useEffect(() => {
     setSalesData(null);
@@ -183,25 +193,31 @@ export function EDA() {
 
           {ordersData ? (
             <div className="space-y-5">
-              {ordersView === "overview" && ordersDt === "MC" && ordersMcCat === "ALL" && (
-                <>
-                  {/* Row 1: Value KPIs — Order Received, Total Sales, Value Fill Rate */}
+              {/* ── ALL / OBM / MC (All + Spare Parts) — 11-KPI overview — always renders first ── */}
+              {ordersView === "overview" && (
+                ordersDt === "ALL" || ordersDt === "OBM" ||
+                (ordersDt === "MC" && (ordersMcCat === "ALL" || ordersMcCat === "SpareParts"))
+              ) && (
+                <div className="space-y-3">
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <KpiCard label="Order Received"   value={`LKR ${fmt(ordersData.total_order_value_lkr)}`}     sub="Total PO value incl. rejected"   color="blue"/>
-                    <KpiCard label="Total Sales"      value={`LKR ${fmt(ordersData.total_confirmed_value_lkr)}`} sub="Confirmed delivery value"         color="green"/>
-                    <KpiCard label="Order Fulfillment" value={`${ordersData.value_fill_rate_pct.toFixed(1)}%`}   sub="Sales Value ÷ Order Received"    color="teal"/>
-                    <KpiCard label="Rejection Rate"   value={`${ordersData.rejection_rate_pct.toFixed(1)}%`}     sub="PO lines fully rejected"          color="amber"/>
+                    <KpiCard label="Order Received"    value={`LKR ${fmt(ordersData.total_order_value_lkr)}`}              sub="All C-orders incl. cancelled/rejected"   color="blue"/>
+                    <KpiCard label="Total Sales"       value={`LKR ${fmt(ordersData.total_confirmed_value_lkr)}`}           sub="Confirmed delivery value (orders.xlsx)"  color="green"/>
+                    <KpiCard label="Order Fulfillment" value={`${ordersData.value_fill_rate_pct.toFixed(1)}%`}              sub="Confirmed value ÷ Order Received"        color="teal"/>
+                    <KpiCard label="Rejection Rate"    value={`${ordersData.rejection_rate_pct.toFixed(1)}%`}               sub="PO lines fully undelivered"              color="amber"/>
                   </div>
-
-                  {/* Row 2: Supporting KPIs */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <KpiCard label="Qty Fill Rate"     value={`${(ordersData.avg_fill_rate * 100).toFixed(1)}%`}            sub={`${ordersData.fill_rate_lt1_count} lines short-shipped`} color="purple"/>
+                    <KpiCard label="Total POs"         value={ordersData.total_po_documents.toLocaleString()}               sub="Unique purchase order documents"         color="blue"/>
+                    <KpiCard label="Avg Dispatch LT"   value={`${ordersData.avg_lead_time_days.toFixed(1)} days`}           sub="Warehouse → dealer"                      color="purple"/>
+                    <KpiCard label="Return Value"      value={`LKR ${fmt(ordersData.total_return_value_lkr)}`}              sub="H-type return order value"               color="red"/>
+                  </div>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                    <KpiCard label="Qty Fill Rate"    value={`${(ordersData.avg_fill_rate*100).toFixed(1)}%`}    sub={`${ordersData.fill_rate_lt1_count} lines short-shipped`} color="purple"/>
-                    <KpiCard label="Total POs"        value={fmt(ordersData.total_po)}                            sub="Purchase order lines"             color="blue"/>
-                    <KpiCard label="Avg Dispatch LT"  value={`${ordersData.avg_lead_time_days.toFixed(1)} days`} sub="Warehouse → dealer"               color="purple"/>
+                    <KpiCard label="Unfulfill Value"   value={`LKR ${fmt(ordersData.unfulfill_value_lkr)}`}                sub="Ordered but not confirmed"               color="amber"/>
+                    <KpiCard label="Sales Qty"         value={ordersData.sales_qty.toLocaleString('en-US', {maximumFractionDigits: 0})} sub="Confirmed units"            color="green"/>
+                    <KpiCard label="Unique SKU"        value={ordersData.unique_skus.toLocaleString()}                     sub="Materials ordered"                       color="teal"/>
                   </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Monthly value trend: Order Received vs Total Sales */}
+                  {/* Monthly chart — only for ALL/OBM/SpareParts; MC ALL has its own chart+dealers block below */}
+                  {!(ordersDt === "MC" && ordersMcCat === "ALL") && (
                     <div>
                       <div className="flex items-center justify-between mb-3">
                         <div>
@@ -213,11 +229,10 @@ export function EDA() {
                           <TimePicker value={ordersRange} onChange={setOrdersRange}/>
                         </div>
                       </div>
-                      <ResponsiveContainer width="100%" height={220}>
+                      <ResponsiveContainer width="100%" height={200}>
                         <BarChart data={filterByRange(filterByYear(ordersData.monthly_trend, ordersYear), ordersRange)} margin={{ top:5, right:10, left:0, bottom:5 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
-                          <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
-                            tickFormatter={p => monthLabel(p, ordersYear !== "All")}/>
+                          <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0} tickFormatter={p => monthLabel(p, ordersYear !== "All")}/>
                           <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt}/>
                           <Tooltip formatter={(v: unknown, n: unknown) => [`LKR ${fmt(Number(v))}`, String(n)]} labelFormatter={p => String(p)}/>
                           <Legend wrapperStyle={{ fontSize: 10 }}/>
@@ -226,22 +241,50 @@ export function EDA() {
                         </BarChart>
                       </ResponsiveContainer>
                     </div>
+                  )}
+                </div>
+              )}
 
-                    {/* Top dealers */}
-                    <div>
-                      <h3 className="text-sm font-semibold text-slate-700 mb-2">Top Dealers by Order Value</h3>
-                      <ResponsiveContainer width="100%" height={220}>
-                        <BarChart data={ordersData.top_dealers} layout="vertical" margin={{ top:0, right:40, left:5, bottom:0 }}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
-                          <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={fmt}/>
-                          <YAxis type="category" dataKey="dealer" tick={{ fontSize: 9 }} width={140}/>
-                          <Tooltip formatter={(v: unknown) => `LKR ${fmt(Number(v))}`}/>
-                          <Bar dataKey="total_value_lkr" fill="#4361EE" name="Order Value (LKR)" radius={[0,3,3,0]}/>
-                        </BarChart>
-                      </ResponsiveContainer>
+              {/* ── MC ALL charts (monthly + top dealers) — renders after KPIs ── */}
+              {ordersView === "overview" && ordersDt === "MC" && ordersMcCat === "ALL" && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-700">Monthly Order Value (LKR)</h3>
+                        <p className="text-xs text-slate-400 mt-0.5">Order Received vs Confirmed Sales</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <YearPicker years={getYears(ordersData.monthly_trend)} value={ordersYear} onChange={setOrdersYear}/>
+                        <TimePicker value={ordersRange} onChange={setOrdersRange}/>
+                      </div>
                     </div>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={filterByRange(filterByYear(ordersData.monthly_trend, ordersYear), ordersRange)} margin={{ top:5, right:10, left:0, bottom:5 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                        <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
+                          tickFormatter={p => monthLabel(p, ordersYear !== "All")}/>
+                        <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt}/>
+                        <Tooltip formatter={(v: unknown, n: unknown) => [`LKR ${fmt(Number(v))}`, String(n)]} labelFormatter={p => String(p)}/>
+                        <Legend wrapperStyle={{ fontSize: 10 }}/>
+                        <Bar dataKey="total_value_lkr"     fill="#94A3B8" name="Order Received" radius={[2,2,0,0]}/>
+                        <Bar dataKey="confirmed_value_lkr" fill="#4361EE" name="Total Sales"    radius={[2,2,0,0]}/>
+                      </BarChart>
+                    </ResponsiveContainer>
                   </div>
-                </>
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-700 mb-2">Top Dealers by Order Value</h3>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={ordersData.top_dealers} layout="vertical" margin={{ top:0, right:40, left:5, bottom:0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
+                        <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={fmt}/>
+                        <YAxis type="category" dataKey="dealer" tick={{ fontSize: 9 }} width={140}/>
+                        <Tooltip formatter={(v: unknown) => `LKR ${fmt(Number(v))}`}/>
+                        <Bar dataKey="total_value_lkr" fill="#4361EE" name="Order Value (LKR)" radius={[0,3,3,0]}/>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
               )}
 
               {/* Rejection reasons pie — MC only */}
@@ -1036,9 +1079,8 @@ export function EDA() {
                 {/* ── Overview ── */}
                 {salesView === "kpi" && (
                   <div className="space-y-5">
-                    {/* KPI cards — row 1: mirrors dashboard gauges */}
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                      <KpiCard label="Order Received"   value={`LKR ${fmt(salesData.order_received_lkr)}`}     sub="All orders placed (incl. cancelled/rejected)"               color="blue"/>
+                    {/* KPI cards — row 1 */}
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                       <KpiCard label="Billed Revenue"   value={`LKR ${fmt(salesData.total_sale_value_lkr)}`}   sub="Gross billed sales (sales.xlsx)"                            color="purple"/>
                       <KpiCard label="Order Fulfillment" value={`${salesData.fulfillment_pct.toFixed(1)}%`}    sub="Confirmed fulfilled ÷ Order Received"                        color="green"/>
                       <KpiCard label="Return Rate"      value={`${salesData.return_rate_pct.toFixed(1)}%`}      sub="Returns ÷ Billed Revenue"                                   color="amber"/>

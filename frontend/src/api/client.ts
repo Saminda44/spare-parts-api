@@ -543,8 +543,12 @@ export interface OrdersEdaData {
   total_order_value_lkr: number;    // Order Received value (all PO lines incl. rejected)
   total_confirmed_value_lkr: number; // Total Sales value (confirmed qty × unit price)
   value_fill_rate_pct: number;       // total_confirmed / total_order × 100
-  total_return_value_lkr: number;   // Net value of all return order lines (H + cancelled C)
+  total_return_value_lkr: number;   // Net value of H-type Return Order lines only
   return_rate_value_pct: number;    // return_value / order_value × 100
+  unfulfill_value_lkr: number;      // ordered value not confirmed (PO ordered − PO confirmed)
+  sales_qty: number;                // total confirmed quantity on PO lines
+  unique_skus: number;              // unique materials on PO lines
+  total_po_documents: number;       // unique purchase order document count
   return_order_reasons: OrdersEdaRejectionReasonRow[];
   return_type_breakdown: Record<string, number>;
   top_dealers: OrdersEdaDealer[];
@@ -861,8 +865,8 @@ export type DealerType = "MC" | "OBM" | "ALL";
 export type McCategoryType = "ALL" | "Lubricant" | "Battery" | "Tyre" | "SpareParts";
 
 export const fetchOrdersEda = (dealerType: DealerType = "MC", mcCategory: McCategoryType = "ALL") =>
-  api.get<OrdersEdaData>("/eda/orders", { params: { dealer_type: dealerType, mc_category: mcCategory } }).then(r => r.data);
+  api.get<OrdersEdaData>("/eda/orders", { params: { dealer_type: dealerType, mc_category: mcCategory }, timeout: 90_000 }).then(r => r.data);
 export const fetchSalesEda    = (dealerType: DealerType = "MC", mcCategory: string = "ALL", year: number = 0) =>
-  api.get<SalesEdaData>("/eda/sales", { params: { dealer_type: dealerType, mc_category: mcCategory, year } }).then(r => r.data);
+  api.get<SalesEdaData>("/eda/sales", { params: { dealer_type: dealerType, mc_category: mcCategory, year }, timeout: 60_000 }).then(r => r.data);
 export const fetchMovements   = () => api.get<MovementsData>("/eda/movements").then(r => r.data);
 export const fetchSparePartsEda = () => api.get<SparePartsEdaData>("/eda/spare-parts").then(r => r.data);

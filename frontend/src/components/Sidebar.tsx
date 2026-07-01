@@ -2,7 +2,7 @@ import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard, TrendingUp, Package, ShoppingCart,
   Tags, Zap, CheckCircle2, XCircle, Bike, BookOpen, BarChart2, FileText,
-  LineChart, Waves, Activity, GitBranch, Search, ChevronRight,
+  Activity, Search, ChevronRight,
 } from "lucide-react";
 import type { PipelineStatus } from "../api/client";
 
@@ -19,24 +19,17 @@ const NAV_MOTO = [
   { to: "/uio",      label: "UIO Snapshot",           Icon: Activity   },
 ];
 
-const NAV_MOTO_UIO = [
-  { to: "/uio-forecast",            label: "UIO Forecast",     Icon: GitBranch },
-  { to: "/uio-forecast?tab=demand", label: "UIO-Based Demand", Icon: LineChart },
-];
-
 // ── Spare Parts ───────────────────────────────────────────────────────────
 const NAV_PARTS_ANALYSIS = [
-  { to: "/classification", label: "Classification",   Icon: Tags         },
-  { to: "/forecast",       label: "Demand Forecast",  Icon: TrendingUp   },
-  { to: "/inventory",      label: "Inventory Status", Icon: Package      },
-  { to: "/orders",         label: "Order Plan",        Icon: ShoppingCart },
-  { to: "/rl",             label: "RL Policy",         Icon: Zap          },
+  { to: "/classification", label: "Inventory Analysis",         Icon: Package      },
+  { to: "/forecast",       label: "Demand Forecast",            Icon: TrendingUp   },
+  { to: "/orders",         label: "Order Plan",                  Icon: ShoppingCart },
+  { to: "/rl",             label: "RL Policy",                   Icon: Zap          },
 ];
 
 const NAV_PARTS_DATA = [
-  { to: "/eda",     label: "MC Parts EDA",  Icon: BarChart2 },
-  { to: "/obm-eda", label: "OBM Parts EDA", Icon: Waves     },
-  { to: "/parts",   label: "Part Master",   Icon: BookOpen  },
+  { to: "/eda",   label: "Spare Parts Analysis", Icon: BarChart2 },
+  { to: "/parts", label: "Part Master",          Icon: BookOpen  },
 ];
 
 const NAV_PARTS_CATALOG = [
@@ -129,14 +122,14 @@ function StageRow({ ok, label, ago }: { ok: boolean; label: string; ago?: string
 
 export function Sidebar({ pipeline, freshness = {} }: Props) {
   return (
-    <aside className="w-60 min-h-screen bg-sidebar text-white flex flex-col shrink-0 overflow-y-auto">
+    <aside className="w-60 h-screen bg-sidebar text-white flex flex-col shrink-0 overflow-hidden">
       {/* Logo */}
       <div className="px-6 py-4 border-b border-white/10 shrink-0">
         <p className="text-xs text-slate-400 font-medium uppercase tracking-widest">Yamaha Sri Lanka</p>
         <h1 className="text-base font-bold leading-tight mt-0.5">Inventory Optimisation</h1>
       </div>
 
-      <nav className="flex-1 px-3 py-2 overflow-y-auto">
+      <nav className="flex-1 px-3 py-2 overflow-y-auto no-scrollbar">
 
         {/* ── 1. Overview ── */}
         <SectionLabel>Overview</SectionLabel>
@@ -148,59 +141,29 @@ export function Sidebar({ pipeline, freshness = {} }: Props) {
         <SectionLabel>Motorcycles</SectionLabel>
         {NAV_MOTO.map(n => <NavItem key={n.to} {...n}/>)}
 
-        {/* UIO Forecast — indented sub-group */}
-        <div className="ml-4 mt-1 border-l border-white/10 pl-2 pb-1">
-          <p className="px-2 pt-1 pb-0.5 text-[9px] font-bold uppercase tracking-widest text-slate-600">
-            UIO Forecast
-          </p>
-          {NAV_MOTO_UIO.map(n => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              end={false}
-              className={({ isActive }) =>
-                `flex items-center gap-2 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                  isActive ? "bg-brand-blue/80 text-white" : "text-slate-400 hover:bg-white/10 hover:text-white"
-                }`
-              }
-            >
-              <n.Icon size={12}/>
-              {n.label}
-            </NavLink>
-          ))}
-        </div>
-
         <Divider/>
 
         {/* ── 3. Spare Parts ── */}
         <SectionLabel>Spare Parts</SectionLabel>
 
-        <SubLabel>Analysis</SubLabel>
         {NAV_PARTS_ANALYSIS.map(n => <NavItem key={n.to} {...n}/>)}
-
-        <SubLabel>Data</SubLabel>
         {NAV_PARTS_DATA.map(n => <NavItem key={n.to} {...n}/>)}
-
-        <SubLabel>Catalogues</SubLabel>
         {NAV_PARTS_CATALOG.map(n => <NavItem key={n.to} {...n}/>)}
 
-      </nav>
-
-      {/* Pipeline status */}
-      <div className="px-4 pb-4 border-t border-white/10 pt-3 shrink-0">
-        <p className="text-[10px] text-slate-500 font-semibold uppercase tracking-widest mb-2">Pipeline</p>
-        <div className="space-y-1">
+        {/* Pipeline status — bottom of scroll area */}
+        <Divider/>
+        <p className="px-3 pt-1 pb-1 text-[10px] font-bold uppercase tracking-widest text-slate-500">Pipeline</p>
+        <div className="px-1 pb-4 space-y-1">
           {EARLY_STAGES.map(({ key, label }) => (
             <StageRow key={key} ok={pipeline?.[key] ?? false} label={label} ago={relativeTime(freshness[key])}/>
           ))}
-        </div>
-        <div className="my-1.5 border-t border-white/10"/>
-        <div className="space-y-1">
+          <div className="my-1.5 border-t border-white/10"/>
           {LATE_STAGES.map(({ key, label }) => (
             <StageRow key={key} ok={pipeline?.[key] ?? false} label={label} ago={relativeTime(freshness[key])}/>
           ))}
         </div>
-      </div>
+
+      </nav>
     </aside>
   );
 }

@@ -29,7 +29,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <div className="flex min-h-screen w-full font-sans bg-surface">
+      <div className="flex h-screen w-full font-sans bg-surface overflow-hidden">
         <Sidebar pipeline={pipeline} freshness={freshness} />
         <main className="flex-1 flex flex-col overflow-hidden">
           <Routes>

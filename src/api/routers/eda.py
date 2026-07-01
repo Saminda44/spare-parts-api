@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 
 from src.api.deps import (
     get_ingestion_log,
@@ -143,14 +143,14 @@ def _business_insights(full_po: pd.DataFrame, full_all_c: pd.DataFrame | None = 
 
     # ── 3. Province performance ───────────────────────────────────────────────
     _NVI = "Net Value (Item)"
-    prov_agg = (
-        full_po.groupby("Province", as_index=False)
-        .agg(
-            order_value_lkr=("confirmed_value", "sum"),  # fallback; overwritten below if all_c available
-            order_qty=("Order Quantity (Item)", "sum"),
-            confirmed_qty=("Confirmed Quantity (Item)", "sum"),
-            dealer_count=("Dealer Code", "nunique"),
-        )
+    prov_agg = full_po.groupby("Province", as_index=False).agg(
+        order_value_lkr=(
+            "confirmed_value",
+            "sum",
+        ),  # fallback; overwritten below if all_c available
+        order_qty=("Order Quantity (Item)", "sum"),
+        confirmed_qty=("Confirmed Quantity (Item)", "sum"),
+        dealer_count=("Dealer Code", "nunique"),
     )
     if (
         full_all_c is not None
@@ -161,9 +161,11 @@ def _business_insights(full_po: pd.DataFrame, full_all_c: pd.DataFrame | None = 
         _prov_c_val = (
             full_all_c.groupby("Province")[_NVI].sum().rename("order_value_lkr").reset_index()
         )
-        prov_agg = prov_agg.drop(columns=["order_value_lkr"]).merge(
-            _prov_c_val, on="Province", how="left"
-        ).fillna({"order_value_lkr": 0.0})
+        prov_agg = (
+            prov_agg.drop(columns=["order_value_lkr"])
+            .merge(_prov_c_val, on="Province", how="left")
+            .fillna({"order_value_lkr": 0.0})
+        )
     prov_agg = prov_agg.sort_values("order_value_lkr", ascending=False)
     total_prov = float(prov_agg["order_value_lkr"].sum()) or 1.0
     prov_agg["value_share_pct"] = (prov_agg["order_value_lkr"] / total_prov * 100).round(2)
@@ -344,7 +346,11 @@ def _compute_analysis_tables(
 
     # Pre-build order-intake value lookups from all_c (Net Value Item, demand signal)
     _NVI = "Net Value (Item)"
-    _use_all_c = all_c is not None and not all_c.empty and _NVI in (all_c.columns if all_c is not None else [])
+    _use_all_c = (
+        all_c is not None
+        and not all_c.empty
+        and _NVI in (all_c.columns if all_c is not None else [])
+    )
 
     def _c_val_by(keys: str | list[str]) -> pd.DataFrame | None:
         if not _use_all_c or all_c is None:
@@ -352,12 +358,7 @@ def _compute_analysis_tables(
         key_list = [keys] if isinstance(keys, str) else keys
         if not all(k in all_c.columns for k in key_list):
             return None
-        return (
-            all_c.groupby(key_list)[_NVI]
-            .sum()
-            .rename("order_value_lkr")
-            .reset_index()
-        )
+        return all_c.groupby(key_list)[_NVI].sum().rename("order_value_lkr").reset_index()
 
     # ── Part analysis (top 30 by value; share % relative to ALL parts) ───────
     part_agg_full = (
@@ -396,21 +397,20 @@ def _compute_analysis_tables(
 
     # ── Dealer performance (top 30 by value) ─────────────────────────────────
     _c_dealer_val = _c_val_by("Dealer Code")
-    dealer_agg = (
-        po.groupby(
-            ["Dealer Code", "Dealer Name", "Province", "District", "RM", "ASE"], as_index=False
-        )
-        .agg(
-            po_lines=("Sales Document", "count"),
-            order_qty=("Order Quantity (Item)", "sum"),
-            confirmed_qty=("Confirmed Quantity (Item)", "sum"),
-            order_value_lkr=("confirmed_value", "sum"),  # fallback; overwritten if all_c available
-        )
+    dealer_agg = po.groupby(
+        ["Dealer Code", "Dealer Name", "Province", "District", "RM", "ASE"], as_index=False
+    ).agg(
+        po_lines=("Sales Document", "count"),
+        order_qty=("Order Quantity (Item)", "sum"),
+        confirmed_qty=("Confirmed Quantity (Item)", "sum"),
+        order_value_lkr=("confirmed_value", "sum"),  # fallback; overwritten if all_c available
     )
     if _c_dealer_val is not None:
-        dealer_agg = dealer_agg.drop(columns=["order_value_lkr"]).merge(
-            _c_dealer_val, on="Dealer Code", how="left"
-        ).fillna({"order_value_lkr": 0.0})
+        dealer_agg = (
+            dealer_agg.drop(columns=["order_value_lkr"])
+            .merge(_c_dealer_val, on="Dealer Code", how="left")
+            .fillna({"order_value_lkr": 0.0})
+        )
     dealer_agg = dealer_agg.sort_values("order_value_lkr", ascending=False)
     total_d_val = float(dealer_agg["order_value_lkr"].sum()) or 1.0
     dealer_agg["fill_rate_pct"] = (
@@ -470,9 +470,11 @@ def _compute_analysis_tables(
         order_value_lkr=("confirmed_value", "sum"),
     )
     if _c_rm_val is not None:
-        rm_agg = rm_agg.drop(columns=["order_value_lkr"]).merge(
-            _c_rm_val, on="RM", how="left"
-        ).fillna({"order_value_lkr": 0.0})
+        rm_agg = (
+            rm_agg.drop(columns=["order_value_lkr"])
+            .merge(_c_rm_val, on="RM", how="left")
+            .fillna({"order_value_lkr": 0.0})
+        )
     rm_agg = rm_agg.merge(rm_province, on="RM", how="left")
     rm_agg["province"] = rm_agg["province"].fillna("")
     rm_agg["fill_rate_pct"] = (
@@ -521,9 +523,11 @@ def _compute_analysis_tables(
         order_value_lkr=("confirmed_value", "sum"),
     )
     if _c_ase_val is not None:
-        ase_agg = ase_agg.drop(columns=["order_value_lkr"]).merge(
-            _c_ase_val, on="ASE", how="left"
-        ).fillna({"order_value_lkr": 0.0})
+        ase_agg = (
+            ase_agg.drop(columns=["order_value_lkr"])
+            .merge(_c_ase_val, on="ASE", how="left")
+            .fillna({"order_value_lkr": 0.0})
+        )
     ase_agg["fill_rate_pct"] = (
         (ase_agg["confirmed_qty"] / ase_agg["order_qty"].replace(0, np.nan) * 100)
         .round(2)
@@ -562,20 +566,19 @@ def _compute_analysis_tables(
 
     # ── District performance ──────────────────────────────────────────────────
     _c_dist_val = _c_val_by(["Province", "District"])
-    dist_agg = (
-        po.groupby(["Province", "District"], as_index=False)
-        .agg(
-            unique_dealers=("Dealer Code", "nunique"),
-            po_lines=("Sales Document", "count"),
-            order_qty=("Order Quantity (Item)", "sum"),
-            confirmed_qty=("Confirmed Quantity (Item)", "sum"),
-            order_value_lkr=("confirmed_value", "sum"),
-        )
+    dist_agg = po.groupby(["Province", "District"], as_index=False).agg(
+        unique_dealers=("Dealer Code", "nunique"),
+        po_lines=("Sales Document", "count"),
+        order_qty=("Order Quantity (Item)", "sum"),
+        confirmed_qty=("Confirmed Quantity (Item)", "sum"),
+        order_value_lkr=("confirmed_value", "sum"),
     )
     if _c_dist_val is not None:
-        dist_agg = dist_agg.drop(columns=["order_value_lkr"]).merge(
-            _c_dist_val, on=["Province", "District"], how="left"
-        ).fillna({"order_value_lkr": 0.0})
+        dist_agg = (
+            dist_agg.drop(columns=["order_value_lkr"])
+            .merge(_c_dist_val, on=["Province", "District"], how="left")
+            .fillna({"order_value_lkr": 0.0})
+        )
     dist_agg = dist_agg.sort_values("order_value_lkr", ascending=False)
     total_dist_val = float(dist_agg["order_value_lkr"].sum()) or 1.0
     dist_agg["fill_rate_pct"] = (
@@ -620,20 +623,19 @@ def _compute_analysis_tables(
 
     # ── Province performance ──────────────────────────────────────────────────
     _c_prov_val = _c_val_by("Province")
-    prov_agg = (
-        po.groupby("Province", as_index=False)
-        .agg(
-            unique_dealers=("Dealer Code", "nunique"),
-            po_lines=("Sales Document", "count"),
-            order_qty=("Order Quantity (Item)", "sum"),
-            confirmed_qty=("Confirmed Quantity (Item)", "sum"),
-            order_value_lkr=("confirmed_value", "sum"),
-        )
+    prov_agg = po.groupby("Province", as_index=False).agg(
+        unique_dealers=("Dealer Code", "nunique"),
+        po_lines=("Sales Document", "count"),
+        order_qty=("Order Quantity (Item)", "sum"),
+        confirmed_qty=("Confirmed Quantity (Item)", "sum"),
+        order_value_lkr=("confirmed_value", "sum"),
     )
     if _c_prov_val is not None:
-        prov_agg = prov_agg.drop(columns=["order_value_lkr"]).merge(
-            _c_prov_val, on="Province", how="left"
-        ).fillna({"order_value_lkr": 0.0})
+        prov_agg = (
+            prov_agg.drop(columns=["order_value_lkr"])
+            .merge(_c_prov_val, on="Province", how="left")
+            .fillna({"order_value_lkr": 0.0})
+        )
     prov_agg = prov_agg.sort_values("order_value_lkr", ascending=False)
     total_prov_val = float(prov_agg["order_value_lkr"].sum()) or 1.0
     prov_agg["fill_rate_pct"] = (
@@ -727,12 +729,19 @@ def _fraud_alert_check(ret: pd.DataFrame) -> list[dict]:
 # ── Stage 4: Orders EDA ───────────────────────────────────────────────────────
 
 
+_orders_eda_cache: dict[tuple[str, str, int], bytes] = {}
+
+
 @router.get("/orders", response_model=OrdersEdaResponse)
 def get_orders_eda(
     rejection_limit: int = Query(200, le=1000),
     dealer_type: str = Query("MC", pattern="^(MC|OBM|ALL)$"),
     mc_category: str = Query("ALL", pattern="^(ALL|Lubricant|Battery|Tyre|SpareParts)$"),
-) -> OrdersEdaResponse:
+) -> OrdersEdaResponse | Response:
+    _cache_key = (dealer_type, mc_category, rejection_limit)
+    if _cache_key in _orders_eda_cache:
+        return Response(content=_orders_eda_cache[_cache_key], media_type="application/json")
+
     # Load once — both filtered views and full dataset are derived from these
     orders_full = get_orders_clean()
     rej_full = get_orders_rejection_log()
@@ -781,7 +790,9 @@ def get_orders_eda(
         [
             orders[po_mask],
             orders[orders["return_type"] == "Cancelled Order"] if _has_rt else _empty_df,
-            rej[rej["doc_type"] == "PO"] if not rej.empty and "doc_type" in rej.columns else _empty_df,
+            rej[rej["doc_type"] == "PO"]
+            if not rej.empty and "doc_type" in rej.columns
+            else _empty_df,
             rej[rej["return_type"] == "Cancelled Order"] if _has_rt_rej else _empty_df,
         ],
         ignore_index=True,
@@ -856,7 +867,8 @@ def get_orders_eda(
                 )
             )
 
-    # Monthly trend — total_value_lkr = ALL C-orders (demand signal); confirmed_value_lkr = delivered
+    # Monthly trend — total_value_lkr = ALL C-orders (demand signal)
+    # confirmed_value_lkr = delivered
     monthly: list[OrdersEdaMonthlyPoint] = []
     if "Year_Month_str" in orders.columns:
         # All-C monthly intake (incl. cancelled)
@@ -1024,7 +1036,7 @@ def get_orders_eda(
                     )
                 )
 
-    # Return orders analysis — H (Return Orders) + reclassified Cancelled C-orders
+    # Return orders analysis — H-type Return Orders only (not cancelled C-orders)
     total_return_value_lkr = 0.0
     return_rate_value_pct = 0.0
     return_type_breakdown: dict[str, int] = {}
@@ -1032,8 +1044,13 @@ def get_orders_eda(
 
     ret_lines = orders[orders["doc_type"] == "Return"]
     if not ret_lines.empty:
+        h_ret = (
+            ret_lines[ret_lines["return_type"] == "Return Order"]
+            if "return_type" in ret_lines.columns
+            else ret_lines
+        )
         total_return_value_lkr = float(
-            (ret_lines["Confirmed Quantity (Item)"] * ret_lines["Net Price"]).sum()
+            (h_ret["Confirmed Quantity (Item)"] * h_ret["Net Price"]).sum()
         )
         gross_value = total_order_value_lkr + total_return_value_lkr
         if gross_value > 0:
@@ -1097,9 +1114,15 @@ def get_orders_eda(
     full_all_c = pd.concat(
         [
             orders_full[orders_full["doc_type"] == "PO"] if not orders_full.empty else _empty_df,
-            orders_full[orders_full["return_type"] == "Cancelled Order"] if _has_rt_full else _empty_df,
-            rej_full[rej_full["doc_type"] == "PO"] if not rej_full.empty and "doc_type" in rej_full.columns else _empty_df,
-            rej_full[rej_full["return_type"] == "Cancelled Order"] if _has_rt_rej_full else _empty_df,
+            orders_full[orders_full["return_type"] == "Cancelled Order"]
+            if _has_rt_full
+            else _empty_df,
+            rej_full[rej_full["doc_type"] == "PO"]
+            if not rej_full.empty and "doc_type" in rej_full.columns
+            else _empty_df,
+            rej_full[rej_full["return_type"] == "Cancelled Order"]
+            if _has_rt_rej_full
+            else _empty_df,
         ],
         ignore_index=True,
     )
@@ -1144,7 +1167,24 @@ def get_orders_eda(
                     )
                 )
 
-    return OrdersEdaResponse(
+    # ── New KPI fields ────────────────────────────────────────────────────────
+    _po_nv = float(po_lines["Net Value (Item)"].sum()) if not po_lines.empty else 0.0
+    _po_cv = float(po_lines["confirmed_value"].sum()) if not po_lines.empty else 0.0
+    _rej_nv = float(rej_po_lines["Net Value (Item)"].sum()) if not rej_po_lines.empty else 0.0
+    unfulfill_value_lkr = round(max(0.0, _po_nv - _po_cv + _rej_nv), 0)
+    sales_qty = float(po_lines["Confirmed Quantity (Item)"].sum()) if not po_lines.empty else 0.0
+    unique_skus = (
+        int(po_lines["Material"].nunique())
+        if not po_lines.empty and "Material" in po_lines.columns
+        else 0
+    )
+    total_po_documents = (
+        int(all_c["Sales Document"].nunique())
+        if not all_c.empty and "Sales Document" in all_c.columns
+        else 0
+    )
+
+    _result = OrdersEdaResponse(
         total_po=total_po,
         total_returns=total_returns,
         avg_fill_rate=avg_fill_rate,
@@ -1155,6 +1195,10 @@ def get_orders_eda(
         value_fill_rate_pct=value_fill_rate_pct,
         total_return_value_lkr=round(total_return_value_lkr, 0),
         return_rate_value_pct=return_rate_value_pct,
+        unfulfill_value_lkr=unfulfill_value_lkr,
+        sales_qty=sales_qty,
+        unique_skus=unique_skus,
+        total_po_documents=total_po_documents,
         return_type_breakdown=return_type_breakdown,
         return_order_reasons=return_order_reasons,
         top_dealers=top_dealers,
@@ -1169,9 +1213,13 @@ def get_orders_eda(
         **analysis,
         **insights,
     )
+    _orders_eda_cache[_cache_key] = _result.model_dump_json().encode()
+    return _result
 
 
 # ── Stage 5: Sales EDA ────────────────────────────────────────────────────────
+
+_sales_eda_cache: dict[tuple[str, str, int], bytes] = {}
 
 
 @router.get("/sales", response_model=SalesEdaResponse)
@@ -1179,7 +1227,11 @@ def get_sales_eda(
     dealer_type: str = Query("MC", pattern="^(MC|OBM|ALL)$"),
     mc_category: str = Query("ALL", pattern="^(Lubricant|Battery|Tyre|Spare Parts|ALL)$"),
     year: int = Query(0, ge=0),  # 0 = auto-select latest year in data
-) -> SalesEdaResponse:
+) -> SalesEdaResponse | Response:
+    _cache_key = (dealer_type, mc_category, year)
+    if _cache_key in _sales_eda_cache:
+        return Response(content=_sales_eda_cache[_cache_key], media_type="application/json")
+
     sales = get_sales_clean()
     if sales.empty:
         return SalesEdaResponse()
@@ -1320,7 +1372,7 @@ def get_sales_eda(
         grp = grp.reset_index()
         for _, r in grp.sort_values("Year_Month_str").iterrows():
             prd = str(r["Year_Month_str"])
-            sv = float(r.get("value_sale", 0))   # billing sales this month
+            sv = float(r.get("value_sale", 0))  # billing sales this month
             rv = float(abs(r.get("value_return", 0)))  # billing returns this month
             monthly.append(
                 SalesEdaMonthlyPoint(
@@ -1597,7 +1649,7 @@ def get_sales_eda(
         else 0.0
     )
 
-    return SalesEdaResponse(
+    _result = SalesEdaResponse(
         data_year=data_year,
         available_years=available_years,
         total_sale_value_lkr=round(net_billing_value, 0),  # billed sales (sales.xlsx)
@@ -1622,6 +1674,8 @@ def get_sales_eda(
         mc_category_mix=mc_cat_rows,
         mc_monthly_category=mc_monthly_rows,
     )
+    _sales_eda_cache[_cache_key] = _result.model_dump_json().encode()
+    return _result
 
 
 # ── Stage 7: Stock Movements ──────────────────────────────────────────────────

@@ -785,9 +785,13 @@ class OrdersEdaResponse(BaseModel):
     total_confirmed_value_lkr: float = 0.0  # Confirmed Qty × unit price — "Total Sales"
     value_fill_rate_pct: float = 0.0  # total_confirmed_value / total_order_value × 100
     total_return_value_lkr: float = (
-        0.0  # sum of Net Value for all Return-doc lines (H + cancelled C)
+        0.0  # sum of Net Value for H-type Return Order lines only (not cancelled C-orders)
     )
     return_rate_value_pct: float = 0.0  # return_value / order_value × 100
+    unfulfill_value_lkr: float = 0.0  # ordered value not confirmed (PO ordered − PO confirmed)
+    sales_qty: float = 0.0  # total confirmed quantity on PO lines
+    unique_skus: int = 0  # unique materials on PO lines
+    total_po_documents: int = 0  # unique purchase order document count
     return_order_reasons: list[OrdersEdaRejectionReasonRow] = []  # reasons for return orders
     return_type_breakdown: dict[str, int] = {}  # {"Return Order": n, "Cancelled Order": n}
     top_dealers: list[OrdersEdaDealer]

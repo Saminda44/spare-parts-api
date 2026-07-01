@@ -74,11 +74,25 @@ export function OBMEDA() {
         {tab === "orders" && (
           ordersData ? (
             <div className="space-y-5">
+              {/* Row 1 — value KPIs */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <KpiCard label="Total POs"       value={fmt(ordersData.total_po)}            color="blue"/>
-                <KpiCard label="Returns"          value={fmt(ordersData.total_returns)}        color="red"/>
-                <KpiCard label="Avg Fill Rate"    value={`${(ordersData.avg_fill_rate*100).toFixed(2)}%`} sub={`${ordersData.fill_rate_lt1_count} short-shipped`} color="green"/>
-                <KpiCard label="Avg Lead Time"    value={`${ordersData.avg_lead_time_days.toFixed(1)} days`} sub="Good issue − created" color="purple"/>
+                <KpiCard label="Order Received"    value={`LKR ${fmt(ordersData.total_order_value_lkr)}`}              sub="All C-orders incl. cancelled/rejected"   color="blue"/>
+                <KpiCard label="Total Sales"       value={`LKR ${fmt(ordersData.total_confirmed_value_lkr)}`}           sub="Confirmed delivery value (orders.xlsx)"  color="green"/>
+                <KpiCard label="Order Fulfillment" value={`${ordersData.value_fill_rate_pct.toFixed(1)}%`}              sub="Confirmed value ÷ Order Received"        color="teal"/>
+                <KpiCard label="Rejection Rate"    value={`${ordersData.rejection_rate_pct.toFixed(1)}%`}               sub="PO lines fully undelivered"              color="amber"/>
+              </div>
+              {/* Row 2 */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <KpiCard label="Qty Fill Rate"     value={`${(ordersData.avg_fill_rate * 100).toFixed(1)}%`}            sub={`${ordersData.fill_rate_lt1_count} lines short-shipped`} color="purple"/>
+                <KpiCard label="Total POs"         value={ordersData.total_po_documents.toLocaleString()}               sub="Unique purchase order documents"         color="blue"/>
+                <KpiCard label="Avg Dispatch LT"   value={`${ordersData.avg_lead_time_days.toFixed(1)} days`}           sub="Warehouse → dealer"                      color="teal"/>
+                <KpiCard label="Return Value"      value={`LKR ${fmt(ordersData.total_return_value_lkr)}`}              sub="H-type return order value"               color="red"/>
+              </div>
+              {/* Row 3 */}
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <KpiCard label="Unfulfill Value"   value={`LKR ${fmt(ordersData.unfulfill_value_lkr)}`}                sub="Ordered but not confirmed"               color="amber"/>
+                <KpiCard label="Sales Qty"         value={ordersData.sales_qty.toLocaleString('en-US', {maximumFractionDigits: 0})} sub="Confirmed units"            color="green"/>
+                <KpiCard label="Unique SKU"        value={ordersData.unique_skus.toLocaleString()}                     sub="Materials ordered"                       color="teal"/>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
