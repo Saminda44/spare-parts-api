@@ -8,7 +8,7 @@ __pycache__/
 *.pyd
 .Python
 build/
-dist/
+/dist/
 
 # Data — never commit real data
 data/raw/
