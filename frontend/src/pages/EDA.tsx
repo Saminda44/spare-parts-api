@@ -55,7 +55,7 @@ type OrdersAnalysisSeg = "parts" | "geography";
 
 export function EDA() {
   const [ordersData,       setOrdersData]       = useState<OrdersEdaData | null>(null);
-  const [ordersSalesData, setOrdersSalesData] = useState<SalesEdaData | null>(null);
+  const [_ordersSalesData, setOrdersSalesData] = useState<SalesEdaData | null>(null);
   const [salesData,        setSalesData]        = useState<SalesEdaData | null>(null);
   const [movData,     setMovData]     = useState<MovementsData | null>(null);
   const [spareData,   setSpareData]   = useState<SparePartsEdaData | null>(null);

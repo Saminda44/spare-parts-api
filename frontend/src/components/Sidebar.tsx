@@ -1,8 +1,8 @@
 import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard, TrendingUp, Package, ShoppingCart,
-  Tags, Zap, CheckCircle2, XCircle, Bike, BookOpen, BarChart2, FileText,
-  Activity, Search, ChevronRight,
+  Zap, CheckCircle2, XCircle, Bike, BookOpen, BarChart2, FileText,
+  Activity, Search,
 } from "lucide-react";
 import type { PipelineStatus } from "../api/client";
 
@@ -90,15 +90,6 @@ function NavItem({ to, label, Icon }: { to: string; label: string; Icon: React.E
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <p className="px-3 pt-3 pb-1 text-[10px] font-bold uppercase tracking-widest text-slate-500">
-      {children}
-    </p>
-  );
-}
-
-function SubLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="px-3 pt-2 pb-0.5 text-[9px] font-semibold uppercase tracking-widest text-slate-600 flex items-center gap-1">
-      <ChevronRight size={9} className="text-slate-700"/>
       {children}
     </p>
   );
