@@ -944,3 +944,50 @@ export const fetchMarketBasket = (
       timeout: 90_000,
     })
     .then(r => r.data);
+
+// ── ML Market Basket ──────────────────────────────────────────────────────────
+export interface ItemSimilarity {
+  item: string;
+  score: number;
+  method: string;
+}
+export interface ItemRecommendation {
+  item: string;
+  freq: number;
+  item2vec: ItemSimilarity[];
+  svd: ItemSimilarity[];
+}
+export interface CustomerRecommendation {
+  payer: string;
+  purchased: string[];
+  recommendations: { item: string; score: number }[];
+}
+export interface UmapPoint {
+  item: string;
+  x: number;
+  y: number;
+  cluster: number;
+  freq: number;
+}
+export interface MLCluster {
+  cluster_id: number;
+  items: string[];
+  count: number;
+}
+export interface MarketBasketMLData {
+  item_recommendations: ItemRecommendation[];
+  customer_recommendations: CustomerRecommendation[];
+  umap_coords: UmapPoint[];
+  clusters: MLCluster[];
+  model_info: {
+    embedding_dim: number;
+    n_baskets: number;
+    n_items_trained: number;
+    n_components_svd: number;
+    n_clusters: number;
+  };
+}
+export const fetchMarketBasketML = () =>
+  api
+    .get<MarketBasketMLData>("/eda/market-basket/ml", { timeout: 120_000 })
+    .then(r => r.data);

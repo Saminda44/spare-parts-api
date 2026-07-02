@@ -55,6 +55,8 @@ dependencies = [
     "fastapi>=0.136.1",
     "uvicorn[standard]>=0.46.0",
     "mlxtend>=0.23",
+    "gensim>=4.4.0",
+    "umap-learn>=0.5.12",
 ]
 
 [project.optional-dependencies]

@@ -1163,3 +1163,54 @@ class MarketBasketResponse(BaseModel):
     rules: list[AssociationRule]
     groups: list[CoOccurrenceGroup]
     large_invoices: list[LargeInvoice]
+
+
+# ── ML Market Basket schemas ──────────────────────────────────────────────────
+
+class ItemSimilarity(BaseModel):
+    item: str
+    score: float
+    method: str  # "item2vec" | "svd"
+
+
+class ItemRecommendations(BaseModel):
+    item: str
+    freq: int
+    item2vec: list[ItemSimilarity]
+    svd: list[ItemSimilarity]
+
+
+class CustomerRecommendation(BaseModel):
+    payer: str
+    purchased: list[str]
+    recommendations: list[dict[str, Any]]  # [{item, score}]
+
+
+class UmapPoint(BaseModel):
+    item: str
+    x: float
+    y: float
+    cluster: int
+    freq: int
+
+
+class MLCluster(BaseModel):
+    cluster_id: int
+    items: list[str]
+    count: int
+
+
+class MLModelInfo(BaseModel):
+    embedding_dim: int
+    n_baskets: int
+    n_items_trained: int
+    n_components_svd: int
+    n_clusters: int
+
+
+class MarketBasketMLResponse(BaseModel):
+    item_recommendations: list[ItemRecommendations]
+    customer_recommendations: list[CustomerRecommendation]
+    umap_coords: list[UmapPoint]
+    clusters: list[MLCluster]
+    model_info: MLModelInfo

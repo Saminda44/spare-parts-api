@@ -1,8 +1,13 @@
 import { useEffect, useState } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
+  ScatterChart, Scatter, ZAxis,
 } from "recharts";
-import { fetchMarketBasket, type MarketBasketData, type AssociationRule, type CoOccurrenceGroup, type LargeInvoice } from "../api/client";
+import {
+  fetchMarketBasket, fetchMarketBasketML,
+  type MarketBasketData, type MarketBasketMLData,
+  type AssociationRule, type CoOccurrenceGroup, type LargeInvoice,
+} from "../api/client";
 import { KpiCard } from "../components/KpiCard";
 
 const LIFT_COLOR = (lift: number) =>
@@ -35,7 +40,12 @@ export function MarketBasket() {
   const [groupSort,     setGroupSort]     = useState<GroupSortKey>("count");
   const [sizeFilter,    setSizeFilter]    = useState<SizeFilter>("all");
   const [invSearch,     setInvSearch]     = useState("");
-  const [activeTab,     setActiveTab]     = useState<"pairs" | "invoices" | "rules" | "itemsets" | "materials">("pairs");
+  const [activeTab,     setActiveTab]     = useState<"pairs" | "invoices" | "rules" | "itemsets" | "materials" | "ml">("pairs");
+  const [mlData,        setMlData]        = useState<MarketBasketMLData | null>(null);
+  const [mlLoading,     setMlLoading]     = useState(false);
+  const [mlItemSearch,  setMlItemSearch]  = useState("");
+  const [mlCustSearch,  setMlCustSearch]  = useState("");
+  const [_selectedItem, setSelectedItem]  = useState<string>("");
 
   const load = (sup: number, conf: number, lift: number) => {
     setLoading(true);
@@ -43,6 +53,14 @@ export function MarketBasket() {
     fetchMarketBasket(sup, conf, lift)
       .then(setData)
       .finally(() => setLoading(false));
+  };
+
+  const loadML = () => {
+    if (mlData || mlLoading) return;
+    setMlLoading(true);
+    fetchMarketBasketML()
+      .then(d => { setMlData(d); if (d.item_recommendations.length > 0) setSelectedItem(d.item_recommendations[0].item); })
+      .finally(() => setMlLoading(false));
   };
 
   useEffect(() => { load(minSupport, minConfidence, minLift); }, []);
@@ -126,9 +144,9 @@ export function MarketBasket() {
       {data && (
         <>
           {/* Tabs */}
-          <div className="flex gap-1 border-b border-slate-200">
-            {(["pairs", "invoices", "rules", "itemsets", "materials"] as const).map(t => (
-              <button key={t} onClick={() => setActiveTab(t)}
+          <div className="flex gap-1 border-b border-slate-200 flex-wrap">
+            {(["pairs", "invoices", "rules", "itemsets", "materials", "ml"] as const).map(t => (
+              <button key={t} onClick={() => { setActiveTab(t); if (t === "ml") loadML(); }}
                 className={`px-5 py-2 text-sm font-medium rounded-t-lg border-b-2 transition-colors capitalize ${
                   activeTab === t
                     ? "border-brand-blue text-brand-blue bg-white"
@@ -138,6 +156,7 @@ export function MarketBasket() {
                  : t === "invoices" ? `Invoices (${data.large_invoices.length})`
                  : t === "rules"    ? `Rules (${data.total_rules})`
                  : t === "itemsets" ? `Frequent Itemsets (${data.frequent_itemsets.length})`
+                 : t === "ml"       ? "🤖 ML Insights"
                  : "Top Materials"}
               </button>
             ))}
@@ -550,6 +569,186 @@ export function MarketBasket() {
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+          {/* ── ML Insights tab ── */}
+          {activeTab === "ml" && (
+            <div className="space-y-5">
+              {mlLoading && (
+                <div className="text-center text-slate-400 py-16">
+                  <div className="text-2xl mb-2">🤖</div>
+                  <div className="text-sm">Training Item2Vec + SVD models… ~30s</div>
+                </div>
+              )}
+
+              {!mlLoading && !mlData && (
+                <div className="text-center text-slate-400 py-12 text-sm">Loading ML models…</div>
+              )}
+
+              {mlData && (
+                <>
+                  {/* Model info KPIs */}
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                    <KpiCard label="Items Embedded"    value={String(mlData.model_info.n_items_trained)} sub="Item2Vec vocab"        color="blue"/>
+                    <KpiCard label="Embedding Dim"     value={String(mlData.model_info.embedding_dim)}   sub="Word2Vec vector size"  color="purple"/>
+                    <KpiCard label="SVD Components"    value={String(mlData.model_info.n_components_svd)} sub="Latent factors"       color="green"/>
+                    <KpiCard label="Item Clusters"     value={String(mlData.model_info.n_clusters)}      sub="KMeans on embeddings"  color="amber"/>
+                    <KpiCard label="Customer Recs"     value={String(mlData.customer_recommendations.length)} sub="payers with recs" color="teal"/>
+                  </div>
+
+                  {/* UMAP scatter */}
+                  <div className="bg-white rounded-xl shadow-sm p-5">
+                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Item2Vec Embedding Map (UMAP 2D)</h3>
+                    <p className="text-xs text-slate-400 mb-3">Items close together are bought together often. Colour = KMeans cluster.</p>
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                      <div className="lg:col-span-2">
+                        <ResponsiveContainer width="100%" height={360}>
+                          <ScatterChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                            <XAxis type="number" dataKey="x" name="UMAP-1" tick={{ fontSize: 9 }} tickLine={false}/>
+                            <YAxis type="number" dataKey="y" name="UMAP-2" tick={{ fontSize: 9 }} tickLine={false}/>
+                            <ZAxis type="number" dataKey="freq" range={[30, 300]} name="Frequency"/>
+                            <Tooltip
+                              cursor={{ strokeDasharray: "3 3" }}
+                              content={({ active, payload }) => {
+                                if (!active || !payload?.length) return null;
+                                const d = payload[0].payload as { item: string; freq: number; cluster: number };
+                                return (
+                                  <div className="bg-white border border-slate-200 rounded-lg p-2 text-xs shadow">
+                                    <div className="font-semibold text-slate-800 max-w-[200px]">{d.item}</div>
+                                    <div className="text-slate-500">Cluster {d.cluster} · freq {d.freq}</div>
+                                  </div>
+                                );
+                              }}
+                            />
+                            {mlData.clusters.map(c => (
+                              <Scatter
+                                key={c.cluster_id}
+                                name={`Cluster ${c.cluster_id}`}
+                                data={mlData.umap_coords.filter(p => p.cluster === c.cluster_id)}
+                                fill={["#4361EE","#2CC56F","#FFC107","#EF4444","#7C3AED","#06B6D4","#F97316","#EC4899"][c.cluster_id % 8]}
+                                fillOpacity={0.75}
+                              />
+                            ))}
+                          </ScatterChart>
+                        </ResponsiveContainer>
+                      </div>
+                      {/* Cluster legend */}
+                      <div className="space-y-2 overflow-y-auto max-h-[360px]">
+                        {mlData.clusters.map(c => (
+                          <div key={c.cluster_id} className="bg-slate-50 rounded-lg p-2">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="w-3 h-3 rounded-full shrink-0" style={{ background: ["#4361EE","#2CC56F","#FFC107","#EF4444","#7C3AED","#06B6D4","#F97316","#EC4899"][c.cluster_id % 8] }}/>
+                              <span className="text-xs font-semibold text-slate-700">Cluster {c.cluster_id} ({c.count} items)</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1">
+                              {c.items.slice(0, 4).map(it => (
+                                <span key={it} className="text-[10px] px-1.5 py-0.5 bg-white border border-slate-200 rounded text-slate-600 max-w-[120px] truncate" title={it}>{it}</span>
+                              ))}
+                              {c.items.length > 4 && <span className="text-[10px] text-slate-400">+{c.items.length - 4}</span>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Item similarity explorer */}
+                  <div className="bg-white rounded-xl shadow-sm p-5">
+                    <h3 className="text-sm font-semibold text-slate-700 mb-3">Item Similarity Explorer</h3>
+                    <div className="flex gap-3 mb-4 flex-wrap items-center">
+                      <div className="flex-1 min-w-[220px]">
+                        <input
+                          className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue/30"
+                          placeholder="Search item…"
+                          value={mlItemSearch}
+                          onChange={e => setMlItemSearch(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[480px] overflow-y-auto">
+                      {mlData.item_recommendations
+                        .filter(r => !mlItemSearch || r.item.toLowerCase().includes(mlItemSearch.toLowerCase()))
+                        .filter(r => r.item2vec.length > 0 || r.svd.length > 0)
+                        .slice(0, 18)
+                        .map(r => (
+                          <div key={r.item} className="border border-slate-100 rounded-lg p-3 hover:border-brand-blue/30 transition-colors">
+                            <div className="text-xs font-semibold text-slate-800 mb-1 truncate" title={r.item}>{r.item}</div>
+                            <div className="text-[10px] text-slate-400 mb-2">freq: {r.freq}</div>
+                            {r.item2vec.length > 0 && (
+                              <div className="mb-2">
+                                <div className="text-[10px] font-bold text-brand-blue uppercase tracking-wide mb-1">Item2Vec</div>
+                                {r.item2vec.slice(0, 3).map(s => (
+                                  <div key={s.item} className="flex items-center justify-between text-[10px] py-0.5">
+                                    <span className="text-slate-600 truncate max-w-[130px]" title={s.item}>{s.item}</span>
+                                    <span className="text-brand-blue font-mono shrink-0 ml-1">{(s.score * 100).toFixed(1)}%</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {r.svd.length > 0 && (
+                              <div>
+                                <div className="text-[10px] font-bold text-brand-green uppercase tracking-wide mb-1">SVD CF</div>
+                                {r.svd.slice(0, 3).map(s => (
+                                  <div key={s.item} className="flex items-center justify-between text-[10px] py-0.5">
+                                    <span className="text-slate-600 truncate max-w-[130px]" title={s.item}>{s.item}</span>
+                                    <span className="text-brand-green font-mono shrink-0 ml-1">{(s.score * 100).toFixed(1)}%</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+
+                  {/* Customer recommendations */}
+                  <div className="bg-white rounded-xl shadow-sm p-5">
+                    <h3 className="text-sm font-semibold text-slate-700 mb-1">Customer Recommendations (SVD Collaborative Filtering)</h3>
+                    <p className="text-xs text-slate-400 mb-3">Items predicted for each customer based on purchase history of similar customers.</p>
+                    <input
+                      className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-brand-blue/30"
+                      placeholder="Search payer name…"
+                      value={mlCustSearch}
+                      onChange={e => setMlCustSearch(e.target.value)}
+                    />
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
+                            <th className="py-2 pr-4">Payer</th>
+                            <th className="py-2 pr-4 text-center">Purchased</th>
+                            <th className="py-2">Top Recommendations</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {mlData.customer_recommendations
+                            .filter(c => !mlCustSearch || c.payer.toLowerCase().includes(mlCustSearch.toLowerCase()))
+                            .slice(0, 30)
+                            .map((c, i) => (
+                              <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50 align-top">
+                                <td className="py-2 pr-4 text-xs text-slate-700 max-w-[180px] truncate" title={c.payer}>{c.payer}</td>
+                                <td className="py-2 pr-4 text-center">
+                                  <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">{c.purchased.length}</span>
+                                </td>
+                                <td className="py-2">
+                                  <div className="flex flex-wrap gap-1">
+                                    {c.recommendations.slice(0, 3).map(r => (
+                                      <span key={r.item} className="text-[10px] px-2 py-0.5 rounded-full bg-brand-blue/10 text-brand-blue border border-brand-blue/20 max-w-[160px] truncate" title={r.item}>
+                                        {r.item.length > 30 ? r.item.slice(0, 28) + "…" : r.item}
+                                        <span className="ml-1 text-brand-blue/60">({r.score.toFixed(2)})</span>
+                                      </span>
+                                    ))}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </>

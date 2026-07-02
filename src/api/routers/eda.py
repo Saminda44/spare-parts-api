@@ -26,8 +26,15 @@ from src.api.schemas import (
     FulfillmentAnalysis,
     FulfillmentLineBucket,
     IntermittentSkuRow,
+    CustomerRecommendation,
+    ItemRecommendations,
+    ItemSimilarity,
     LargeInvoice,
+    MarketBasketMLResponse,
     MarketBasketResponse,
+    MLCluster,
+    MLModelInfo,
+    UmapPoint,
     McMonthlyCategoryPoint,
     MovementMonthlyPoint,
     MovementsResponse,
@@ -2007,4 +2014,173 @@ def market_basket(
         rules=rules_out,
         groups=groups,
         large_invoices=large_invoices,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ML Market Basket endpoint — Item2Vec + SVD Collaborative Filtering
+# ─────────────────────────────────────────────────────────────────────────────
+@router.get("/market-basket/ml")
+def market_basket_ml() -> MarketBasketMLResponse:
+    """ML-based market basket analysis on service.xlsx.
+
+    Business meaning: trains Item2Vec (Word2Vec on purchase baskets) and
+    SVD collaborative filtering to surface item-item similarities and
+    per-customer recommendations that go beyond simple co-occurrence counts.
+    UMAP projects embeddings to 2D for visualisation; KMeans clusters items
+    by purchase-pattern similarity.
+    """
+    import math
+    from pathlib import Path
+
+    import numpy as np
+    import umap as _umap
+    from gensim.models import Word2Vec
+    from sklearn.cluster import KMeans
+    from sklearn.decomposition import TruncatedSVD
+    from sklearn.metrics.pairwise import cosine_similarity
+    from sklearn.preprocessing import normalize
+
+    raw_path = Path("data/raw/service.xlsx")
+    df = pd.read_excel(raw_path, engine="openpyxl")
+    df = df[df["SlsVolQty"] > 0].copy()
+
+    # Baskets: one sorted list of unique material names per Billing Document
+    baskets: list[list[str]] = (
+        df.groupby("Billing Document")["Material"]
+        .apply(lambda items: sorted(set(str(m).strip() for m in items)))
+        .tolist()
+    )
+
+    mat_counts: dict[str, int] = {}
+    for b in baskets:
+        for m in b:
+            mat_counts[m] = mat_counts.get(m, 0) + 1
+
+    # ── 1. Item2Vec (skip-gram Word2Vec on baskets) ───────────────────────
+    w2v = Word2Vec(
+        sentences=baskets,
+        vector_size=32,
+        window=10,       # large: basket items are unordered
+        min_count=2,
+        workers=4,
+        epochs=100,
+        sg=1,            # skip-gram
+        seed=42,
+    )
+    vocab: list[str] = list(w2v.wv.key_to_index.keys())
+
+    item2vec_sims: dict[str, list[ItemSimilarity]] = {}
+    for item in vocab:
+        similar = w2v.wv.most_similar(item, topn=10)
+        item2vec_sims[item] = [
+            ItemSimilarity(item=s, score=round(float(sc), 4), method="item2vec")
+            for s, sc in similar
+        ]
+
+    # ── 2. SVD Collaborative Filtering ───────────────────────────────────
+    payer_item = (
+        df.groupby(["Payer", "Material"])["SlsVolQty"]
+        .sum()
+        .unstack(fill_value=0)
+    )
+    n_comp = min(20, payer_item.shape[0] - 1, payer_item.shape[1] - 1)
+    svd = TruncatedSVD(n_components=n_comp, random_state=42)
+    # Fit on payer×item matrix: rows=payers, cols=items
+    payer_latent: np.ndarray = svd.fit_transform(payer_item)   # (n_payers, n_comp)
+    item_latent: np.ndarray  = svd.components_.T               # (n_items,  n_comp)
+    item_latent_norm = normalize(item_latent)
+    item_cols: list[str] = list(payer_item.columns)
+
+    sim_matrix = cosine_similarity(item_latent_norm)       # (n_items, n_items)
+    svd_sims: dict[str, list[ItemSimilarity]] = {}
+    for i, item in enumerate(item_cols):
+        ranked = sorted(
+            ((item_cols[j], sim_matrix[i, j]) for j in range(len(item_cols)) if j != i),
+            key=lambda x: -x[1],
+        )
+        svd_sims[item] = [
+            ItemSimilarity(item=s, score=round(float(sc), 4), method="svd")
+            for s, sc in ranked[:10]
+        ]
+
+    # Per-customer predictions: reconstruct the payer×item score matrix
+    predicted = payer_latent @ item_latent.T               # (n_payers, n_items)
+
+    customer_recs: list[CustomerRecommendation] = []
+    for pi, payer in enumerate(payer_item.index):
+        purchased = [item_cols[j] for j in range(len(item_cols)) if payer_item.iloc[pi, j] > 0]
+        not_bought = [j for j in range(len(item_cols)) if payer_item.iloc[pi, j] == 0]
+        scores = sorted(
+            ((item_cols[j], predicted[pi, j]) for j in not_bought),
+            key=lambda x: -x[1],
+        )
+        recs = [{"item": s, "score": round(float(sc), 4)} for s, sc in scores[:5] if sc > 0]
+        if recs and purchased:
+            customer_recs.append(
+                CustomerRecommendation(payer=str(payer), purchased=purchased, recommendations=recs)
+            )
+    customer_recs.sort(key=lambda x: -len(x.purchased))
+
+    # ── 3. UMAP + KMeans clustering on Item2Vec embeddings ───────────────
+    embeddings = np.array([w2v.wv[item] for item in vocab])  # (n_vocab, 32)
+
+    n_clusters = min(8, max(2, len(vocab) // 8))
+    km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    cluster_labels: np.ndarray = km.fit_predict(embeddings)
+
+    n_neighbors = min(15, len(vocab) - 1)
+    reducer = _umap.UMAP(n_components=2, random_state=42, n_neighbors=n_neighbors, min_dist=0.1)
+    coords_2d: np.ndarray = reducer.fit_transform(embeddings)
+
+    umap_coords = [
+        UmapPoint(
+            item=vocab[i],
+            x=round(float(coords_2d[i, 0]), 4),
+            y=round(float(coords_2d[i, 1]), 4),
+            cluster=int(cluster_labels[i]),
+            freq=mat_counts.get(vocab[i], 0),
+        )
+        for i in range(len(vocab))
+    ]
+
+    clusters_dict: dict[int, list[str]] = {}
+    for i, item in enumerate(vocab):
+        clusters_dict.setdefault(int(cluster_labels[i]), []).append(item)
+    clusters_out = [
+        MLCluster(
+            cluster_id=k,
+            items=sorted(v, key=lambda x: -mat_counts.get(x, 0)),
+            count=len(v),
+        )
+        for k, v in sorted(clusters_dict.items())
+    ]
+
+    # ── Merge item recommendations (union of vocab + SVD items) ──────────
+    all_items = sorted(
+        set(vocab) | set(item_cols),
+        key=lambda x: -mat_counts.get(x, 0),
+    )
+    item_recs_out = [
+        ItemRecommendations(
+            item=item,
+            freq=mat_counts.get(item, 0),
+            item2vec=item2vec_sims.get(item, []),
+            svd=svd_sims.get(item, []),
+        )
+        for item in all_items
+    ]
+
+    return MarketBasketMLResponse(
+        item_recommendations=item_recs_out,
+        customer_recommendations=customer_recs[:50],
+        umap_coords=umap_coords,
+        clusters=clusters_out,
+        model_info=MLModelInfo(
+            embedding_dim=32,
+            n_baskets=len(baskets),
+            n_items_trained=len(vocab),
+            n_components_svd=n_comp,
+            n_clusters=n_clusters,
+        ),
     )
