@@ -544,12 +544,89 @@ class McsiEdaProvinceRow(BaseModel):
     dealer_count: int
 
 
+class McsiColorRow(BaseModel):
+    model: str
+    color: str
+    units_sold: int
+
+
+class McsiRmRow(BaseModel):
+    rm: str
+    units_sold: int
+    revenue_lkr: float
+    dealer_count: int
+    ase_count: int
+    share_pct: float
+    avg_revenue_per_unit: float
+
+
+class McsiAseRow(BaseModel):
+    ase: str
+    rm: str
+    units_sold: int
+    revenue_lkr: float
+    dealer_count: int
+    share_pct: float
+
+
+class McsiDistrictRow(BaseModel):
+    province: str
+    district: str
+    units_sold: int
+    revenue_lkr: float
+    share_pct: float
+
+
+class DealerModelRow(BaseModel):
+    dealer: str
+    dealer_code: str
+    province: str
+    rm: str
+    ase: str
+    total: int
+    totals: dict[str, int]
+
+
+class DealerModelMatrix(BaseModel):
+    models: list[str]
+    rows: list[DealerModelRow]
+
+
 class McsiEdaResponse(BaseModel):
     kpis: McsiEdaKpis
     monthly_trend: list[McsiMonthlyPoint]
     by_year: list[McsiEdaYearRow]
     by_model: list[McsiEdaModelRow]
     by_province: list[McsiEdaProvinceRow]
+    by_color: list[McsiColorRow]
+    by_rm: list[McsiRmRow]
+    by_ase: list[McsiAseRow]
+    by_district: list[McsiDistrictRow]
+
+
+class GeoMatrixRow(BaseModel):
+    entity: str
+    total: int
+    totals: dict[str, int]
+
+
+class GeoMatrixLevel(BaseModel):
+    models: list[str]
+    rows: list[GeoMatrixRow]
+
+
+class GeoModelResponse(BaseModel):
+    rm: GeoMatrixLevel
+    ase: GeoMatrixLevel
+    province: GeoMatrixLevel
+    district: GeoMatrixLevel
+
+
+class GeoColorResponse(BaseModel):
+    rm: GeoMatrixLevel  # entity = RM,       keys = SAP color names
+    ase: GeoMatrixLevel  # entity = ASE,       keys = SAP color names
+    province: GeoMatrixLevel  # entity = Province,  keys = SAP color names
+    district: GeoMatrixLevel  # entity = District,  keys = SAP color names
 
 
 # ---------------------------------------------------------------------------
@@ -1041,3 +1118,48 @@ class SparePartsEdaResponse(BaseModel):
     ingestion_summary: list[dict[str, Any]]
     top_skus: list[TopSkuRow]
     intermittent_skus: list[IntermittentSkuRow]
+
+
+class AssociationRule(BaseModel):
+    antecedents: list[str]
+    consequents: list[str]
+    support: float
+    confidence: float
+    lift: float
+    conviction: float | None
+    antecedent_support: float
+    consequent_support: float
+
+
+class FrequentItemset(BaseModel):
+    items: list[str]
+    support: float
+    count: int
+
+
+class CoOccurrenceGroup(BaseModel):
+    items: list[str]
+    count: int
+    support: float
+    lift: float  # geometric-mean lift across all items in the group
+
+
+class LargeInvoice(BaseModel):
+    billing_document: str
+    billing_date: str
+    payer: str
+    items: list[str]
+    item_count: int
+
+
+class MarketBasketResponse(BaseModel):
+    total_baskets: int
+    multi_item_baskets: int
+    total_unique_materials: int
+    total_rules: int
+    max_basket_size: int
+    top_materials: list[dict[str, Any]]
+    frequent_itemsets: list[FrequentItemset]
+    rules: list[AssociationRule]
+    groups: list[CoOccurrenceGroup]
+    large_invoices: list[LargeInvoice]

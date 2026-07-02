@@ -3,7 +3,6 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Sidebar } from "./components/Sidebar";
 import { Overview }       from "./pages/Overview";
 import { BikeSales }      from "./pages/BikeSales";
-import { BikeEDA }        from "./pages/BikeEDA";
 import { McsiEDA }        from "./pages/McsiEDA";
 import { UIO }            from "./pages/UIO";
 import { UIOForecast }    from "./pages/UIOForecast";
@@ -16,6 +15,7 @@ import { Orders }         from "./pages/Orders";
 import { Classification } from "./pages/Classification";
 import { RL }             from "./pages/RL";
 import { Catalog }        from "./pages/Catalog";
+import { MarketBasket }  from "./pages/MarketBasket";
 import { fetchPipeline, fetchPipelineFreshness, type PipelineStatus } from "./api/client";
 
 export default function App() {
@@ -35,7 +35,6 @@ export default function App() {
           <Routes>
             <Route path="/"               element={<Overview />} />
             <Route path="/bikes"          element={<BikeSales />} />
-            <Route path="/bike-eda"       element={<BikeEDA />} />
             <Route path="/mcsi-eda"       element={<McsiEDA />} />
             <Route path="/uio"            element={<UIO />} />
             <Route path="/uio-forecast"   element={<UIOForecast />} />
@@ -48,6 +47,7 @@ export default function App() {
             <Route path="/orders"         element={<Orders />} />
             <Route path="/rl"             element={<RL />} />
             <Route path="/catalog"        element={<Catalog />} />
+            <Route path="/market-basket"  element={<MarketBasket />} />
           </Routes>
         </main>
       </div>

@@ -5,10 +5,8 @@ from __future__ import annotations
 import json
 from datetime import UTC
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path  # noqa: TCH003
+from typing import Any
 
 import pandas as pd
 
@@ -28,9 +26,16 @@ def set_sales_targets(data: dict[str, Any]) -> None:
     _TARGETS_PATH.write_text(json.dumps(data, indent=2))
 
 
-@lru_cache(maxsize=1)
+_df_cache: dict[str, pd.DataFrame] = {}
+
+
 def _load(path: Path) -> pd.DataFrame:
-    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+    key = str(path)
+    if key not in _df_cache:
+        if not path.exists():
+            return pd.DataFrame()  # not cached — retry on next call
+        _df_cache[key] = pd.read_parquet(path)
+    return _df_cache[key]
 
 
 # ── Stages 1-8 ────────────────────────────────────────────────────────────────

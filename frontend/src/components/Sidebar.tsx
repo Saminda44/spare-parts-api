@@ -1,8 +1,8 @@
 import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard, TrendingUp, Package, ShoppingCart,
-  Zap, CheckCircle2, XCircle, Bike, BookOpen, BarChart2, FileText,
-  Activity, Search,
+  Zap, CheckCircle2, XCircle, BookOpen, BarChart2, FileText,
+  Activity, Search, GitMerge,
 } from "lucide-react";
 import type { PipelineStatus } from "../api/client";
 
@@ -14,7 +14,6 @@ const NAV_OVERVIEW = [
 // ── Motorcycles ───────────────────────────────────────────────────────────
 const NAV_MOTO = [
   { to: "/bikes",    label: "Bike Sales & Forecast", Icon: TrendingUp },
-  { to: "/bike-eda", label: "Dealer Performance",    Icon: Bike       },
   { to: "/mcsi-eda", label: "MCSI Sales EDA",        Icon: Search     },
   { to: "/uio",      label: "UIO Snapshot",           Icon: Activity   },
 ];
@@ -28,8 +27,9 @@ const NAV_PARTS_ANALYSIS = [
 ];
 
 const NAV_PARTS_DATA = [
-  { to: "/eda",   label: "Spare Parts Analysis", Icon: BarChart2 },
-  { to: "/parts", label: "Part Master",          Icon: BookOpen  },
+  { to: "/eda",           label: "Spare Parts Analysis", Icon: BarChart2  },
+  { to: "/market-basket", label: "Market Basket",        Icon: GitMerge   },
+  { to: "/parts",         label: "Part Master",          Icon: BookOpen   },
 ];
 
 const NAV_PARTS_CATALOG = [

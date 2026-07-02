@@ -16,13 +16,18 @@ from src.api.deps import (
 )
 from src.api.schemas import (
     AsePerfRow,
+    AssociationRule,
     CategoryMixRow,
+    CoOccurrenceGroup,
     DealerPerfRow,
     DistrictPerfRow,
     FillRateBandRow,
+    FrequentItemset,
     FulfillmentAnalysis,
     FulfillmentLineBucket,
     IntermittentSkuRow,
+    LargeInvoice,
+    MarketBasketResponse,
     McMonthlyCategoryPoint,
     MovementMonthlyPoint,
     MovementsResponse,
@@ -1843,4 +1848,163 @@ def get_spare_parts_eda() -> SparePartsEdaResponse:
         ingestion_summary=ingestion_summary,
         top_skus=top_skus,
         intermittent_skus=intermittent_skus,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Market Basket Analysis endpoint  (service.xlsx)
+# ─────────────────────────────────────────────────────────────────────────────
+@router.get("/market-basket")
+def market_basket(
+    min_support: float = Query(0.01, ge=0.001, le=1.0),
+    min_confidence: float = Query(0.05, ge=0.01, le=1.0),
+    min_lift: float = Query(1.0, ge=0.0),
+    max_rules: int = Query(200, ge=1, le=1000),
+) -> MarketBasketResponse:
+    """Market Basket Analysis on service.xlsx billing data.
+
+    Business meaning: discovers which spare parts are co-purchased on the
+    same invoice, enabling cross-selling recommendations and kitting decisions.
+    Basket = one Billing Document. Items = Material (part number).
+    Returns only actual sales (SlsVolQty > 0).
+    """
+    from pathlib import Path
+
+    from mlxtend.frequent_patterns import association_rules, fpgrowth
+    from mlxtend.preprocessing import TransactionEncoder
+
+    raw_path = Path("data/raw/service.xlsx")
+    df = pd.read_excel(raw_path, engine="openpyxl")
+
+    # Keep only actual sales (exclude returns / zero-qty lines)
+    df = df[df["SlsVolQty"] > 0].copy()
+
+    # Build baskets: one list of unique materials per Billing Document
+    baskets = (
+        df.groupby("Billing Document")["Material"]
+        .apply(lambda items: sorted(set(str(m).strip() for m in items)))
+        .tolist()
+    )
+
+    total_baskets = len(baskets)
+    multi_item = sum(1 for b in baskets if len(b) > 1)
+    all_mats = sorted({m for b in baskets for m in b})
+
+    # Top materials by frequency
+    mat_counts: dict[str, int] = {}
+    for b in baskets:
+        for m in b:
+            mat_counts[m] = mat_counts.get(m, 0) + 1
+    top_materials = [
+        {"material": k, "count": v, "support": round(v / total_baskets, 4)}
+        for k, v in sorted(mat_counts.items(), key=lambda x: -x[1])[:30]
+    ]
+
+    # Encode & mine
+    te = TransactionEncoder()
+    te_arr = te.fit(baskets).transform(baskets)
+    basket_df = pd.DataFrame(te_arr, columns=te.columns_)
+
+    fi = fpgrowth(basket_df, min_support=min_support, use_colnames=True)
+    fi["count"] = (fi["support"] * total_baskets).round().astype(int)
+
+    frequent_itemsets: list[FrequentItemset] = [
+        FrequentItemset(
+            items=sorted(row["itemsets"]),
+            support=round(float(row["support"]), 4),
+            count=int(row["count"]),
+        )
+        for _, row in fi.sort_values("support", ascending=False).head(50).iterrows()
+    ]
+
+    rules_out: list[AssociationRule] = []
+    if len(fi) > 0:
+        rules = association_rules(fi, metric="lift", min_threshold=min_lift, num_itemsets=len(fi))
+        rules = rules[rules["confidence"] >= min_confidence]
+        rules = rules.sort_values("lift", ascending=False).head(max_rules)
+        for _, r in rules.iterrows():
+            conv = float(r["conviction"]) if not np.isinf(r["conviction"]) else None
+            rules_out.append(
+                AssociationRule(
+                    antecedents=sorted(r["antecedents"]),
+                    consequents=sorted(r["consequents"]),
+                    support=round(float(r["support"]), 4),
+                    confidence=round(float(r["confidence"]), 4),
+                    lift=round(float(r["lift"]), 4),
+                    conviction=round(conv, 4) if conv is not None else None,
+                    antecedent_support=round(float(r["antecedent support"]), 4),
+                    consequent_support=round(float(r["consequent support"]), 4),
+                )
+            )
+
+    # Co-occurrence groups: all combos of size 2–4 that appear on the same invoice.
+    # Cap combo size at 4 to keep payload manageable for large baskets.
+    import math
+    from itertools import combinations
+
+    group_counts: dict[tuple[str, ...], int] = {}
+    for basket in baskets:
+        for r in range(2, len(basket) + 1):
+            for combo in combinations(basket, r):
+                key = tuple(sorted(combo))
+                group_counts[key] = group_counts.get(key, 0) + 1
+
+    # Keep only groups that appear in at least 2 baskets
+    groups: list[CoOccurrenceGroup] = []
+    for key, cnt in sorted(group_counts.items(), key=lambda x: -x[1]):
+        if cnt < 2:
+            continue
+        grp_sup = cnt / total_baskets
+        # Lift = support(group) / product of individual supports
+        ind_sups = [mat_counts.get(m, 0) / total_baskets for m in key]
+        expected = math.prod(ind_sups)
+        lift_val = (grp_sup / expected) if expected > 0 else 0.0
+        groups.append(
+            CoOccurrenceGroup(
+                items=list(key),
+                count=cnt,
+                support=round(grp_sup, 4),
+                lift=round(lift_val, 4),
+            )
+        )
+
+    # Large invoices: all invoices with 3+ items, sorted by size desc
+    inv_info = (
+        df.groupby("Billing Document")
+        .agg(
+            billing_date=("Billing Date", "first"),
+            payer=("Payer", "first"),
+            materials=("Material", lambda x: sorted(set(str(m).strip() for m in x))),
+        )
+        .reset_index()
+    )
+    inv_info["size"] = inv_info["materials"].apply(len)
+    inv_info = inv_info[inv_info["size"] >= 3].sort_values("size", ascending=False)
+
+    large_invoices: list[LargeInvoice] = []
+    for _, row in inv_info.iterrows():
+        bd_str = str(row["billing_date"])
+        if hasattr(row["billing_date"], "strftime"):
+            bd_str = row["billing_date"].strftime("%Y-%m-%d")
+        large_invoices.append(
+            LargeInvoice(
+                billing_document=str(row["Billing Document"]),
+                billing_date=bd_str,
+                payer=str(row["payer"]),
+                items=row["materials"],
+                item_count=int(row["size"]),
+            )
+        )
+
+    return MarketBasketResponse(
+        total_baskets=total_baskets,
+        multi_item_baskets=multi_item,
+        total_unique_materials=len(all_mats),
+        total_rules=len(rules_out),
+        max_basket_size=max((len(b) for b in baskets), default=0),
+        top_materials=top_materials,
+        frequent_itemsets=frequent_itemsets,
+        rules=rules_out,
+        groups=groups,
+        large_invoices=large_invoices,
     )

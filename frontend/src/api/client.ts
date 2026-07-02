@@ -306,12 +306,20 @@ export interface McsiEdaKpis {
 export interface McsiEdaYearRow  { year: number; units_sold: number; revenue_lkr: number; avg_monthly: number; }
 export interface McsiEdaModelRow { model: string; units_sold: number; revenue_lkr: number; share_pct: number; avg_revenue_per_unit: number; }
 export interface McsiEdaProvinceRow { province: string; units_sold: number; revenue_lkr: number; share_pct: number; dealer_count: number; }
+export interface McsiColorRow    { model: string; color: string; units_sold: number; }
+export interface McsiRmRow       { rm: string; units_sold: number; revenue_lkr: number; dealer_count: number; ase_count: number; share_pct: number; avg_revenue_per_unit: number; }
+export interface McsiAseRow      { ase: string; rm: string; units_sold: number; revenue_lkr: number; dealer_count: number; share_pct: number; }
+export interface McsiDistrictRow { province: string; district: string; units_sold: number; revenue_lkr: number; share_pct: number; }
 export interface McsiEdaData {
   kpis: McsiEdaKpis;
   monthly_trend: McsiMonthlyPoint[];
   by_year: McsiEdaYearRow[];
   by_model: McsiEdaModelRow[];
   by_province: McsiEdaProvinceRow[];
+  by_color: McsiColorRow[];
+  by_rm: McsiRmRow[];
+  by_ase: McsiAseRow[];
+  by_district: McsiDistrictRow[];
 }
 export const fetchMcsiEda = () => api.get<McsiEdaData>("/bikes/mcsi-eda").then(r => r.data);
 
@@ -365,6 +373,21 @@ export interface CrosstabRow { province: string; totals: Record<string, number>;
 export interface CrosstabData { models: string[]; rows: CrosstabRow[]; }
 export const fetchCrosstab = (year?: number) =>
   api.get<CrosstabData>("/bikes/crosstab", { params: year ? { year } : {} }).then(r => r.data);
+
+export interface DealerModelRow { dealer: string; dealer_code: string; province: string; rm: string; ase: string; total: number; totals: Record<string, number>; }
+export interface DealerModelMatrix { models: string[]; rows: DealerModelRow[]; }
+export const fetchDealerModelMatrix = () =>
+  api.get<DealerModelMatrix>("/bikes/dealer-model-matrix").then(r => r.data);
+
+export interface GeoMatrixRow { entity: string; total: number; totals: Record<string, number>; }
+export interface GeoMatrixLevel { models: string[]; rows: GeoMatrixRow[]; }
+export interface GeoModelData { rm: GeoMatrixLevel; ase: GeoMatrixLevel; province: GeoMatrixLevel; district: GeoMatrixLevel; }
+export const fetchGeoModel = () =>
+  api.get<GeoModelData>("/bikes/geo-model").then(r => r.data);
+
+export type GeoColorData = GeoModelData; // same shape, "models" field holds color names
+export const fetchGeoColor = () =>
+  api.get<GeoColorData>("/bikes/geo-color").then(r => r.data);
 
 // ── Stage 6: Part Master ───────────────────────────────────────────────────
 
@@ -870,3 +893,54 @@ export const fetchSalesEda    = (dealerType: DealerType = "MC", mcCategory: stri
   api.get<SalesEdaData>("/eda/sales", { params: { dealer_type: dealerType, mc_category: mcCategory, year }, timeout: 60_000 }).then(r => r.data);
 export const fetchMovements   = () => api.get<MovementsData>("/eda/movements").then(r => r.data);
 export const fetchSparePartsEda = () => api.get<SparePartsEdaData>("/eda/spare-parts").then(r => r.data);
+export interface AssociationRule {
+  antecedents: string[];
+  consequents: string[];
+  support: number;
+  confidence: number;
+  lift: number;
+  conviction: number | null;
+  antecedent_support: number;
+  consequent_support: number;
+}
+export interface FrequentItemset {
+  items: string[];
+  support: number;
+  count: number;
+}
+export interface CoOccurrenceGroup {
+  items: string[];
+  count: number;
+  support: number;
+  lift: number;
+}
+export interface LargeInvoice {
+  billing_document: string;
+  billing_date: string;
+  payer: string;
+  items: string[];
+  item_count: number;
+}
+export interface MarketBasketData {
+  total_baskets: number;
+  multi_item_baskets: number;
+  total_unique_materials: number;
+  total_rules: number;
+  max_basket_size: number;
+  top_materials: { material: string; count: number; support: number }[];
+  frequent_itemsets: FrequentItemset[];
+  rules: AssociationRule[];
+  groups: CoOccurrenceGroup[];
+  large_invoices: LargeInvoice[];
+}
+export const fetchMarketBasket = (
+  min_support = 0.01,
+  min_confidence = 0.05,
+  min_lift = 1.0,
+) =>
+  api
+    .get<MarketBasketData>("/eda/market-basket", {
+      params: { min_support, min_confidence, min_lift },
+      timeout: 90_000,
+    })
+    .then(r => r.data);
