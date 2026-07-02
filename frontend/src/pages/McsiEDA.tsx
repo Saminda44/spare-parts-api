@@ -709,7 +709,31 @@ export function McsiEDA() {
                 if (grp) grp.colors.push(col);
                 else modelGroups.push({ model: m, colors: [col] });
               }
-              const chartData = [...cr].reverse().map(r => ({ entity: r.entity, ...r.totals }));
+              // Chart data: one row per entity, one key per model (total across all colours)
+              // Also compute dominant colour per (entity, model) for per-cell fill
+              const groupedChartData = [...cr].reverse().map(r => {
+                const row: Record<string, string | number> = { entity: r.entity };
+                for (const g of modelGroups) {
+                  row[g.model] = g.colors.reduce((sum, c) => sum + (r.totals[`${g.model} – ${c}`] ?? 0), 0);
+                }
+                return row;
+              });
+              // domColorByEntityModel[entityName][modelName] = hex of dominant colour
+              const domColorByEntityModel: Record<string, Record<string, string>> = {};
+              for (const r of cr) {
+                domColorByEntityModel[r.entity] = {};
+                for (const g of modelGroups) {
+                  let maxV = 0; let hex = "#CBD5E1";
+                  for (const col of g.colors) {
+                    const v = r.totals[`${g.model} – ${col}`] ?? 0;
+                    if (v > maxV) { maxV = v; hex = getColorHex(col); }
+                  }
+                  domColorByEntityModel[r.entity][g.model] = hex;
+                }
+              }
+              const barH = 14;
+              const groupGap = 10;
+              const chartH = Math.max(260, cr.length * (modelGroups.length * barH + groupGap) + 40);
               return (
                 <div className="space-y-4">
                   <p className="text-xs text-slate-400">
@@ -717,11 +741,14 @@ export function McsiEDA() {
                     {" "}{modelGroups.length} models · heat-map intensity = column max
                   </p>
 
-                  {/* Stacked bar chart */}
+                  {/* Grouped bar chart — one cluster per entity, one bar per model */}
                   <div className="bg-white rounded-xl shadow-sm p-4">
-                    <p className="text-xs font-semibold text-slate-600 mb-3">Units by {entityLabel} — stacked by model × colour</p>
-                    <ResponsiveContainer width="100%" height={Math.max(200, cr.length * 30)}>
-                      <BarChart data={chartData} layout="vertical"
+                    <p className="text-xs font-semibold text-slate-600 mb-1">
+                      Units by {entityLabel} · grouped by model · bar colour = dominant colour variant
+                    </p>
+                    <p className="text-[10px] text-slate-400 mb-3">Hover a bar for exact model + units</p>
+                    <ResponsiveContainer width="100%" height={chartH}>
+                      <BarChart data={groupedChartData} layout="vertical"
                         margin={{ top: 0, right: 70, left: 8, bottom: 0 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
                         <XAxis type="number" tick={{ fontSize: 10 }}
@@ -730,16 +757,26 @@ export function McsiEDA() {
                         <Tooltip
                           formatter={(value: unknown, name: unknown) => [Number(value).toLocaleString(), String(name)]}
                           contentStyle={{ fontSize: 11 }}/>
-                        {combos.map(combo => {
-                          const sep = combo.indexOf(" – ");
-                          const colorPart = sep >= 0 ? combo.slice(sep + 3) : combo;
-                          return (
-                            <Bar key={combo} dataKey={combo} stackId="a"
-                              fill={getColorHex(colorPart)} name={combo}/>
-                          );
-                        })}
+                        {modelGroups.map(g => (
+                          <Bar key={g.model} dataKey={g.model} name={g.model} maxBarSize={barH}>
+                            {[...cr].reverse().map((r, ri) => (
+                              <Cell key={ri} fill={domColorByEntityModel[r.entity]?.[g.model] ?? "#CBD5E1"}/>
+                            ))}
+                          </Bar>
+                        ))}
                       </BarChart>
                     </ResponsiveContainer>
+                    {/* Model order legend — bars appear top-to-bottom within each cluster */}
+                    <div className="flex flex-wrap gap-2 mt-3">
+                      {[...modelGroups].reverse().map((g, i) => (
+                        <span key={g.model}
+                          className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border border-slate-200 text-slate-600 bg-slate-50">
+                          <span className="font-bold text-slate-400">{i + 1}</span>
+                          {g.model}
+                        </span>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-1">① = top bar in each cluster. Bar colour = dominant colour variant for that entity.</p>
                   </div>
 
                   <div className="overflow-x-auto">
