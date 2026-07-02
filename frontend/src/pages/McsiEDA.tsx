@@ -699,34 +699,56 @@ export function McsiEDA() {
                 : geoSub === "ase" ? "ASE"
                 : geoSub === "province" ? "Province"
                 : "District";
+              // Build model groups for grouped column headers
+              const modelGroups: { model: string; colors: string[] }[] = [];
+              for (const combo of combos) {
+                const sep = combo.indexOf(" – ");
+                const m = sep >= 0 ? combo.slice(0, sep) : combo;
+                const col = sep >= 0 ? combo.slice(sep + 3) : combo;
+                const grp = modelGroups.find(g => g.model === m);
+                if (grp) grp.colors.push(col);
+                else modelGroups.push({ model: m, colors: [col] });
+              }
               return (
                 <div className="space-y-3">
                   <p className="text-xs text-slate-400">
-                    {entityLabel} × Model × Color · {cr.length} entities · heat-map intensity = column max
+                    {entityLabel} × Model × Color · {cr.length} entities ·
+                    {" "}{modelGroups.length} models · heat-map intensity = column max
                   </p>
                   <div className="overflow-x-auto">
                     <table className="text-xs w-full border-collapse">
                       <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-left">
-                          <th className="py-2 px-2 font-semibold sticky left-0 bg-slate-50 z-10 min-w-[140px] uppercase">{entityLabel}</th>
-                          <th className="py-2 px-2 font-semibold text-right min-w-[52px] uppercase">Total</th>
-                          {combos.map(c => {
-                            const sepIdx = c.indexOf(" – ");
-                            const modelPart = sepIdx >= 0 ? c.slice(0, sepIdx) : c;
-                            const colorPart = sepIdx >= 0 ? c.slice(sepIdx + 3) : c;
-                            return (
-                              <th key={c} className="py-2 px-2 text-right font-semibold min-w-[110px]">
-                                <span className="inline-flex flex-col items-end gap-0.5">
-                                  <span className="text-slate-600 normal-case font-semibold text-[10px] leading-tight">{modelPart}</span>
-                                  <span className="inline-flex items-center gap-1">
-                                    <span className="w-2 h-2 rounded-full inline-block shrink-0"
-                                      style={{ background: getColorHex(colorPart) }}/>
-                                    <span className="text-[9px] uppercase text-slate-500">{colorPart}</span>
-                                  </span>
+                        {/* Row 1 — model group spans */}
+                        <tr className="text-left">
+                          <th rowSpan={2}
+                            className="py-2 px-2 font-semibold uppercase sticky left-0 bg-slate-100 z-10 min-w-[140px] border-b-2 border-slate-300 align-bottom">
+                            {entityLabel}
+                          </th>
+                          <th rowSpan={2}
+                            className="py-2 px-2 font-semibold uppercase text-right min-w-[52px] border-b-2 border-slate-300 align-bottom bg-slate-50">
+                            Total
+                          </th>
+                          {modelGroups.map(g => (
+                            <th key={g.model} colSpan={g.colors.length}
+                              className="py-1.5 px-2 text-center font-bold text-slate-700 bg-slate-100 border-l-2 border-slate-300 border-b border-slate-200">
+                              {g.model}
+                            </th>
+                          ))}
+                        </tr>
+                        {/* Row 2 — individual color sub-headers */}
+                        <tr className="bg-slate-50 border-b-2 border-slate-300 text-slate-500">
+                          {modelGroups.map(g =>
+                            g.colors.map((color, ci) => (
+                              <th key={`${g.model}–${color}`}
+                                className={`py-1.5 px-2 text-right font-medium min-w-[80px] ${ci === 0 ? "border-l-2 border-slate-300" : "border-l border-slate-100"}`}>
+                                <span className="inline-flex items-center justify-end gap-1">
+                                  <span className="w-2 h-2 rounded-full inline-block shrink-0"
+                                    style={{ background: getColorHex(color) }}/>
+                                  <span className="text-[9px] uppercase">{color}</span>
                                 </span>
                               </th>
-                            );
-                          })}
+                            ))
+                          )}
                         </tr>
                       </thead>
                       <tbody>
@@ -734,26 +756,28 @@ export function McsiEDA() {
                           <tr key={ri} className="border-b border-slate-100 hover:bg-slate-50/60">
                             <td className="py-1.5 px-2 font-medium text-slate-800 sticky left-0 bg-white z-10">{r.entity}</td>
                             <td className="py-1.5 px-2 text-right font-bold text-slate-800">{r.total.toLocaleString()}</td>
-                            {combos.map(c => {
-                              const sepIdx = c.indexOf(" – ");
-                              const colorPart = sepIdx >= 0 ? c.slice(sepIdx + 3) : c;
-                              const hex = getColorHex(colorPart);
-                              const v = r.totals[c] ?? 0;
-                              const opacity = v === 0 ? 0 : 0.12 + 0.78 * (v / colMax[c]);
-                              const bg = v > 0
-                                ? `${hex}${Math.round(opacity * 255).toString(16).padStart(2, "0")}`
-                                : "transparent";
-                              return (
-                                <td key={c} className="py-1.5 px-2 text-right"
-                                  style={{
-                                    background: bg,
-                                    color: opacity > 0.55 ? "#fff" : v > 0 ? "#1E293B" : "#CBD5E1",
-                                    fontWeight: v > 0 ? 600 : 400,
-                                  }}>
-                                  {v > 0 ? v.toLocaleString() : "—"}
-                                </td>
-                              );
-                            })}
+                            {modelGroups.map(g =>
+                              g.colors.map((color, ci) => {
+                                const combo = `${g.model} – ${color}`;
+                                const hex = getColorHex(color);
+                                const v = r.totals[combo] ?? 0;
+                                const opacity = v === 0 ? 0 : 0.12 + 0.78 * (v / colMax[combo]);
+                                const bg = v > 0
+                                  ? `${hex}${Math.round(opacity * 255).toString(16).padStart(2, "0")}`
+                                  : "transparent";
+                                return (
+                                  <td key={combo}
+                                    className={`py-1.5 px-2 text-right ${ci === 0 ? "border-l-2 border-slate-200" : "border-l border-slate-100"}`}
+                                    style={{
+                                      background: bg,
+                                      color: opacity > 0.55 ? "#fff" : v > 0 ? "#1E293B" : "#CBD5E1",
+                                      fontWeight: v > 0 ? 600 : 400,
+                                    }}>
+                                    {v > 0 ? v.toLocaleString() : "—"}
+                                  </td>
+                                );
+                              })
+                            )}
                           </tr>
                         ))}
                       </tbody>
