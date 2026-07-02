@@ -709,12 +709,39 @@ export function McsiEDA() {
                 if (grp) grp.colors.push(col);
                 else modelGroups.push({ model: m, colors: [col] });
               }
+              const chartData = [...cr].reverse().map(r => ({ entity: r.entity, ...r.totals }));
               return (
-                <div className="space-y-3">
+                <div className="space-y-4">
                   <p className="text-xs text-slate-400">
                     {entityLabel} × Model × Color · {cr.length} entities ·
                     {" "}{modelGroups.length} models · heat-map intensity = column max
                   </p>
+
+                  {/* Stacked bar chart */}
+                  <div className="bg-white rounded-xl shadow-sm p-4">
+                    <p className="text-xs font-semibold text-slate-600 mb-3">Units by {entityLabel} — stacked by model × colour</p>
+                    <ResponsiveContainer width="100%" height={Math.max(200, cr.length * 30)}>
+                      <BarChart data={chartData} layout="vertical"
+                        margin={{ top: 0, right: 70, left: 8, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
+                        <XAxis type="number" tick={{ fontSize: 10 }}
+                          tickFormatter={v => Number(v).toLocaleString()}/>
+                        <YAxis type="category" dataKey="entity" tick={{ fontSize: 10 }} width={110}/>
+                        <Tooltip
+                          formatter={(value: unknown, name: unknown) => [Number(value).toLocaleString(), String(name)]}
+                          contentStyle={{ fontSize: 11 }}/>
+                        {combos.map(combo => {
+                          const sep = combo.indexOf(" – ");
+                          const colorPart = sep >= 0 ? combo.slice(sep + 3) : combo;
+                          return (
+                            <Bar key={combo} dataKey={combo} stackId="a"
+                              fill={getColorHex(colorPart)} name={combo}/>
+                          );
+                        })}
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+
                   <div className="overflow-x-auto">
                     <table className="text-xs w-full border-collapse">
                       <thead>
