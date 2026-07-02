@@ -498,6 +498,56 @@ def get_geo_color() -> GeoColorResponse:
     )
 
 
+@router.get("/geo-model-color", response_model=GeoModelResponse)
+def get_geo_model_color() -> GeoModelResponse:
+    """Geo × (Model – Color) cross-tab: combined model + colour combos as columns.
+
+    Business meaning: shows which specific model-colour variants sell in each
+    territory, enabling precise stock-mix decisions per region.
+    """
+    mcsi = get_mcsi_clean()
+
+    if mcsi.empty or "Model" not in mcsi.columns:
+        empty = GeoMatrixLevel(models=[], rows=[])
+        return GeoModelResponse(rm=empty, ase=empty, province=empty, district=empty)
+
+    desc_split = mcsi["Material"].str.split(r"\s{2,}", n=1, expand=True)
+    mcsi = mcsi.copy()
+    mcsi["_desc"] = desc_split[1].str.strip() if 1 in desc_split.columns else ""
+    mcsi["_color"] = mcsi.apply(
+        lambda row: _extract_color_suffix(str(row.get("Model", "")), str(row["_desc"])),
+        axis=1,
+    )
+    src = mcsi[mcsi["_color"].notna()].copy()
+    src["_combo"] = src["Model"].astype(str) + " – " + src["_color"].astype(str)
+
+    def _build_combo_level(col: str | None) -> GeoMatrixLevel:
+        if not col or col not in src.columns or src.empty:
+            return GeoMatrixLevel(models=[], rows=[])
+        pivot = (
+            src.groupby([col, "_combo"])["VIN"].nunique().unstack(fill_value=0).reset_index()
+        )
+        combos = sorted(str(c) for c in pivot.columns if c != col)
+        pivot["_total"] = pivot[combos].sum(axis=1)
+        pivot = pivot.sort_values("_total", ascending=False).drop(columns=["_total"])
+        rows = [
+            GeoMatrixRow(
+                entity=str(r[col]),
+                total=int(sum(int(r[c]) for c in combos)),
+                totals={c: int(r[c]) for c in combos},
+            )
+            for _, r in pivot.iterrows()
+        ]
+        return GeoMatrixLevel(models=combos, rows=rows)
+
+    return GeoModelResponse(
+        rm=_build_combo_level("RM" if "RM" in src.columns else None),
+        ase=_build_combo_level("ASE" if "ASE" in src.columns else None),
+        province=_build_combo_level("Province" if "Province" in src.columns else None),
+        district=_build_combo_level("District" if "District" in src.columns else None),
+    )
+
+
 @router.get("/mcsi-eda", response_model=McsiEdaResponse)
 def get_mcsi_eda() -> McsiEdaResponse:
     """Full Stage-1 MCSI EDA: KPIs, return rate, year/model/province breakdowns."""

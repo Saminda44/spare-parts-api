@@ -4,7 +4,7 @@ import {
   ComposedChart, Line, Legend, PieChart, Pie,
 } from "recharts";
 import {
-  fetchMcsiEda, fetchBikeDealers, fetchCrosstab, fetchDealerModelMatrix, fetchGeoModel, fetchGeoColor,
+  fetchMcsiEda, fetchBikeDealers, fetchCrosstab, fetchDealerModelMatrix, fetchGeoModel, fetchGeoModelColor,
   type McsiEdaData, type DealersData, type CrosstabData, type DealerModelMatrix,
   type GeoModelData, type GeoMatrixLevel,
 } from "../api/client";
@@ -47,15 +47,15 @@ export function McsiEDA() {
   const [dlrSearch, setDlrSearch] = useState("");
   const [dlrYear,   setDlrYear]   = useState<number | undefined>(undefined);
   const [geoSub,      setGeoSub]      = useState<"rm" | "ase" | "province" | "district">("rm");
-  const [geoView,     setGeoView]     = useState<"overview" | "model" | "color">("overview");
+  const [geoView,     setGeoView]     = useState<"overview" | "model" | "model_color">("overview");
   const [dealerMatrix, setDealerMatrix] = useState<DealerModelMatrix | null>(null);
-  const [geoModel,    setGeoModel]    = useState<GeoModelData | null>(null);
-  const [geoColor,    setGeoColor]    = useState<GeoModelData | null>(null);
+  const [geoModel,      setGeoModel]      = useState<GeoModelData | null>(null);
+  const [geoModelColor, setGeoModelColor] = useState<GeoModelData | null>(null);
 
   useEffect(() => { fetchMcsiEda().then(setData); }, []);
   useEffect(() => { fetchDealerModelMatrix().then(setDealerMatrix); }, []);
   useEffect(() => { fetchGeoModel().then(setGeoModel); }, []);
-  useEffect(() => { fetchGeoColor().then(setGeoColor); }, []);
+  useEffect(() => { fetchGeoModelColor().then(setGeoModelColor); }, []);
   useEffect(() => {
     fetchBikeDealers(500, dlrYear).then(setDealers);
     fetchCrosstab(dlrYear).then(setCrosstab);
@@ -399,14 +399,14 @@ export function McsiEDA() {
               ))}
               {/* view toggle */}
               <div className="ml-auto flex gap-1">
-                {(["overview", "model", "color"] as const).map(v => (
+                {(["overview", "model", "model_color"] as const).map(v => (
                   <button key={v} onClick={() => setGeoView(v)}
                     className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors border ${
                       geoView === v
                         ? "bg-slate-700 text-white border-slate-700"
                         : "text-slate-400 border-slate-200 hover:bg-slate-50"
                     }`}>
-                    {v === "overview" ? "Overview" : v === "model" ? "× Model" : "× Color"}
+                    {v === "overview" ? "Overview" : v === "model" ? "× Model" : "× Model × Color"}
                   </button>
                 ))}
               </div>
@@ -686,15 +686,15 @@ export function McsiEDA() {
             })()}
 
             {/* ── × Color panel (entity-specific per sub-tab) ── */}
-            {geoView === "color" && (() => {
-              const level: GeoMatrixLevel | undefined = geoColor
-                ? geoColor[geoSub as keyof GeoModelData]
+            {geoView === "model_color" && (() => {
+              const level: GeoMatrixLevel | undefined = geoModelColor
+                ? geoModelColor[geoSub as keyof GeoModelData]
                 : undefined;
               if (!level || level.rows.length === 0)
                 return <div className="py-12 text-center text-slate-400">Loading…</div>;
-              const { models: colors, rows: cr } = level;
+              const { models: combos, rows: cr } = level;
               const colMax: Record<string, number> = {};
-              for (const c of colors) colMax[c] = Math.max(1, ...cr.map(r => r.totals[c] ?? 0));
+              for (const c of combos) colMax[c] = Math.max(1, ...cr.map(r => r.totals[c] ?? 0));
               const entityLabel = geoSub === "rm" ? "Regional Manager"
                 : geoSub === "ase" ? "ASE"
                 : geoSub === "province" ? "Province"
@@ -702,23 +702,31 @@ export function McsiEDA() {
               return (
                 <div className="space-y-3">
                   <p className="text-xs text-slate-400">
-                    {entityLabel} × Color · {cr.length} entities · SAP color names · heat-map intensity = column max
+                    {entityLabel} × Model × Color · {cr.length} entities · heat-map intensity = column max
                   </p>
                   <div className="overflow-x-auto">
                     <table className="text-xs w-full border-collapse">
                       <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-left">
-                          <th className="py-2 px-2 font-semibold sticky left-0 bg-slate-50 z-10 min-w-[140px]">{entityLabel}</th>
-                          <th className="py-2 px-2 font-semibold text-right min-w-[52px]">Total</th>
-                          {colors.map(c => (
-                            <th key={c} className="py-2 px-2 text-right font-semibold min-w-[100px]">
-                              <span className="inline-flex items-center gap-1">
-                                <span className="w-2 h-2 rounded-full inline-block shrink-0"
-                                  style={{ background: getColorHex(c) }}/>
-                                {c}
-                              </span>
-                            </th>
-                          ))}
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-left">
+                          <th className="py-2 px-2 font-semibold sticky left-0 bg-slate-50 z-10 min-w-[140px] uppercase">{entityLabel}</th>
+                          <th className="py-2 px-2 font-semibold text-right min-w-[52px] uppercase">Total</th>
+                          {combos.map(c => {
+                            const sepIdx = c.indexOf(" – ");
+                            const modelPart = sepIdx >= 0 ? c.slice(0, sepIdx) : c;
+                            const colorPart = sepIdx >= 0 ? c.slice(sepIdx + 3) : c;
+                            return (
+                              <th key={c} className="py-2 px-2 text-right font-semibold min-w-[110px]">
+                                <span className="inline-flex flex-col items-end gap-0.5">
+                                  <span className="text-slate-600 normal-case font-semibold text-[10px] leading-tight">{modelPart}</span>
+                                  <span className="inline-flex items-center gap-1">
+                                    <span className="w-2 h-2 rounded-full inline-block shrink-0"
+                                      style={{ background: getColorHex(colorPart) }}/>
+                                    <span className="text-[9px] uppercase text-slate-500">{colorPart}</span>
+                                  </span>
+                                </span>
+                              </th>
+                            );
+                          })}
                         </tr>
                       </thead>
                       <tbody>
@@ -726,9 +734,11 @@ export function McsiEDA() {
                           <tr key={ri} className="border-b border-slate-100 hover:bg-slate-50/60">
                             <td className="py-1.5 px-2 font-medium text-slate-800 sticky left-0 bg-white z-10">{r.entity}</td>
                             <td className="py-1.5 px-2 text-right font-bold text-slate-800">{r.total.toLocaleString()}</td>
-                            {colors.map(c => {
+                            {combos.map(c => {
+                              const sepIdx = c.indexOf(" – ");
+                              const colorPart = sepIdx >= 0 ? c.slice(sepIdx + 3) : c;
+                              const hex = getColorHex(colorPart);
                               const v = r.totals[c] ?? 0;
-                              const hex = getColorHex(c);
                               const opacity = v === 0 ? 0 : 0.12 + 0.78 * (v / colMax[c]);
                               const bg = v > 0
                                 ? `${hex}${Math.round(opacity * 255).toString(16).padStart(2, "0")}`
@@ -748,15 +758,6 @@ export function McsiEDA() {
                         ))}
                       </tbody>
                     </table>
-                  </div>
-                  {/* color legend */}
-                  <div className="flex flex-wrap gap-2 pt-1">
-                    {colors.map(c => (
-                      <span key={c} className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-medium text-white"
-                        style={{ background: getColorHex(c) }}>
-                        {c}
-                      </span>
-                    ))}
                   </div>
                 </div>
               );

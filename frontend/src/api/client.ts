@@ -389,6 +389,10 @@ export type GeoColorData = GeoModelData; // same shape, "models" field holds col
 export const fetchGeoColor = () =>
   api.get<GeoColorData>("/bikes/geo-color").then(r => r.data);
 
+// same shape — "models" field holds "ModelName – Color" combo strings
+export const fetchGeoModelColor = () =>
+  api.get<GeoModelData>("/bikes/geo-model-color").then(r => r.data);
+
 // ── Stage 6: Part Master ───────────────────────────────────────────────────
 
 export interface PartMasterRow {
