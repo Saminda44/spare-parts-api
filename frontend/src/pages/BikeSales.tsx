@@ -32,10 +32,12 @@ export function BikeSales() {
   const [forecastYear,  setForecastYear]  = useState<number | "All">("All");
   const [forecastRange, setForecastRange] = useState<TimeRange>("YTD");
   const [selectedModel, setSelectedModel] = useState<string>("All Models");
-  const [targets,       setTargets]       = useState<SalesTargets>({ yearly_target: 40000, monthly_overrides: {} });
-  const [showTargets,   setShowTargets]   = useState(false);
-  const [draftYearly,   setDraftYearly]   = useState("40000");
-  const [saving,        setSaving]        = useState(false);
+  const [targets,      setTargets]      = useState<SalesTargets>({ yearly_target: 40000, monthly_overrides: {} });
+  const [showTargets,  setShowTargets]  = useState(false);
+  const [draftYearly,  setDraftYearly]  = useState("40000");
+  const [draftMonthly, setDraftMonthly] = useState<Record<string, string>>({});
+  const [pinnedMonths, setPinnedMonths] = useState<Set<string>>(new Set());
+  const [saving,       setSaving]       = useState(false);
 
   useEffect(() => {
     fetchBikes().then(d => {
@@ -49,9 +51,94 @@ export function BikeSales() {
     fetchTargets().then(t => { setTargets(t); setDraftYearly(String(t.yearly_target)); });
   }, []);
 
+  const TARGET_YEAR = typeof forecastYear === "number" ? forecastYear : new Date().getFullYear();
+  const MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+  function monthKey(year: number, m: number) {
+    return `${year}-${String(m).padStart(2, "0")}`;
+  }
+
+  function buildMonthlyDraft(yearly: number, overrides: Record<string, number>, year: number) {
+    const def = Math.round(yearly / 12) || 0;
+    const draft: Record<string, string> = {};
+    for (let m = 1; m <= 12; m++) {
+      const k = monthKey(year, m);
+      draft[k] = String(overrides[k] ?? def);
+    }
+    return draft;
+  }
+
+  function openTargets() {
+    setDraftYearly(String(targets.yearly_target));
+    setDraftMonthly(buildMonthlyDraft(targets.yearly_target, targets.monthly_overrides, TARGET_YEAR));
+    setPinnedMonths(new Set(Object.keys(targets.monthly_overrides).filter(k => k.startsWith(`${TARGET_YEAR}-`))));
+    setShowTargets(true);
+  }
+
+  function rebalanceFree(
+    yearly: number,
+    pinned: Set<string>,
+    draft: Record<string, string>,
+    changedKey?: string,
+    changedVal?: string,
+  ): Record<string, string> {
+    const next = { ...draft };
+    if (changedKey !== undefined) next[changedKey] = changedVal ?? "";
+    const pinnedSum = [...pinned]
+      .filter(k => k.startsWith(`${TARGET_YEAR}-`))
+      .reduce((s, k) => s + (Number(next[k]) || 0), 0);
+    const freeMths: string[] = [];
+    for (let m = 1; m <= 12; m++) {
+      const mk = monthKey(TARGET_YEAR, m);
+      if (!pinned.has(mk)) freeMths.push(mk);
+    }
+    const remaining = Math.max(0, yearly - pinnedSum);
+    const freeCount = freeMths.length;
+    if (freeCount > 0) {
+      const base = Math.floor(remaining / freeCount);
+      const rem = remaining - base * freeCount;
+      freeMths.forEach((mk, i) => { next[mk] = String(base + (i < rem ? 1 : 0)); });
+    }
+    return next;
+  }
+
+  function handleYearlyChange(val: string) {
+    setDraftYearly(val);
+    const yearly = Number(val) || 0;
+    setDraftMonthly(prev => rebalanceFree(yearly, pinnedMonths, prev));
+  }
+
+  function handleMonthChange(k: string, val: string) {
+    const newPinned = new Set(pinnedMonths).add(k);
+    setPinnedMonths(newPinned);
+    setDraftMonthly(prev => rebalanceFree(Number(draftYearly) || 0, newPinned, prev, k, val));
+  }
+
+  function resetMonthlyToDefault() {
+    setPinnedMonths(new Set());
+    const def = Math.round(Number(draftYearly) / 12) || 0;
+    const reset: Record<string, string> = {};
+    for (let m = 1; m <= 12; m++) {
+      reset[monthKey(TARGET_YEAR, m)] = String(def);
+    }
+    setDraftMonthly(prev => ({ ...prev, ...reset }));
+  }
+
   function handleSaveTargets() {
     setSaving(true);
-    const updated: SalesTargets = { ...targets, yearly_target: Number(draftYearly) || 0 };
+    const yearly = Number(draftYearly) || 0;
+    const def = Math.round(yearly / 12);
+    // Only persist months that deviate from the default
+    const overrides: Record<string, number> = { ...targets.monthly_overrides };
+    for (const [k, v] of Object.entries(draftMonthly)) {
+      const num = Number(v) || 0;
+      if (num !== def) {
+        overrides[k] = num;
+      } else {
+        delete overrides[k];
+      }
+    }
+    const updated: SalesTargets = { yearly_target: yearly, monthly_overrides: overrides };
     saveTargets(updated).then(() => {
       setTargets(updated);
       setSaving(false);
@@ -252,7 +339,7 @@ export function BikeSales() {
               </div>
               <div className="flex-1"/>
               <button
-                onClick={() => setShowTargets(v => !v)}
+                onClick={showTargets ? () => setShowTargets(false) : openTargets}
                 className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-colors font-medium ${showTargets ? "bg-brand-blue text-white border-brand-blue" : "border-slate-300 text-slate-600 hover:bg-slate-50"}`}
               >
                 <Settings size={13}/> Set Targets
@@ -263,32 +350,92 @@ export function BikeSales() {
               </div>
             </div>
 
-            {showTargets && (
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex flex-wrap items-center gap-4">
-                <div className="flex items-center gap-2">
-                  <label className="text-xs font-medium text-slate-600">Yearly Target (units):</label>
-                  <input
-                    type="number"
-                    value={draftYearly}
-                    onChange={e => setDraftYearly(e.target.value)}
-                    className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm w-32 focus:outline-none focus:ring-2 focus:ring-brand-blue/30 bg-white"
-                  />
+            {showTargets && (() => {
+              const defVal = Math.round(Number(draftYearly) / 12) || 0;
+              const monthlySum = Object.entries(draftMonthly)
+                .filter(([k]) => k.startsWith(`${TARGET_YEAR}-`))
+                .reduce((s, [, v]) => s + (Number(v) || 0), 0);
+              const yearlyNum = Number(draftYearly) || 0;
+              const delta = monthlySum - yearlyNum;
+              return (
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-4">
+                  {/* ── Yearly row ── */}
+                  <div className="flex flex-wrap items-center gap-4">
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs font-medium text-slate-600">Yearly Target (units):</label>
+                      <input
+                        type="number"
+                        value={draftYearly}
+                        onChange={e => handleYearlyChange(e.target.value)}
+                        className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm w-32 focus:outline-none focus:ring-2 focus:ring-brand-blue/30 bg-white"
+                      />
+                    </div>
+                    <p className="text-xs text-slate-500 flex-1">
+                      Default per month = {defVal.toLocaleString()} units &nbsp;·&nbsp; Custom months show in <span className="text-blue-700 font-semibold">blue</span>
+                    </p>
+                  </div>
+
+                  {/* ── Monthly grid ── */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
+                        Monthly Targets — {TARGET_YEAR}
+                      </p>
+                      <button
+                        onClick={resetMonthlyToDefault}
+                        className="text-[11px] text-slate-400 hover:text-red-500 transition-colors"
+                      >
+                        Reset all to default
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-6 gap-2">
+                      {MONTH_LABELS.map((lbl, idx) => {
+                        const k = monthKey(TARGET_YEAR, idx + 1);
+                        const isCustom = pinnedMonths.has(k);
+                        return (
+                          <div key={k}>
+                            <p className="text-[10px] text-slate-500 text-center mb-1">{lbl}</p>
+                            <input
+                              type="number"
+                              value={draftMonthly[k] ?? defVal}
+                              onChange={e => handleMonthChange(k, e.target.value)}
+                              className={`w-full rounded-lg px-1 py-1.5 text-xs text-center focus:outline-none focus:ring-2 focus:ring-brand-blue/30 transition-colors ${
+                                isCustom
+                                  ? "border-2 border-blue-400 bg-blue-50 font-bold text-blue-800"
+                                  : "border border-slate-200 bg-white text-slate-700"
+                              }`}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {/* Sum vs yearly */}
+                    <div className="flex items-center gap-3 mt-2 text-xs text-slate-500">
+                      <span>Σ monthly = <strong className={delta === 0 ? "text-green-600" : "text-amber-600"}>{monthlySum.toLocaleString()}</strong></span>
+                      <span>vs yearly {yearlyNum.toLocaleString()}</span>
+                      {delta !== 0 && (
+                        <span className={`font-semibold ${delta > 0 ? "text-red-500" : "text-amber-600"}`}>
+                          {delta > 0 ? "+" : ""}{delta.toLocaleString()} {delta > 0 ? "over" : "under"}
+                        </span>
+                      )}
+                      {delta === 0 && <span className="text-green-600 font-semibold">✓ balanced</span>}
+                    </div>
+                  </div>
+
+                  {/* ── Actions ── */}
+                  <div className="flex items-center justify-end gap-2 pt-1 border-t border-blue-200">
+                    <button onClick={() => setShowTargets(false)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 transition-colors">
+                      <X size={13}/> Cancel
+                    </button>
+                    <button onClick={handleSaveTargets} disabled={saving}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-brand-blue text-white hover:bg-blue-700 transition-colors disabled:opacity-50">
+                      <Check size={13}/> {saving ? "Saving…" : "Save"}
+                    </button>
+                  </div>
                 </div>
-                <p className="text-xs text-slate-500 flex-1">
-                  Monthly default = yearly ÷ 12 ≈ {Math.round(Number(draftYearly) / 12).toLocaleString()} units/mo
-                </p>
-                <div className="flex items-center gap-2">
-                  <button onClick={() => setShowTargets(false)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 transition-colors">
-                    <X size={13}/> Cancel
-                  </button>
-                  <button onClick={handleSaveTargets} disabled={saving}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-brand-blue text-white hover:bg-blue-700 transition-colors disabled:opacity-50">
-                    <Check size={13}/> {saving ? "Saving…" : "Save"}
-                  </button>
-                </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* ── All Models: total forecast chart ── */}
             {selectedModel === "All Models" && (

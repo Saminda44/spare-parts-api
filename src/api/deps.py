@@ -115,6 +115,19 @@ def get_orders_clean() -> pd.DataFrame:
     return _load_orders_enriched()
 
 
+@lru_cache(maxsize=1)
+def get_dealers() -> pd.DataFrame:
+    """Load dealers.xlsx and return a normalised Dealer Code / Dealer Name master."""
+    path = DATA_RAW / "dealers.xlsx"
+    if not path.exists():
+        return pd.DataFrame(columns=["Dealer Code", "Dealer Name"])
+    df = pd.read_excel(path, dtype=str)
+    df.columns = df.columns.str.strip()
+    for col in df.select_dtypes("object").columns:
+        df[col] = df[col].fillna("").str.strip()
+    return df
+
+
 def get_orders_rejection_log() -> pd.DataFrame:
     return _load(DATA_INTERIM / "orders_rejection_log.parquet")
 

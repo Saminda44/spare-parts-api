@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Sidebar } from "./components/Sidebar";
 import { Overview }       from "./pages/Overview";
@@ -16,21 +15,12 @@ import { Classification } from "./pages/Classification";
 import { RL }             from "./pages/RL";
 import { Catalog }        from "./pages/Catalog";
 import { MarketBasket }  from "./pages/MarketBasket";
-import { fetchPipeline, fetchPipelineFreshness, type PipelineStatus } from "./api/client";
 
 export default function App() {
-  const [pipeline, setPipeline]     = useState<PipelineStatus | null>(null);
-  const [freshness, setFreshness]   = useState<Record<string, string | null>>({});
-
-  useEffect(() => {
-    fetchPipeline().then(setPipeline).catch(() => null);
-    fetchPipelineFreshness().then(setFreshness).catch(() => null);
-  }, []);
-
   return (
     <BrowserRouter>
       <div className="flex h-screen w-full font-sans bg-surface overflow-hidden">
-        <Sidebar pipeline={pipeline} freshness={freshness} />
+        <Sidebar />
         <main className="flex-1 flex flex-col overflow-hidden">
           <Routes>
             <Route path="/"               element={<Overview />} />

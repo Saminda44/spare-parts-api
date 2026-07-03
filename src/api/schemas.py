@@ -249,6 +249,64 @@ class PolicyResponse(BaseModel):
     ss_method_counts: dict[str, int]
 
 
+class UIOAdjustedRow(BaseModel):
+    material_9: str
+    description: str
+    abc: str
+    policy_tier: str
+    order_urgency: str
+    primary_model: str  # bike model most associated with this SKU
+    uio_current: int  # total MCSI units sold for that model (fleet proxy)
+    uio_historical: int  # MCSI units sold during demand-history period
+    uio_ratio: float  # uio_current / uio_historical (1.0 = no change)
+    base_roq: float  # Stage-12 rule-based ROQ
+    uio_adjusted_roq: float  # base_roq × uio_ratio (rounded)
+    delta: float  # uio_adjusted_roq − base_roq
+    delta_pct: float  # delta / base_roq × 100
+    net_requirement: float
+    stock_on_hand: float
+    unit_value_lkr: float
+
+
+class UIOAdjustedResponse(BaseModel):
+    total_skus: int
+    models_covered: int
+    avg_uio_ratio: float
+    rows: list[UIOAdjustedRow]
+
+
+class UIOServicePlanRow(BaseModel):
+    material_9: str
+    description: str
+    abc: str
+    policy_tier: str
+    order_urgency: str
+    catalog_models: str  # catalog model(s) for this part, empty if not in catalog
+    hist_months: int  # months of MC dealer order history used
+    hist_demand_total: float  # total confirmed qty across history window
+    avg_monthly: float  # avg confirmed qty per month from MC dealer orders
+    service_plan_qty: float  # avg_monthly × horizon_months
+    base_roq: float  # Stage-12 rule-based ROQ
+    net_requirement: float  # current stock gap from policy
+    recommended_order: float  # max(service_plan_qty, net_requirement)
+    delta_vs_roq: float  # service_plan_qty − base_roq
+    delta_pct: float  # delta_vs_roq / base_roq × 100
+    stock_on_hand: float
+    unit_value_lkr: float
+    in_catalog: bool  # True if SKU appears in catalog_parts.parquet
+
+
+class UIOServicePlanResponse(BaseModel):
+    total_skus: int
+    skus_with_history: int  # SKUs that have at least 1 month of MC order data
+    horizon_months: int  # planning horizon used (default 5)
+    avg_monthly_demand_total: float  # sum of avg_monthly across all SKUs
+    total_service_plan_value: float  # service_plan_qty × unit_value_lkr (all SKUs)
+    total_rule_based_value: float  # base_roq × unit_value_lkr (all SKUs)
+    value_delta: float  # total_service_plan_value − total_rule_based_value
+    rows: list[UIOServicePlanRow]
+
+
 class SanityRow(BaseModel):
     material_9: str
     description: str
@@ -1166,6 +1224,7 @@ class MarketBasketResponse(BaseModel):
 
 
 # ── ML Market Basket schemas ──────────────────────────────────────────────────
+
 
 class ItemSimilarity(BaseModel):
     item: str

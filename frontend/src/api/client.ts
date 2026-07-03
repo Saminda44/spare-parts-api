@@ -253,6 +253,70 @@ export const fetchPolicy = (params?: Record<string, unknown>) =>
 export const fetchSanity = (limit = 200) =>
   api.get<SanityRow[]>("/policy/sanity", { params: { limit } }).then(r => r.data);
 
+export interface UIOAdjustedRow {
+  material_9: string;
+  description: string;
+  abc: string;
+  policy_tier: string;
+  order_urgency: string;
+  primary_model: string;
+  uio_current: number;
+  uio_historical: number;
+  uio_ratio: number;
+  base_roq: number;
+  uio_adjusted_roq: number;
+  delta: number;
+  delta_pct: number;
+  net_requirement: number;
+  stock_on_hand: number;
+  unit_value_lkr: number;
+}
+
+export interface UIOAdjustedResponse {
+  total_skus: number;
+  models_covered: number;
+  avg_uio_ratio: number;
+  rows: UIOAdjustedRow[];
+}
+
+export const fetchUIOPlan = (limit = 500) =>
+  api.get<UIOAdjustedResponse>("/policy/uio-plan", { params: { limit } }).then(r => r.data);
+
+export interface UIOServicePlanRow {
+  material_9: string;
+  description: string;
+  abc: string;
+  policy_tier: string;
+  order_urgency: string;
+  catalog_models: string;
+  hist_months: number;
+  hist_demand_total: number;
+  avg_monthly: number;
+  service_plan_qty: number;
+  base_roq: number;
+  net_requirement: number;
+  recommended_order: number;
+  delta_vs_roq: number;
+  delta_pct: number;
+  stock_on_hand: number;
+  unit_value_lkr: number;
+  in_catalog: boolean;
+}
+
+export interface UIOServicePlanResponse {
+  total_skus: number;
+  skus_with_history: number;
+  horizon_months: number;
+  avg_monthly_demand_total: number;
+  total_service_plan_value: number;
+  total_rule_based_value: number;
+  value_delta: number;
+  rows: UIOServicePlanRow[];
+}
+
+export const fetchUIOServicePlan = (horizon_months = 5, limit = 500) =>
+  api.get<UIOServicePlanResponse>("/policy/uio-service-plan", { params: { horizon_months, limit } }).then(r => r.data);
+
 export const fetchRL = (params?: Record<string, unknown>) =>
   api.get<{ summary: RLSummary; rows: RLRow[] }>("/rl", { params }).then(r => r.data);
 

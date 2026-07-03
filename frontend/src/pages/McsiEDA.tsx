@@ -4,12 +4,12 @@ import {
   ComposedChart, Line, Legend, PieChart, Pie,
 } from "recharts";
 import {
-  fetchMcsiEda, fetchBikeDealers, fetchCrosstab, fetchDealerModelMatrix, fetchGeoModel, fetchGeoModelColor,
-  type McsiEdaData, type DealersData, type CrosstabData, type DealerModelMatrix,
+  fetchMcsiEda, fetchBikeDealers, fetchDealerModelMatrix, fetchGeoModel, fetchGeoModelColor,
+  type McsiEdaData, type DealersData, type DealerModelMatrix,
   type GeoModelData, type GeoMatrixLevel,
 } from "../api/client";
 import { KpiCard } from "../components/KpiCard";
-import { MapPin, TrendingUp, Users, RotateCcw, DollarSign } from "lucide-react";
+import { TrendingUp, Users, RotateCcw, DollarSign } from "lucide-react";
 
 const MODEL_COLORS  = ["#4361EE","#EF4444","#2CC56F","#FFC107","#7C3AED","#06B6D4","#F97316","#10B981","#EC4899","#94A3B8"];
 const PROV_COLORS   = ["#4361EE","#7C3AED","#2CC56F","#F97316","#EF4444","#06B6D4","#FFC107","#10B981","#EC4899","#94A3B8"];
@@ -42,7 +42,6 @@ type Tab = "trend" | "model" | "color" | "year" | "geo" | "dealer";
 export function McsiEDA() {
   const [data,     setData]     = useState<McsiEdaData | null>(null);
   const [dealers,  setDealers]  = useState<DealersData | null>(null);
-  const [crosstab, setCrosstab] = useState<CrosstabData | null>(null);
   const [tab,      setTab]      = useState<Tab>("trend");
   const [dlrSearch, setDlrSearch] = useState("");
   const [dlrYear,   setDlrYear]   = useState<number | undefined>(undefined);
@@ -51,15 +50,13 @@ export function McsiEDA() {
   const [dealerMatrix, setDealerMatrix] = useState<DealerModelMatrix | null>(null);
   const [geoModel,      setGeoModel]      = useState<GeoModelData | null>(null);
   const [geoModelColor, setGeoModelColor] = useState<GeoModelData | null>(null);
+  const [hoveredModel,  setHoveredModel]  = useState<string | null>(null);
 
   useEffect(() => { fetchMcsiEda().then(setData); }, []);
   useEffect(() => { fetchDealerModelMatrix().then(setDealerMatrix); }, []);
   useEffect(() => { fetchGeoModel().then(setGeoModel); }, []);
   useEffect(() => { fetchGeoModelColor().then(setGeoModelColor); }, []);
-  useEffect(() => {
-    fetchBikeDealers(500, dlrYear).then(setDealers);
-    fetchCrosstab(dlrYear).then(setCrosstab);
-  }, [dlrYear]);
+  useEffect(() => { fetchBikeDealers(500, dlrYear).then(setDealers); }, [dlrYear]);
 
   if (!data) return <div className="flex-1 flex items-center justify-center text-slate-400">Loading…</div>;
 
@@ -126,8 +123,8 @@ export function McsiEDA() {
         </p>
       </div>
 
-      {/* KPI row 1 */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      {/* KPI grid — single row on large screens */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         <KpiCard label="Total VINs Processed" value={fmt(kpis.total_vins)}
           sub={`${kpis.date_from} → ${kpis.date_to}`} color="blue"/>
         <KpiCard label="Bikes Sold" value={fmt(kpis.sold)}
@@ -137,16 +134,9 @@ export function McsiEDA() {
           color={kpis.return_rate_pct > 5 ? "red" : "amber"} icon={<RotateCcw size={18}/>}/>
         <KpiCard label="Total Revenue" value={`LKR ${fmt(kpis.total_revenue_lkr)}`}
           sub={`LKR ${fmt(kpis.avg_revenue_per_unit)} / unit`} color="purple" icon={<DollarSign size={18}/>}/>
-      </div>
-
-      {/* KPI row 2 */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard label="Active Provinces" value={kpis.active_provinces.toString()}
-          color="teal" icon={<MapPin size={18}/>}/>
-        <KpiCard label="Active Dealers"  value={fmt(kpis.active_dealers)}
+        <KpiCard label="Active Dealers" value={fmt(kpis.active_dealers)}
           color="blue" icon={<Users size={18}/>}/>
-        <KpiCard label="Models Sold"     value={kpis.models_sold.toString()}  color="purple"/>
-        <KpiCard label="Months of Data"  value={kpis.months_of_data.toString()} color="green"/>
+        <KpiCard label="Models Sold" value={kpis.models_sold.toString()} color="purple"/>
       </div>
 
       {/* Tab content */}
@@ -685,7 +675,7 @@ export function McsiEDA() {
               );
             })()}
 
-            {/* ── × Color panel (entity-specific per sub-tab) ── */}
+            {/* ── × Model × Color stacked column chart ── */}
             {geoView === "model_color" && (() => {
               const level: GeoMatrixLevel | undefined = geoModelColor
                 ? geoModelColor[geoSub as keyof GeoModelData]
@@ -693,160 +683,234 @@ export function McsiEDA() {
               if (!level || level.rows.length === 0)
                 return <div className="py-12 text-center text-slate-400">Loading…</div>;
               const { models: combos, rows: cr } = level;
-              const colMax: Record<string, number> = {};
-              for (const c of combos) colMax[c] = Math.max(1, ...cr.map(r => r.totals[c] ?? 0));
               const entityLabel = geoSub === "rm" ? "Regional Manager"
                 : geoSub === "ase" ? "ASE"
                 : geoSub === "province" ? "Province"
                 : "District";
-              // Build model groups for grouped column headers
-              const modelGroups: { model: string; colors: string[] }[] = [];
+
+              // One column per entity; stacked by "Model – Color" combo
+              // combos are already the stack keys; color extracted for fill
+              const chartData = cr.map(r => {
+                const d: Record<string, number | string> = { entity: r.entity };
+                for (const combo of combos) d[combo] = r.totals[combo] ?? 0;
+                return d;
+              });
+
+              // Per-combo fill: extract SAP color suffix from "Model – Color"
+              const comboFill = (combo: string): string => {
+                const sep = combo.indexOf(" – ");
+                return getColorHex(sep >= 0 ? combo.slice(sep + 3) : combo);
+              };
+
+              // Custom tooltip — shows only the hovered model's colors (non-zero)
+              const McColorTooltip = ({ active, payload, label }: {
+                active?: boolean;
+                payload?: Array<{ name: string; value: number; fill: string }>;
+                label?: string;
+              }) => {
+                if (!active || !payload) return null;
+                const entries = payload.filter(p => {
+                  if (Number(p.value) <= 0) return false;
+                  if (!hoveredModel) return true;
+                  const sep = p.name.indexOf(" – ");
+                  const model = sep >= 0 ? p.name.slice(0, sep) : p.name;
+                  return model === hoveredModel;
+                });
+                if (entries.length === 0) return null;
+                const modelTotal = entries.reduce((s, e) => s + Number(e.value), 0);
+                return (
+                  <div className="bg-white border border-slate-200 rounded-lg shadow-lg p-3 text-xs max-w-[240px]">
+                    <p className="font-bold text-slate-800 pb-1 mb-1 border-b border-slate-100">{label}</p>
+                    {hoveredModel && (
+                      <p className="font-semibold text-slate-600 mb-1.5">{hoveredModel}</p>
+                    )}
+                    {entries.map(e => {
+                      const sep = e.name.indexOf(" – ");
+                      const colorName = sep >= 0 ? e.name.slice(sep + 3) : e.name;
+                      return (
+                        <div key={e.name} className="flex items-center gap-1.5 py-0.5">
+                          <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: e.fill }}/>
+                          <span className="text-slate-500 flex-1 truncate">{colorName}</span>
+                          <span className="font-bold text-slate-800 ml-1">{Number(e.value).toLocaleString()}</span>
+                        </div>
+                      );
+                    })}
+                    {entries.length > 1 && (
+                      <div className="flex justify-between mt-1.5 pt-1.5 border-t border-slate-100">
+                        <span className="text-slate-400">Total</span>
+                        <span className="font-bold text-slate-800">{modelTotal.toLocaleString()}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              };
+
+              // Unique models → determines how many sub-bars per entity group
+              const modelSet = new Set<string>();
               for (const combo of combos) {
                 const sep = combo.indexOf(" – ");
-                const m = sep >= 0 ? combo.slice(0, sep) : combo;
-                const col = sep >= 0 ? combo.slice(sep + 3) : combo;
-                const grp = modelGroups.find(g => g.model === m);
-                if (grp) grp.colors.push(col);
-                else modelGroups.push({ model: m, colors: [col] });
+                modelSet.add(sep >= 0 ? combo.slice(0, sep) : combo);
               }
-              // Chart data: one row per entity, one key per model (total across all colours)
-              // Also compute dominant colour per (entity, model) for per-cell fill
-              const groupedChartData = [...cr].reverse().map(r => {
-                const row: Record<string, string | number> = { entity: r.entity };
-                for (const g of modelGroups) {
-                  row[g.model] = g.colors.reduce((sum, c) => sum + (r.totals[`${g.model} – ${c}`] ?? 0), 0);
-                }
-                return row;
-              });
-              // domColorByEntityModel[entityName][modelName] = hex of dominant colour
-              const domColorByEntityModel: Record<string, Record<string, string>> = {};
-              for (const r of cr) {
-                domColorByEntityModel[r.entity] = {};
-                for (const g of modelGroups) {
-                  let maxV = 0; let hex = "#CBD5E1";
-                  for (const col of g.colors) {
-                    const v = r.totals[`${g.model} – ${col}`] ?? 0;
-                    if (v > maxV) { maxV = v; hex = getColorHex(col); }
-                  }
-                  domColorByEntityModel[r.entity][g.model] = hex;
-                }
-              }
-              const barH = 14;
-              const groupGap = 10;
-              const chartH = Math.max(260, cr.length * (modelGroups.length * barH + groupGap) + 40);
+              const numModels = modelSet.size;
+              const numEntities = cr.length;
+
+              // Each entity group needs (numModels × barW) + groupGap px
+              const BAR_W = 28;
+              const GROUP_GAP = 20;
+              const Y_AXIS_W = 52;
+              const MARGIN_R = 24;
+              const minChartW = numEntities * (numModels * BAR_W + GROUP_GAP) + Y_AXIS_W + MARGIN_R + 40;
+              // Label area below x-axis (angled entity names)
+              const maxLabelLen = Math.max(...cr.map(r => r.entity.length));
+              const labelH = Math.min(100, Math.max(60, maxLabelLen * 5));
+              const chartH = 380 + labelH;
+
               return (
                 <div className="space-y-4">
                   <p className="text-xs text-slate-400">
-                    {entityLabel} × Model × Color · {cr.length} entities ·
-                    {" "}{modelGroups.length} models · heat-map intensity = column max
+                    {entityLabel} × Model × Color · {numEntities} entities · {numModels} models · {combos.length} color variants
                   </p>
-
-                  {/* Grouped bar chart — one cluster per entity, one bar per model */}
-                  <div className="bg-white rounded-xl shadow-sm p-4">
-                    <p className="text-xs font-semibold text-slate-600 mb-1">
-                      Units by {entityLabel} · grouped by model · bar colour = dominant colour variant
-                    </p>
-                    <p className="text-[10px] text-slate-400 mb-3">Hover a bar for exact model + units</p>
-                    <ResponsiveContainer width="100%" height={chartH}>
-                      <BarChart data={groupedChartData} layout="vertical"
-                        margin={{ top: 0, right: 70, left: 8, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
-                        <XAxis type="number" tick={{ fontSize: 10 }}
-                          tickFormatter={v => Number(v).toLocaleString()}/>
-                        <YAxis type="category" dataKey="entity" tick={{ fontSize: 10 }} width={110}/>
-                        <Tooltip
-                          formatter={(value: unknown, name: unknown) => [Number(value).toLocaleString(), String(name)]}
-                          contentStyle={{ fontSize: 11 }}/>
-                        {modelGroups.map(g => (
-                          <Bar key={g.model} dataKey={g.model} name={g.model} maxBarSize={barH}>
-                            {[...cr].reverse().map((r, ri) => (
-                              <Cell key={ri} fill={domColorByEntityModel[r.entity]?.[g.model] ?? "#CBD5E1"}/>
-                            ))}
-                          </Bar>
-                        ))}
-                      </BarChart>
-                    </ResponsiveContainer>
-                    {/* Model order legend — bars appear top-to-bottom within each cluster */}
-                    <div className="flex flex-wrap gap-2 mt-3">
-                      {[...modelGroups].reverse().map((g, i) => (
-                        <span key={g.model}
-                          className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border border-slate-200 text-slate-600 bg-slate-50">
-                          <span className="font-bold text-slate-400">{i + 1}</span>
-                          {g.model}
-                        </span>
-                      ))}
+                  <div className="bg-white rounded-xl shadow-sm p-4 overflow-x-auto">
+                    <div style={{ minWidth: minChartW }}>
+                      <ResponsiveContainer width="100%" height={chartH}>
+                        <BarChart data={chartData} barCategoryGap="20%" barGap={2}
+                          margin={{ top: 8, right: MARGIN_R, left: 8, bottom: labelH }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false}/>
+                          <XAxis dataKey="entity" tick={{ fontSize: 11, fill: "#475569" }}
+                            angle={-40} textAnchor="end" interval={0}/>
+                          <YAxis tick={{ fontSize: 10 }} width={Y_AXIS_W}
+                            tickFormatter={v => Number(v).toLocaleString()}/>
+                          <Tooltip content={<McColorTooltip/>} cursor={false}/>
+                          {combos.map(combo => {
+                            const sep = combo.indexOf(" – ");
+                            const model = sep >= 0 ? combo.slice(0, sep) : combo;
+                            const dimmed = hoveredModel !== null && hoveredModel !== model;
+                            return (
+                              <Bar key={combo} dataKey={combo} name={combo} stackId={model}
+                                maxBarSize={BAR_W} fill={comboFill(combo)}
+                                legendType="none"
+                                opacity={dimmed ? 0.2 : 1}
+                                onMouseEnter={() => setHoveredModel(model)}
+                                onMouseLeave={() => setHoveredModel(null)}/>
+                            );
+                          })}
+                        </BarChart>
+                      </ResponsiveContainer>
                     </div>
-                    <p className="text-[10px] text-slate-400 mt-1">① = top bar in each cluster. Bar colour = dominant colour variant for that entity.</p>
+                    {/* Custom model-only legend */}
+                    {(() => {
+                      const seen = new Set<string>();
+                      const modelEntries: { model: string; fill: string }[] = [];
+                      for (const combo of combos) {
+                        const sep = combo.indexOf(" – ");
+                        const model = sep >= 0 ? combo.slice(0, sep) : combo;
+                        if (!seen.has(model)) {
+                          seen.add(model);
+                          modelEntries.push({ model, fill: comboFill(combo) });
+                        }
+                      }
+                      return (
+                        <div className="flex flex-wrap gap-x-5 gap-y-2 justify-center mt-3 pt-3 border-t border-slate-100">
+                          {modelEntries.map(({ model, fill }) => (
+                            <div key={model}
+                              className={`flex items-center gap-1.5 cursor-default transition-opacity ${hoveredModel && hoveredModel !== model ? "opacity-30" : "opacity-100"}`}
+                              onMouseEnter={() => setHoveredModel(model)}
+                              onMouseLeave={() => setHoveredModel(null)}>
+                              <span className="w-3 h-3 rounded-sm shrink-0" style={{ background: fill }}/>
+                              <span className="text-xs text-slate-700 font-medium">{model}</span>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
                   </div>
 
-                  <div className="overflow-x-auto">
-                    <table className="text-xs w-full border-collapse">
-                      <thead>
-                        {/* Row 1 — model group spans */}
-                        <tr className="text-left">
-                          <th rowSpan={2}
-                            className="py-2 px-2 font-semibold uppercase sticky left-0 bg-slate-100 z-10 min-w-[140px] border-b-2 border-slate-300 align-bottom">
-                            {entityLabel}
-                          </th>
-                          <th rowSpan={2}
-                            className="py-2 px-2 font-semibold uppercase text-right min-w-[52px] border-b-2 border-slate-300 align-bottom bg-slate-50">
-                            Total
-                          </th>
-                          {modelGroups.map(g => (
-                            <th key={g.model} colSpan={g.colors.length}
-                              className="py-1.5 px-2 text-center font-bold text-slate-700 bg-slate-100 border-l-2 border-slate-300 border-b border-slate-200">
-                              {g.model}
+                  {/* ── × Model × Color matrix table ── */}
+                  {(() => {
+                  // Build model groups: { model, colors[] } in combo order
+                  const modelGroups: { model: string; colors: string[] }[] = [];
+                  for (const combo of combos) {
+                    const sep = combo.indexOf(" – ");
+                    const m = sep >= 0 ? combo.slice(0, sep) : combo;
+                    const c = sep >= 0 ? combo.slice(sep + 3) : combo;
+                    const grp = modelGroups.find(g => g.model === m);
+                    if (grp) grp.colors.push(c);
+                    else modelGroups.push({ model: m, colors: [c] });
+                  }
+                  // Per-column max for heat-map intensity
+                  const colMax: Record<string, number> = {};
+                  for (const combo of combos)
+                    colMax[combo] = Math.max(1, ...cr.map(r => r.totals[combo] ?? 0));
+
+                  return (
+                    <div className="bg-white rounded-xl shadow-sm overflow-x-auto">
+                      <table className="text-xs w-full border-collapse">
+                        <thead>
+                          <tr className="text-left">
+                            <th rowSpan={2}
+                              className="py-2 px-2 font-semibold uppercase sticky left-0 bg-slate-100 z-10 min-w-[140px] border-b-2 border-slate-300 align-bottom">
+                              {entityLabel}
                             </th>
-                          ))}
-                        </tr>
-                        {/* Row 2 — individual color sub-headers */}
-                        <tr className="bg-slate-50 border-b-2 border-slate-300 text-slate-500">
-                          {modelGroups.map(g =>
-                            g.colors.map((color, ci) => (
-                              <th key={`${g.model}–${color}`}
-                                className={`py-1.5 px-2 text-right font-medium min-w-[80px] ${ci === 0 ? "border-l-2 border-slate-300" : "border-l border-slate-100"}`}>
-                                <span className="inline-flex items-center justify-end gap-1">
-                                  <span className="w-2 h-2 rounded-full inline-block shrink-0"
-                                    style={{ background: getColorHex(color) }}/>
-                                  <span className="text-[9px] uppercase">{color}</span>
-                                </span>
+                            <th rowSpan={2}
+                              className="py-2 px-2 font-semibold uppercase text-right min-w-[52px] border-b-2 border-slate-300 align-bottom bg-slate-50">
+                              Total
+                            </th>
+                            {modelGroups.map(g => (
+                              <th key={g.model} colSpan={g.colors.length}
+                                className="py-1.5 px-2 text-center font-bold text-slate-700 bg-slate-100 border-l-2 border-slate-300 border-b border-slate-200">
+                                {g.model}
                               </th>
-                            ))
-                          )}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {cr.map((r, ri) => (
-                          <tr key={ri} className="border-b border-slate-100 hover:bg-slate-50/60">
-                            <td className="py-1.5 px-2 font-medium text-slate-800 sticky left-0 bg-white z-10">{r.entity}</td>
-                            <td className="py-1.5 px-2 text-right font-bold text-slate-800">{r.total.toLocaleString()}</td>
+                            ))}
+                          </tr>
+                          <tr className="bg-slate-50 border-b-2 border-slate-300 text-slate-500">
                             {modelGroups.map(g =>
-                              g.colors.map((color, ci) => {
-                                const combo = `${g.model} – ${color}`;
-                                const hex = getColorHex(color);
-                                const v = r.totals[combo] ?? 0;
-                                const opacity = v === 0 ? 0 : 0.12 + 0.78 * (v / colMax[combo]);
-                                const bg = v > 0
-                                  ? `${hex}${Math.round(opacity * 255).toString(16).padStart(2, "0")}`
-                                  : "transparent";
-                                return (
-                                  <td key={combo}
-                                    className={`py-1.5 px-2 text-right ${ci === 0 ? "border-l-2 border-slate-200" : "border-l border-slate-100"}`}
-                                    style={{
-                                      background: bg,
-                                      color: opacity > 0.55 ? "#fff" : v > 0 ? "#1E293B" : "#CBD5E1",
-                                      fontWeight: v > 0 ? 600 : 400,
-                                    }}>
-                                    {v > 0 ? v.toLocaleString() : "—"}
-                                  </td>
-                                );
-                              })
+                              g.colors.map((color, ci) => (
+                                <th key={`${g.model}–${color}`}
+                                  className={`py-1.5 px-2 text-right font-medium min-w-[80px] ${ci === 0 ? "border-l-2 border-slate-300" : "border-l border-slate-100"}`}>
+                                  <span className="inline-flex items-center justify-end gap-1">
+                                    <span className="w-2 h-2 rounded-full inline-block shrink-0"
+                                      style={{ background: getColorHex(color) }}/>
+                                    <span className="text-[9px] uppercase">{color}</span>
+                                  </span>
+                                </th>
+                              ))
                             )}
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                        </thead>
+                        <tbody>
+                          {cr.map((r, ri) => (
+                            <tr key={ri} className="border-b border-slate-100 hover:bg-slate-50/60">
+                              <td className="py-1.5 px-2 font-medium text-slate-800 sticky left-0 bg-white z-10">{r.entity}</td>
+                              <td className="py-1.5 px-2 text-right font-bold text-slate-800">{r.total.toLocaleString()}</td>
+                              {modelGroups.map(g =>
+                                g.colors.map((color, ci) => {
+                                  const combo = `${g.model} – ${color}`;
+                                  const hex = getColorHex(color);
+                                  const v = r.totals[combo] ?? 0;
+                                  const opacity = v === 0 ? 0 : 0.12 + 0.78 * (v / colMax[combo]);
+                                  const bg = v > 0
+                                    ? `${hex}${Math.round(opacity * 255).toString(16).padStart(2, "0")}`
+                                    : "transparent";
+                                  return (
+                                    <td key={combo}
+                                      className={`py-1.5 px-2 text-right ${ci === 0 ? "border-l-2 border-slate-200" : "border-l border-slate-100"}`}
+                                      style={{
+                                        background: bg,
+                                        color: opacity > 0.55 ? "#fff" : v > 0 ? "#1E293B" : "#CBD5E1",
+                                        fontWeight: v > 0 ? 600 : 400,
+                                      }}>
+                                      {v > 0 ? v.toLocaleString() : "—"}
+                                    </td>
+                                  );
+                                })
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                  })()}
                 </div>
               );
             })()}
@@ -938,36 +1002,6 @@ export function McsiEDA() {
                     )}
                   </div>
                 </div>
-
-                {/* Province × Model crosstab */}
-                {crosstab && crosstab.models.length > 0 && (
-                  <div className="bg-white rounded-xl shadow-sm p-5">
-                    <h3 className="text-sm font-semibold text-slate-700 mb-3">Province × Model Sales Matrix</h3>
-                    <div className="overflow-x-auto">
-                      <table className="text-xs w-full">
-                        <thead>
-                          <tr className="border-b border-slate-100 text-slate-500 uppercase">
-                            <th className="py-2 pr-3 text-left">Province</th>
-                            {crosstab.models.map(m => <th key={m} className="py-2 px-2 text-right">{m}</th>)}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {crosstab.rows.map(r => (
-                            <tr key={r.province} className="border-b border-slate-50 hover:bg-slate-50/50">
-                              <td className="py-2 pr-3 font-medium text-slate-700">{r.province}</td>
-                              {crosstab.models.map(m => (
-                                <td key={m} className="py-2 px-2 text-right"
-                                  style={{ color: (r.totals[m] ?? 0) === 0 ? "#CBD5E1" : "#1E293B" }}>
-                                  {(r.totals[m] ?? 0).toLocaleString()}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
 
                 {/* Dealer × Model matrix */}
                 {dealerMatrix && dealerMatrix.models.length > 0 && (() => {
