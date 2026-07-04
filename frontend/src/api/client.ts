@@ -457,6 +457,13 @@ export const fetchGeoColor = () =>
 export const fetchGeoModelColor = () =>
   api.get<GeoModelData>("/bikes/geo-model-color").then(r => r.data);
 
+export interface TargetBreakdownRow {
+  model: string; color: string;
+  historical_units: number; share_pct: number; allocated_units: number;
+}
+export const fetchTargetBreakdown = (monthKey: string, target: number) =>
+  api.get<TargetBreakdownRow[]>("/bikes/target-breakdown", { params: { month_key: monthKey, target } }).then(r => r.data);
+
 // ── Stage 6: Part Master ───────────────────────────────────────────────────
 
 export interface PartMasterRow {

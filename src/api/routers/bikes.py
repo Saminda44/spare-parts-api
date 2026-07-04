@@ -45,6 +45,7 @@ from src.api.schemas import (
     ModelForecastRow,
     SalesForecastRow,
     UIOComparisonResponse,
+    TargetBreakdownRow,
     UIODemandResponse,
     UIODemandRow,
     UIOExternalRow,
@@ -546,6 +547,61 @@ def get_geo_model_color() -> GeoModelResponse:
         province=_build_combo_level("Province" if "Province" in src.columns else None),
         district=_build_combo_level("District" if "District" in src.columns else None),
     )
+
+
+@router.get("/target-breakdown", response_model=list[TargetBreakdownRow])
+def get_target_breakdown(
+    target: int = Query(..., ge=0, description="Monthly target units to distribute"),
+    month_key: str = Query(..., description="YYYY-MM, used only for context — not filtered"),
+) -> list[TargetBreakdownRow]:
+    """Distribute a monthly unit target across Model × Color combos using last-12m MCSI shares.
+
+    Business meaning: shows how a target of N units would be allocated to each
+    model-colour variant based on the historical mix from the last 12 months,
+    enabling buyers to plan colour-level stock orders.
+    """
+    mcsi = get_mcsi_clean()
+    if mcsi.empty or "Model" not in mcsi.columns:
+        return []
+
+    # Filter to last 12 months
+    if "Billing Date" in mcsi.columns:
+        cutoff = pd.Timestamp.now() - pd.DateOffset(months=12)
+        dates = pd.to_datetime(mcsi["Billing Date"], errors="coerce")
+        recent = mcsi[dates >= cutoff].copy()
+        if recent.empty:
+            recent = mcsi.copy()  # fallback: use all history if last 12m is empty
+    else:
+        recent = mcsi.copy()
+
+    # Attach color using same extraction as geo-color
+    desc_split = recent["Material"].str.split(r"\s{2,}", n=1, expand=True)
+    recent["_desc"] = desc_split[1].str.strip() if 1 in desc_split.columns else ""
+    recent["_color"] = recent.apply(
+        lambda row: _extract_color_suffix(str(row.get("Model", "")), str(row["_desc"])),
+        axis=1,
+    )
+    src = recent[recent["_color"].notna()].copy()
+    if src.empty:
+        return []
+
+    combo_counts = src.groupby(["Model", "_color"])["VIN"].nunique()
+    total = int(combo_counts.sum())
+    if total == 0:
+        return []
+
+    rows: list[TargetBreakdownRow] = []
+    for (model, color), count in combo_counts.items():
+        share = count / total
+        rows.append(TargetBreakdownRow(
+            model=str(model),
+            color=str(color),
+            historical_units=int(count),
+            share_pct=round(share * 100, 2),
+            allocated_units=round(target * share),
+        ))
+
+    return sorted(rows, key=lambda r: r.allocated_units, reverse=True)
 
 
 @router.get("/mcsi-eda", response_model=McsiEdaResponse)

@@ -680,6 +680,14 @@ class GeoModelResponse(BaseModel):
     district: GeoMatrixLevel
 
 
+class TargetBreakdownRow(BaseModel):
+    model: str
+    color: str
+    historical_units: int
+    share_pct: float
+    allocated_units: int
+
+
 class GeoColorResponse(BaseModel):
     rm: GeoMatrixLevel  # entity = RM,       keys = SAP color names
     ase: GeoMatrixLevel  # entity = ASE,       keys = SAP color names

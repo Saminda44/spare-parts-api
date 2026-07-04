@@ -5,14 +5,28 @@ import {
 } from "recharts";
 import { Check } from "lucide-react";
 import {
-  fetchBikes, fetchModelForecast, fetchTargets, saveTargets,
-  type BikesData, type ModelForecastData, type SalesTargets,
+  fetchBikes, fetchModelForecast, fetchTargets, saveTargets, fetchTargetBreakdown,
+  type BikesData, type ModelForecastData, type SalesTargets, type TargetBreakdownRow,
 } from "../api/client";
 import { KpiCard } from "../components/KpiCard";
 import { TimePicker, filterByRange, type TimeRange, YearPicker, filterByYear, getYears, monthLabel } from "../components/TimePicker";
 
 const MODEL_COLORS = ["#4361EE","#EF4444","#2CC56F","#FFC107","#7C3AED","#06B6D4","#F97316","#94A3B8","#10B981","#EC4899"];
 const PROV_COLORS  = ["#4361EE","#7C3AED","#2CC56F","#F97316","#EF4444","#06B6D4","#FFC107","#10B981","#EC4899","#94A3B8"];
+
+function colorHex(name: string): string {
+  const u = name.toUpperCase();
+  if (u.includes("REDDISH YELLOW") || u.includes("YELLOW COCKTAIL")) return "#FFC107";
+  if (u.includes("YELLOW"))  return "#FFC107";
+  if (u.includes("ORANGE"))  return "#F97316";
+  if (u.includes("GREEN"))   return "#2CC56F";
+  if (u.includes("CYAN"))    return "#06B6D4";
+  if (u.includes("BLUE") || u.includes("PURPLISH")) return "#4361EE";
+  if (u.includes("GRAY") || u.includes("GREY"))     return "#94A3B8";
+  if (u.includes("RED"))     return "#EF4444";
+  if (u.includes("BLACK"))   return "#1E293B";
+  return "#CBD5E1";
+}
 
 function fmt(n: number) {
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
@@ -37,6 +51,9 @@ export function BikeSales() {
   const [draftMonthly, setDraftMonthly] = useState<Record<string, string>>({});
   const [pinnedMonths, setPinnedMonths] = useState<Set<string>>(new Set());
   const [saving,       setSaving]       = useState(false);
+  const [breakdownMonth, setBreakdownMonth] = useState<string | null>(null);
+  const [breakdown,      setBreakdown]      = useState<TargetBreakdownRow[] | null>(null);
+  const [breakdownLoading, setBreakdownLoading] = useState(false);
 
   useEffect(() => {
     fetchBikes().then(d => {
@@ -120,6 +137,13 @@ export function BikeSales() {
       reset[monthKey(TARGET_YEAR, m)] = String(def);
     }
     setDraftMonthly(prev => ({ ...prev, ...reset }));
+  }
+
+  function loadBreakdown(k: string, targetVal: number) {
+    setBreakdownMonth(k);
+    setBreakdownLoading(true);
+    setBreakdown(null);
+    fetchTargetBreakdown(k, targetVal).then(d => { setBreakdown(d); setBreakdownLoading(false); });
   }
 
   function handleSaveTargets() {
@@ -395,10 +419,13 @@ export function BikeSales() {
                               type="number"
                               value={draftMonthly[k] ?? defVal}
                               onChange={e => handleMonthChange(k, e.target.value)}
-                              className={`w-full rounded-lg px-1 py-1.5 text-xs text-center focus:outline-none focus:ring-2 focus:ring-brand-blue/30 transition-colors ${
-                                isCustom
-                                  ? "border-2 border-blue-400 bg-blue-50 font-bold text-blue-800"
-                                  : "border border-slate-200 bg-white text-slate-700"
+                              onFocus={() => loadBreakdown(k, Number(draftMonthly[k] ?? defVal))}
+                              className={`w-full rounded-lg px-1 py-1.5 text-xs text-center focus:outline-none transition-colors cursor-pointer ${
+                                breakdownMonth === k
+                                  ? "ring-2 ring-amber-400 border-amber-400 bg-amber-50 font-bold text-amber-800"
+                                  : isCustom
+                                    ? "border-2 border-blue-400 bg-blue-50 font-bold text-blue-800"
+                                    : "border border-slate-200 bg-white text-slate-700"
                               }`}
                             />
                           </div>
@@ -428,6 +455,54 @@ export function BikeSales() {
                 </div>
               );
             })()}
+
+            {/* ── Month breakdown panel ── */}
+            {breakdownMonth && (
+              <div className="bg-white rounded-xl shadow-sm border border-amber-200 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-slate-700">
+                    {breakdownMonth} — Target Distribution
+                    <span className="ml-1.5 text-amber-600 font-bold">
+                      ({Number(draftMonthly[breakdownMonth] ?? 0).toLocaleString()} units)
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400">Based on last 12 months MCSI mix</p>
+                </div>
+                {breakdownLoading && <p className="text-xs text-slate-400 animate-pulse">Loading…</p>}
+                {breakdown && (
+                  <div className="overflow-x-auto">
+                    <table className="text-xs w-full">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-left text-slate-500 uppercase tracking-wide">
+                          <th className="py-1.5 pr-3 font-medium">Model</th>
+                          <th className="py-1.5 pr-3 font-medium">Color</th>
+                          <th className="py-1.5 pr-3 text-right font-medium">Historical (12m)</th>
+                          <th className="py-1.5 pr-3 text-right font-medium">Share %</th>
+                          <th className="py-1.5 text-right font-bold text-slate-700">Allocated</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {breakdown.map((r, i) => (
+                          <tr key={i} className="border-b border-slate-50 hover:bg-amber-50/40 transition-colors">
+                            <td className="py-1.5 pr-3 font-medium text-slate-700">{r.model}</td>
+                            <td className="py-1.5 pr-3">
+                              <span className="inline-flex items-center gap-1.5">
+                                <span className="w-2.5 h-2.5 rounded-full inline-block shrink-0 border border-white shadow-sm"
+                                  style={{ background: colorHex(r.color) }}/>
+                                {r.color}
+                              </span>
+                            </td>
+                            <td className="py-1.5 pr-3 text-right text-slate-500">{r.historical_units.toLocaleString()}</td>
+                            <td className="py-1.5 pr-3 text-right text-slate-500">{r.share_pct.toFixed(1)}%</td>
+                            <td className="py-1.5 text-right font-bold text-amber-700">{r.allocated_units.toLocaleString()}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* ── All Models: total forecast chart ── */}
             {selectedModel === "All Models" && (
