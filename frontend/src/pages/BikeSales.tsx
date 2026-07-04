@@ -424,18 +424,22 @@ export function BikeSales() {
                         const isCustom = pinnedMonths.has(k);
                         return (
                           <div key={k}>
-                            <p className="text-[10px] text-slate-500 text-center mb-1">{lbl}</p>
+                            <p
+                              onClick={() => loadBreakdown(k, Number(draftMonthly[k] ?? defVal))}
+                              className={`text-[10px] text-center mb-1 cursor-pointer select-none transition-colors ${
+                                breakdownMonth === k
+                                  ? "text-amber-600 font-bold underline underline-offset-2"
+                                  : "text-slate-500 hover:text-amber-500"
+                              }`}
+                            >{lbl}</p>
                             <input
                               type="number"
                               value={draftMonthly[k] ?? defVal}
                               onChange={e => handleMonthChange(k, e.target.value)}
-                              onFocus={() => loadBreakdown(k, Number(draftMonthly[k] ?? defVal))}
-                              className={`w-full rounded-lg px-1 py-1.5 text-xs text-center focus:outline-none transition-colors cursor-pointer ${
-                                breakdownMonth === k
-                                  ? "ring-2 ring-amber-400 border-amber-400 bg-amber-50 font-bold text-amber-800"
-                                  : isCustom
-                                    ? "border-2 border-blue-400 bg-blue-50 font-bold text-blue-800"
-                                    : "border border-slate-200 bg-white text-slate-700"
+                              className={`w-full rounded-lg px-1 py-1.5 text-xs text-center focus:outline-none focus:ring-2 focus:ring-brand-blue/30 transition-colors ${
+                                isCustom
+                                  ? "border-2 border-blue-400 bg-blue-50 font-bold text-blue-800"
+                                  : "border border-slate-200 bg-white text-slate-700"
                               }`}
                             />
                           </div>
