@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, Fragment } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
   AreaChart, Area, Legend, ComposedChart, Line, LineChart,
@@ -51,8 +51,9 @@ export function BikeSales() {
   const [draftMonthly, setDraftMonthly] = useState<Record<string, string>>({});
   const [pinnedMonths, setPinnedMonths] = useState<Set<string>>(new Set());
   const [saving,       setSaving]       = useState(false);
-  const [breakdownMonth, setBreakdownMonth] = useState<string | null>(null);
-  const [breakdown,      setBreakdown]      = useState<TargetBreakdownRow[] | null>(null);
+  const [breakdownMonth,   setBreakdownMonth]   = useState<string | null>(null);
+  const [breakdown,        setBreakdown]        = useState<TargetBreakdownRow[] | null>(null);
+  const [breakdownTarget,  setBreakdownTarget]  = useState<number | null>(null);
   const [breakdownLoading, setBreakdownLoading] = useState(false);
 
   useEffect(() => {
@@ -151,6 +152,7 @@ export function BikeSales() {
 
   function loadBreakdown(k: string, targetVal: number) {
     setBreakdownMonth(k);
+    setBreakdownTarget(targetVal);
     setBreakdownLoading(true);
     setBreakdown(null);
     fetchTargetBreakdown(k, targetVal).then(d => { setBreakdown(d); setBreakdownLoading(false); });
@@ -478,10 +480,7 @@ export function BikeSales() {
                     <h3 className="text-sm font-semibold text-slate-700">
                       {breakdownMonth === "Yearly" ? "Yearly Target" : `${breakdownMonth} — Target`}
                       <span className="ml-1.5 text-amber-600 font-bold">
-                        ({(breakdownMonth === "Yearly"
-                          ? Number(draftYearly)
-                          : Number(draftMonthly[breakdownMonth] ?? 0)
-                        ).toLocaleString()} units)
+                        ({(breakdownTarget ?? 0).toLocaleString()} units)
                       </span>
                     </h3>
                     {breakdownMonth !== "Yearly" && (
@@ -496,38 +495,64 @@ export function BikeSales() {
                   <p className="text-xs text-slate-400">Based on last 12 months MCSI mix</p>
                 </div>
                 {breakdownLoading && <p className="text-xs text-slate-400 animate-pulse">Loading…</p>}
-                {breakdown && (
+                {breakdown && (() => {
+                  // Build ordered model groups preserving API sort (desc allocated)
+                  const groups: { model: string; rows: TargetBreakdownRow[] }[] = [];
+                  const seen = new Map<string, TargetBreakdownRow[]>();
+                  for (const r of breakdown) {
+                    if (!seen.has(r.model)) {
+                      const arr: TargetBreakdownRow[] = [];
+                      seen.set(r.model, arr);
+                      groups.push({ model: r.model, rows: arr });
+                    }
+                    seen.get(r.model)!.push(r);
+                  }
+                  return (
                   <div className="overflow-x-auto">
                     <table className="text-xs w-full">
                       <thead>
-                        <tr className="border-b border-slate-200 text-left text-slate-500 uppercase tracking-wide">
-                          <th className="py-1.5 pr-3 font-medium">Model</th>
-                          <th className="py-1.5 pr-3 font-medium">Color</th>
+                        <tr className="border-b-2 border-slate-200 text-left text-slate-500 uppercase tracking-wide">
+                          <th className="py-1.5 pr-3 font-medium">Model / Color</th>
                           <th className="py-1.5 pr-3 text-right font-medium">Historical (12m)</th>
                           <th className="py-1.5 pr-3 text-right font-medium">Share %</th>
                           <th className="py-1.5 text-right font-bold text-slate-700">Allocated</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {breakdown.map((r, i) => (
-                          <tr key={i} className="border-b border-slate-50 hover:bg-amber-50/40 transition-colors">
-                            <td className="py-1.5 pr-3 font-medium text-slate-700">{r.model}</td>
-                            <td className="py-1.5 pr-3">
-                              <span className="inline-flex items-center gap-1.5">
-                                <span className="w-2.5 h-2.5 rounded-full inline-block shrink-0 border border-white shadow-sm"
-                                  style={{ background: colorHex(r.color) }}/>
-                                {r.color}
-                              </span>
-                            </td>
-                            <td className="py-1.5 pr-3 text-right text-slate-500">{r.historical_units.toLocaleString()}</td>
-                            <td className="py-1.5 pr-3 text-right text-slate-500">{r.share_pct.toFixed(1)}%</td>
-                            <td className="py-1.5 text-right font-bold text-amber-700">{r.allocated_units.toLocaleString()}</td>
-                          </tr>
-                        ))}
+                        {groups.map(({ model, rows }) => {
+                          const histTotal  = rows.reduce((s, r) => s + r.historical_units, 0);
+                          const shareTotal = rows.reduce((s, r) => s + r.share_pct, 0);
+                          const allocTotal = rows.reduce((s, r) => s + r.allocated_units, 0);
+                          return (
+                            <Fragment key={model}>
+                              <tr className="bg-slate-50 border-t-2 border-slate-200">
+                                <td className="py-2 pr-3 font-semibold text-slate-800">{model}</td>
+                                <td className="py-2 pr-3 text-right text-slate-600 font-medium">{histTotal.toLocaleString()}</td>
+                                <td className="py-2 pr-3 text-right text-slate-600 font-medium">{shareTotal.toFixed(1)}%</td>
+                                <td className="py-2 text-right font-bold text-amber-700">{allocTotal.toLocaleString()}</td>
+                              </tr>
+                              {rows.map((r, i) => (
+                                <tr key={i} className="border-b border-slate-100 hover:bg-amber-50/30 transition-colors">
+                                  <td className="py-1 pl-5 pr-3">
+                                    <span className="inline-flex items-center gap-1.5 text-slate-600">
+                                      <span className="w-2 h-2 rounded-full shrink-0"
+                                        style={{ background: colorHex(r.color) }}/>
+                                      {r.color}
+                                    </span>
+                                  </td>
+                                  <td className="py-1 pr-3 text-right text-slate-400">{r.historical_units.toLocaleString()}</td>
+                                  <td className="py-1 pr-3 text-right text-slate-400">{r.share_pct.toFixed(1)}%</td>
+                                  <td className="py-1 text-right text-amber-600 font-medium">{r.allocated_units.toLocaleString()}</td>
+                                </tr>
+                              ))}
+                            </Fragment>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
-                )}
+                  );
+                })()}
               </div>
             )}
 
