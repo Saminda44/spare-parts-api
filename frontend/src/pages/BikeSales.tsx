@@ -38,6 +38,9 @@ export function BikeSales() {
   const [draftMonthly, setDraftMonthly] = useState<Record<string, string>>({});
   const [pinnedMonths, setPinnedMonths] = useState<Set<string>>(new Set());
   const [saving,       setSaving]       = useState(false);
+  // Live-tune: overrides the per-row target in the chart without saving
+  const [liveTarget,   setLiveTarget]   = useState<number | null>(null);
+  const [savingLive,   setSavingLive]   = useState(false);
 
   useEffect(() => {
     fetchBikes().then(d => {
@@ -48,7 +51,11 @@ export function BikeSales() {
       if (fcstYrs.length) setForecastYear(fcstYrs[0]);
     });
     fetchModelForecast().then(setModelFcst);
-    fetchTargets().then(t => { setTargets(t); setDraftYearly(String(t.yearly_target)); });
+    fetchTargets().then(t => {
+      setTargets(t);
+      setDraftYearly(String(t.yearly_target));
+      setLiveTarget(Math.round(t.yearly_target / 12));
+    });
   }, []);
 
   const TARGET_YEAR = typeof forecastYear === "number" ? forecastYear : new Date().getFullYear();
@@ -147,6 +154,20 @@ export function BikeSales() {
     });
   }
 
+  function saveLiveTarget() {
+    if (liveTarget === null) return;
+    setSavingLive(true);
+    const overrides: Record<string, number> = { ...targets.monthly_overrides };
+    for (let m = 1; m <= 12; m++) overrides[monthKey(TARGET_YEAR, m)] = liveTarget;
+    const updated: SalesTargets = { yearly_target: liveTarget * 12, monthly_overrides: overrides };
+    saveTargets(updated).then(() => {
+      setTargets(updated);
+      setDraftYearly(String(updated.yearly_target));
+      setSavingLive(false);
+      fetchBikes().then(setData);
+    });
+  }
+
   if (!data) return <div className="flex-1 flex items-center justify-center text-slate-400">Loading…</div>;
 
   const { mcsi, sales_forecast, uio_forecast } = data;
@@ -161,6 +182,11 @@ export function BikeSales() {
   // ── Time-filtered data ──────────────────────────────────────────────────────
   const mcsiTrend    = filterByRange(filterByYear(mcsi.monthly_trend, mcsiYear), mcsiRange);
   const fcstFiltered = filterByRange(filterByYear(sales_forecast, forecastYear), forecastRange);
+
+  // Live-tune: override per-row target with slider value so chart updates instantly
+  const liveVal = liveTarget ?? Math.round(targets.yearly_target / 12);
+  const sliderMax = Math.max(liveVal * 2, 8000);
+  const fcstChart = fcstFiltered.map(r => ({ ...r, target: liveVal }));
 
   // ── Model forecast pivot (period → { model: count }) ────────────────────────
   const allModels = modelFcst?.models ?? [];
@@ -337,7 +363,37 @@ export function BikeSales() {
                   </optgroup>
                 </select>
               </div>
-              <div className="flex-1"/>
+
+              {/* ── Live target tuner ── */}
+              <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 flex-1 min-w-[260px]">
+                <span className="text-[11px] font-semibold text-amber-700 whitespace-nowrap">Monthly target</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={sliderMax}
+                  step={50}
+                  value={liveVal}
+                  onChange={e => setLiveTarget(Number(e.target.value))}
+                  className="flex-1 accent-amber-500 h-1.5 cursor-pointer"
+                />
+                <input
+                  type="number"
+                  min={0}
+                  step={50}
+                  value={liveVal}
+                  onChange={e => setLiveTarget(Math.max(0, Number(e.target.value)))}
+                  className="w-20 border border-amber-300 rounded px-2 py-0.5 text-xs text-center font-bold text-amber-800 bg-white focus:outline-none focus:ring-1 focus:ring-amber-400"
+                />
+                <button
+                  onClick={saveLiveTarget}
+                  disabled={savingLive}
+                  title="Save this monthly target to all months in the current year"
+                  className="flex items-center gap-1 px-2 py-0.5 text-[11px] rounded bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 font-medium whitespace-nowrap transition-colors"
+                >
+                  <Check size={11}/> {savingLive ? "Saving…" : "Save"}
+                </button>
+              </div>
+
               <button
                 onClick={showTargets ? () => setShowTargets(false) : openTargets}
                 className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-colors font-medium ${showTargets ? "bg-brand-blue text-white border-brand-blue" : "border-slate-300 text-slate-600 hover:bg-slate-50"}`}
@@ -444,7 +500,7 @@ export function BikeSales() {
                   <h3 className="text-sm font-semibold text-slate-700 mb-1">Total — Actual vs Forecast (80% CI)</h3>
                   <p className="text-xs text-slate-400 mb-3">Shaded band = 80% confidence interval. Blue background = forecast horizon.</p>
                   <ResponsiveContainer width="100%" height={260}>
-                    <AreaChart data={fcstFiltered} margin={{ top:5, right:10, left:0, bottom:5 }}>
+                    <AreaChart data={fcstChart} margin={{ top:5, right:10, left:0, bottom:5 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
                       <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
                         tickFormatter={p => monthLabel(p, forecastYear !== "All")}/>
