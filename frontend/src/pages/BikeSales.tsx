@@ -70,6 +70,7 @@ export function BikeSales() {
       setDraftYearly(String(t.yearly_target));
       setDraftMonthly(buildMonthlyDraft(t.yearly_target, t.monthly_overrides, year));
       setPinnedMonths(new Set(Object.keys(t.monthly_overrides).filter(k => k.startsWith(`${year}-`))));
+      loadBreakdown("Yearly", t.yearly_target);
     });
   }, []);
 
@@ -456,16 +457,29 @@ export function BikeSales() {
               );
             })()}
 
-            {/* ── Month breakdown panel ── */}
+            {/* ── Breakdown panel (yearly default / month on focus) ── */}
             {breakdownMonth && (
               <div className="bg-white rounded-xl shadow-sm border border-amber-200 p-4 space-y-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-slate-700">
-                    {breakdownMonth} — Target Distribution
-                    <span className="ml-1.5 text-amber-600 font-bold">
-                      ({Number(draftMonthly[breakdownMonth] ?? 0).toLocaleString()} units)
-                    </span>
-                  </h3>
+                  <div className="flex items-center gap-3">
+                    <h3 className="text-sm font-semibold text-slate-700">
+                      {breakdownMonth === "Yearly" ? "Yearly Target" : `${breakdownMonth} — Target`}
+                      <span className="ml-1.5 text-amber-600 font-bold">
+                        ({(breakdownMonth === "Yearly"
+                          ? Number(draftYearly)
+                          : Number(draftMonthly[breakdownMonth] ?? 0)
+                        ).toLocaleString()} units)
+                      </span>
+                    </h3>
+                    {breakdownMonth !== "Yearly" && (
+                      <button
+                        onClick={() => loadBreakdown("Yearly", Number(draftYearly) || 0)}
+                        className="text-xs text-slate-400 hover:text-amber-600 transition-colors underline underline-offset-2"
+                      >
+                        ← Yearly
+                      </button>
+                    )}
+                  </div>
                   <p className="text-xs text-slate-400">Based on last 12 months MCSI mix</p>
                 </div>
                 {breakdownLoading && <p className="text-xs text-slate-400 animate-pulse">Loading…</p>}
