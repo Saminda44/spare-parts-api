@@ -91,43 +91,52 @@ export function BikeSales() {
     return draft;
   }
 
+  // lockUpToMonth: months 1..lockUpToMonth keep their current value; only later unpinned months rebalance.
   function rebalanceFree(
     yearly: number,
     pinned: Set<string>,
     draft: Record<string, string>,
     changedKey?: string,
     changedVal?: string,
+    lockUpToMonth: number = 0,
   ): Record<string, string> {
     const next = { ...draft };
     if (changedKey !== undefined) next[changedKey] = changedVal ?? "";
-    const pinnedSum = [...pinned]
-      .filter(k => k.startsWith(`${TARGET_YEAR}-`))
-      .reduce((s, k) => s + (Number(next[k]) || 0), 0);
+    let lockedSum = 0;
     const freeMths: string[] = [];
     for (let m = 1; m <= 12; m++) {
       const mk = monthKey(TARGET_YEAR, m);
-      if (!pinned.has(mk)) freeMths.push(mk);
+      if (m <= lockUpToMonth || pinned.has(mk)) {
+        lockedSum += Number(next[mk]) || 0;
+      } else {
+        freeMths.push(mk);
+      }
     }
-    const remaining = Math.max(0, yearly - pinnedSum);
+    const remaining = yearly - lockedSum;
     const freeCount = freeMths.length;
-    if (freeCount > 0) {
+    if (freeCount > 0 && remaining >= 0) {
       const base = Math.floor(remaining / freeCount);
       const rem = remaining - base * freeCount;
       freeMths.forEach((mk, i) => { next[mk] = String(base + (i < rem ? 1 : 0)); });
     }
+    // If freeCount === 0 or remaining < 0: leave values as-is — UI shows imbalance warning.
     return next;
   }
 
   function handleYearlyChange(val: string) {
     setDraftYearly(val);
     const yearly = Number(val) || 0;
-    setDraftMonthly(prev => rebalanceFree(yearly, pinnedMonths, prev));
+    // Only rebalance from the current calendar month onward; past months are frozen.
+    const lockUpto = new Date().getMonth(); // getMonth() is 0-based → equals (currentMonth - 1)
+    setDraftMonthly(prev => rebalanceFree(yearly, pinnedMonths, prev, undefined, undefined, lockUpto));
   }
 
   function handleMonthChange(k: string, val: string) {
     const newPinned = new Set(pinnedMonths).add(k);
     setPinnedMonths(newPinned);
-    setDraftMonthly(prev => rebalanceFree(Number(draftYearly) || 0, newPinned, prev, k, val));
+    // Freeze the edited month and everything before it; rebalance only what comes after.
+    const m = parseInt(k.split("-")[1]); // 1-12
+    setDraftMonthly(prev => rebalanceFree(Number(draftYearly) || 0, newPinned, prev, k, val, m));
   }
 
   function resetMonthlyToDefault() {
