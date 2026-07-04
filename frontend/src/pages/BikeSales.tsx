@@ -356,29 +356,6 @@ export function BikeSales() {
               <KpiCard label="Target Gap"     value={forecastOnly[0] ? `${(forecastOnly[0].target_gap ?? 0).toLocaleString()}` : "—"} sub="next month vs target" color={(forecastOnly[0]?.target_gap ?? 0) < 0 ? "red" : "green"}/>
             </div>
 
-            {/* Controls row */}
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-medium text-slate-500">Model:</span>
-                <select
-                  className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue/30 bg-white"
-                  value={selectedModel}
-                  onChange={e => setSelectedModel(e.target.value)}
-                >
-                  <option value="All Models">All Models (Total)</option>
-                  <optgroup label="By Model">
-                    {allModels.map(m => <option key={m} value={m}>{m}</option>)}
-                  </optgroup>
-                </select>
-              </div>
-
-              <div className="flex-1"/>
-              <div className="flex items-center gap-2">
-                <YearPicker years={getYears(sales_forecast)} value={forecastYear} onChange={setForecastYear}/>
-                <TimePicker value={forecastRange} onChange={setForecastRange}/>
-              </div>
-            </div>
-
             {/* ── Sales Targets — always-visible section ── */}
             {(() => {
               const defVal = Math.round(Number(draftYearly) / 12) || 0;
@@ -556,8 +533,31 @@ export function BikeSales() {
               </div>
             )}
 
-            {/* ── All Models: total forecast chart ── */}
-            {selectedModel === "All Models" && (
+            {/* ── Forecast chart — controls + chart ── */}
+            <div>
+              {/* Controls row — always visible regardless of selected model */}
+              <div className="flex flex-wrap items-center gap-3 mb-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-slate-500">Model:</span>
+                  <select
+                    className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue/30 bg-white"
+                    value={selectedModel}
+                    onChange={e => setSelectedModel(e.target.value)}
+                  >
+                    <option value="All Models">All Models (Total)</option>
+                    <optgroup label="By Model">
+                      {allModels.map(m => <option key={m} value={m}>{m}</option>)}
+                    </optgroup>
+                  </select>
+                </div>
+                <div className="flex-1"/>
+                <div className="flex items-center gap-2">
+                  <YearPicker years={getYears(sales_forecast)} value={forecastYear} onChange={setForecastYear}/>
+                  <TimePicker value={forecastRange} onChange={setForecastRange}/>
+                </div>
+              </div>
+
+              {selectedModel === "All Models" && (
               <>
                 <div>
                   <h3 className="text-sm font-semibold text-slate-700 mb-1">Total — Actual vs Forecast (80% CI)</h3>
@@ -608,8 +608,8 @@ export function BikeSales() {
               </>
             )}
 
-            {/* ── Single model: actuals + forecast line ── */}
-            {selectedModel !== "All Models" && (
+              {/* ── Single model: actuals + forecast line ── */}
+              {selectedModel !== "All Models" && (
               <div>
                 <h3 className="text-sm font-semibold text-slate-700 mb-1">
                   {selectedModel} — Actual vs Forecast
@@ -637,8 +637,8 @@ export function BikeSales() {
               </div>
             )}
 
-            {/* Table */}
-            {selectedModel === "All Models" ? (
+              {/* Table */}
+              {selectedModel === "All Models" ? (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
@@ -693,6 +693,7 @@ export function BikeSales() {
                 </table>
               </div>
             )}
+            </div>{/* end forecast section */}
           </div>
         )}
 
