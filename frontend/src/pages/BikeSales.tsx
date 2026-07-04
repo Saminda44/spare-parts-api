@@ -3,7 +3,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
   AreaChart, Area, Legend, ComposedChart, Line, LineChart,
 } from "recharts";
-import { Settings, X, Check } from "lucide-react";
+import { Check } from "lucide-react";
 import {
   fetchBikes, fetchModelForecast, fetchTargets, saveTargets,
   type BikesData, type ModelForecastData, type SalesTargets,
@@ -33,14 +33,10 @@ export function BikeSales() {
   const [forecastRange, setForecastRange] = useState<TimeRange>("YTD");
   const [selectedModel, setSelectedModel] = useState<string>("All Models");
   const [targets,      setTargets]      = useState<SalesTargets>({ yearly_target: 40000, monthly_overrides: {} });
-  const [showTargets,  setShowTargets]  = useState(false);
   const [draftYearly,  setDraftYearly]  = useState("40000");
   const [draftMonthly, setDraftMonthly] = useState<Record<string, string>>({});
   const [pinnedMonths, setPinnedMonths] = useState<Set<string>>(new Set());
   const [saving,       setSaving]       = useState(false);
-  // Live-tune: overrides the per-row target in the chart without saving
-  const [liveTarget,   setLiveTarget]   = useState<number | null>(null);
-  const [savingLive,   setSavingLive]   = useState(false);
 
   useEffect(() => {
     fetchBikes().then(d => {
@@ -52,9 +48,11 @@ export function BikeSales() {
     });
     fetchModelForecast().then(setModelFcst);
     fetchTargets().then(t => {
+      const year = new Date().getFullYear();
       setTargets(t);
       setDraftYearly(String(t.yearly_target));
-      setLiveTarget(Math.round(t.yearly_target / 12));
+      setDraftMonthly(buildMonthlyDraft(t.yearly_target, t.monthly_overrides, year));
+      setPinnedMonths(new Set(Object.keys(t.monthly_overrides).filter(k => k.startsWith(`${year}-`))));
     });
   }, []);
 
@@ -73,13 +71,6 @@ export function BikeSales() {
       draft[k] = String(overrides[k] ?? def);
     }
     return draft;
-  }
-
-  function openTargets() {
-    setDraftYearly(String(targets.yearly_target));
-    setDraftMonthly(buildMonthlyDraft(targets.yearly_target, targets.monthly_overrides, TARGET_YEAR));
-    setPinnedMonths(new Set(Object.keys(targets.monthly_overrides).filter(k => k.startsWith(`${TARGET_YEAR}-`))));
-    setShowTargets(true);
   }
 
   function rebalanceFree(
@@ -149,21 +140,6 @@ export function BikeSales() {
     saveTargets(updated).then(() => {
       setTargets(updated);
       setSaving(false);
-      setShowTargets(false);
-      fetchBikes().then(setData);
-    });
-  }
-
-  function saveLiveTarget() {
-    if (liveTarget === null) return;
-    setSavingLive(true);
-    const overrides: Record<string, number> = { ...targets.monthly_overrides };
-    for (let m = 1; m <= 12; m++) overrides[monthKey(TARGET_YEAR, m)] = liveTarget;
-    const updated: SalesTargets = { yearly_target: liveTarget * 12, monthly_overrides: overrides };
-    saveTargets(updated).then(() => {
-      setTargets(updated);
-      setDraftYearly(String(updated.yearly_target));
-      setSavingLive(false);
       fetchBikes().then(setData);
     });
   }
@@ -183,10 +159,6 @@ export function BikeSales() {
   const mcsiTrend    = filterByRange(filterByYear(mcsi.monthly_trend, mcsiYear), mcsiRange);
   const fcstFiltered = filterByRange(filterByYear(sales_forecast, forecastYear), forecastRange);
 
-  // Live-tune: override per-row target with slider value so chart updates instantly
-  const liveVal = liveTarget ?? Math.round(targets.yearly_target / 12);
-  const sliderMax = Math.max(liveVal * 2, 8000);
-  const fcstChart = fcstFiltered.map(r => ({ ...r, target: liveVal }));
 
   // ── Model forecast pivot (period → { model: count }) ────────────────────────
   const allModels = modelFcst?.models ?? [];
@@ -364,49 +336,15 @@ export function BikeSales() {
                 </select>
               </div>
 
-              {/* ── Live target tuner ── */}
-              <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 flex-1 min-w-[260px]">
-                <span className="text-[11px] font-semibold text-amber-700 whitespace-nowrap">Monthly target</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={sliderMax}
-                  step={50}
-                  value={liveVal}
-                  onChange={e => setLiveTarget(Number(e.target.value))}
-                  className="flex-1 accent-amber-500 h-1.5 cursor-pointer"
-                />
-                <input
-                  type="number"
-                  min={0}
-                  step={50}
-                  value={liveVal}
-                  onChange={e => setLiveTarget(Math.max(0, Number(e.target.value)))}
-                  className="w-20 border border-amber-300 rounded px-2 py-0.5 text-xs text-center font-bold text-amber-800 bg-white focus:outline-none focus:ring-1 focus:ring-amber-400"
-                />
-                <button
-                  onClick={saveLiveTarget}
-                  disabled={savingLive}
-                  title="Save this monthly target to all months in the current year"
-                  className="flex items-center gap-1 px-2 py-0.5 text-[11px] rounded bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 font-medium whitespace-nowrap transition-colors"
-                >
-                  <Check size={11}/> {savingLive ? "Saving…" : "Save"}
-                </button>
-              </div>
-
-              <button
-                onClick={showTargets ? () => setShowTargets(false) : openTargets}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-colors font-medium ${showTargets ? "bg-brand-blue text-white border-brand-blue" : "border-slate-300 text-slate-600 hover:bg-slate-50"}`}
-              >
-                <Settings size={13}/> Set Targets
-              </button>
+              <div className="flex-1"/>
               <div className="flex items-center gap-2">
                 <YearPicker years={getYears(sales_forecast)} value={forecastYear} onChange={setForecastYear}/>
                 <TimePicker value={forecastRange} onChange={setForecastRange}/>
               </div>
             </div>
 
-            {showTargets && (() => {
+            {/* ── Sales Targets — always-visible section ── */}
+            {(() => {
               const defVal = Math.round(Number(draftYearly) / 12) || 0;
               const monthlySum = Object.entries(draftMonthly)
                 .filter(([k]) => k.startsWith(`${TARGET_YEAR}-`))
@@ -415,6 +353,8 @@ export function BikeSales() {
               const delta = monthlySum - yearlyNum;
               return (
                 <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-4">
+                  <h3 className="text-sm font-semibold text-slate-700">Sales Targets</h3>
+
                   {/* ── Yearly row ── */}
                   <div className="flex flex-wrap items-center gap-4">
                     <div className="flex items-center gap-2">
@@ -478,12 +418,8 @@ export function BikeSales() {
                     </div>
                   </div>
 
-                  {/* ── Actions ── */}
-                  <div className="flex items-center justify-end gap-2 pt-1 border-t border-blue-200">
-                    <button onClick={() => setShowTargets(false)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 transition-colors">
-                      <X size={13}/> Cancel
-                    </button>
+                  {/* ── Save ── */}
+                  <div className="flex items-center justify-end pt-1 border-t border-blue-200">
                     <button onClick={handleSaveTargets} disabled={saving}
                       className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-brand-blue text-white hover:bg-blue-700 transition-colors disabled:opacity-50">
                       <Check size={13}/> {saving ? "Saving…" : "Save"}
@@ -500,7 +436,7 @@ export function BikeSales() {
                   <h3 className="text-sm font-semibold text-slate-700 mb-1">Total — Actual vs Forecast (80% CI)</h3>
                   <p className="text-xs text-slate-400 mb-3">Shaded band = 80% confidence interval. Blue background = forecast horizon.</p>
                   <ResponsiveContainer width="100%" height={260}>
-                    <AreaChart data={fcstChart} margin={{ top:5, right:10, left:0, bottom:5 }}>
+                    <AreaChart data={fcstFiltered} margin={{ top:5, right:10, left:0, bottom:5 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
                       <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
                         tickFormatter={p => monthLabel(p, forecastYear !== "All")}/>
