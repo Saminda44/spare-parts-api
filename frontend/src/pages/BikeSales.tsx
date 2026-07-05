@@ -58,6 +58,9 @@ export function BikeSales() {
   const [breakdownTarget,  setBreakdownTarget]  = useState<number | null>(null);
   const [breakdownLoading, setBreakdownLoading] = useState(false);
 
+  // Blend weight: 1 = 100% forecast, 0 = 100% target
+  const [blendWeight, setBlendWeight] = useState(0.5);
+
   // Uplift factors state
   const [upliftOpen,        setUpliftOpen]        = useState(false);
   const [upliftInputs,      setUpliftInputs]      = useState<Record<string, UpliftFactorsRow>>({});
@@ -798,6 +801,20 @@ export function BikeSales() {
 
               {/* Table */}
               {selectedModel === "All Models" ? (
+              <div className="space-y-3">
+                {/* Blend weight slider */}
+                <div className="flex items-center gap-3 px-1">
+                  <span className="text-xs text-slate-500 shrink-0 w-28">Forecast ↔ Target blend</span>
+                  <input
+                    type="range" min={0} max={100} step={5}
+                    value={Math.round(blendWeight * 100)}
+                    onChange={e => setBlendWeight(Number(e.target.value) / 100)}
+                    className="flex-1 accent-violet-600 h-1.5 cursor-pointer"
+                  />
+                  <span className="text-xs font-mono text-violet-600 shrink-0 w-24 text-right">
+                    {Math.round(blendWeight * 100)}% fcst + {Math.round((1 - blendWeight) * 100)}% target
+                  </span>
+                </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
@@ -805,6 +822,7 @@ export function BikeSales() {
                       <th className="py-2 pr-3">Period</th>
                       <th className="py-2 pr-3 text-right">Base Forecast</th>
                       <th className="py-2 pr-3 text-right text-violet-600">Adjusted</th>
+                      <th className="py-2 pr-3 text-right text-emerald-600">Combined</th>
                       <th className="py-2 pr-3 text-right">Lower 80%</th>
                       <th className="py-2 pr-3 text-right">Upper 80%</th>
                       <th className="py-2 pr-3 text-right">Actual</th>
@@ -818,7 +836,12 @@ export function BikeSales() {
                       const adjusted = r.actual != null
                         ? r.actual
                         : Math.round(r.forecast * (1 + upliftPct / 100));
-                      const adjGap = r.target != null ? adjusted - r.target : null;
+                      const combined = r.actual != null
+                        ? r.actual
+                        : r.target != null
+                          ? Math.round(blendWeight * adjusted + (1 - blendWeight) * r.target)
+                          : adjusted;
+                      const combinedGap = r.target != null ? combined - r.target : null;
                       return (
                       <tr key={r.period} className={`border-b border-slate-50 hover:bg-slate-50/50 ${r.is_forecast ? "bg-blue-50/30" : ""}`}>
                         <td className="py-2 pr-3 font-mono text-xs">{r.period}</td>
@@ -831,12 +854,13 @@ export function BikeSales() {
                             </span>
                           )}
                         </td>
+                        <td className="py-2 pr-3 text-right font-bold text-emerald-600">{combined.toLocaleString()}</td>
                         <td className="py-2 pr-3 text-right text-xs text-slate-400">{r.lower_80.toLocaleString()}</td>
                         <td className="py-2 pr-3 text-right text-xs text-slate-400">{r.upper_80.toLocaleString()}</td>
                         <td className="py-2 pr-3 text-right">{r.actual != null ? r.actual.toLocaleString() : <span className="text-slate-300">—</span>}</td>
                         <td className="py-2 pr-3 text-right text-xs text-amber-600">{r.target != null ? r.target.toLocaleString() : "—"}</td>
-                        <td className="py-2 text-right text-xs" style={{ color: (adjGap ?? 0) < 0 ? "#EF4444" : "#2CC56F" }}>
-                          {adjGap != null ? adjGap.toLocaleString() : "—"}
+                        <td className="py-2 text-right text-xs" style={{ color: (combinedGap ?? 0) < 0 ? "#EF4444" : "#2CC56F" }}>
+                          {combinedGap != null ? combinedGap.toLocaleString() : "—"}
                         </td>
                       </tr>
                       );
@@ -844,6 +868,7 @@ export function BikeSales() {
                   </tbody>
                 </table>
               </div>
+            </div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
