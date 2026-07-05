@@ -1,7 +1,7 @@
 import { useEffect, useState, Fragment } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
-  AreaChart, Area, Legend, ComposedChart, Line, LineChart,
+  AreaChart, Area, Legend, Line, LineChart,
 } from "recharts";
 import { Check } from "lucide-react";
 import {
@@ -14,7 +14,6 @@ import { KpiCard } from "../components/KpiCard";
 import { TimePicker, filterByRange, type TimeRange, YearPicker, filterByYear, getYears, monthLabel } from "../components/TimePicker";
 
 const MODEL_COLORS = ["#4361EE","#EF4444","#2CC56F","#FFC107","#7C3AED","#06B6D4","#F97316","#94A3B8","#10B981","#EC4899"];
-const PROV_COLORS  = ["#4361EE","#7C3AED","#2CC56F","#F97316","#EF4444","#06B6D4","#FFC107","#10B981","#EC4899","#94A3B8"];
 
 function colorHex(name: string): string {
   const u = name.toUpperCase();
@@ -37,14 +36,9 @@ function fmt(n: number) {
   return n.toLocaleString();
 }
 
-type Tab = "mcsi" | "forecast";
-
 export function BikeSales() {
   const [data,      setData]      = useState<BikesData | null>(null);
   const [modelFcst, setModelFcst] = useState<ModelForecastData | null>(null);
-  const [tab,       setTab]       = useState<Tab>("mcsi");
-  const [mcsiYear,      setMcsiYear]      = useState<number | "All">("All");
-  const [mcsiRange,     setMcsiRange]     = useState<TimeRange>("YTD");
   const [forecastYear,  setForecastYear]  = useState<number | "All">("All");
   const [forecastRange, setForecastRange] = useState<TimeRange>("YTD");
   const [selectedModel, setSelectedModel] = useState<string>("All Models");
@@ -70,8 +64,6 @@ export function BikeSales() {
   useEffect(() => {
     fetchBikes().then(d => {
       setData(d);
-      const mcsiYrs = getYears(d.mcsi.monthly_trend);
-      if (mcsiYrs.length) setMcsiYear(mcsiYrs[0]);
       const fcstYrs = getYears(d.sales_forecast);
       if (fcstYrs.length) setForecastYear(fcstYrs[0]);
     });
@@ -226,17 +218,13 @@ export function BikeSales() {
 
   if (!data) return <div className="flex-1 flex items-center justify-center text-slate-400">Loading…</div>;
 
-  const { mcsi, sales_forecast, uio_forecast } = data;
+  const { sales_forecast } = data;
 
   const actualSales  = sales_forecast.filter(r => !r.is_forecast);
   const latestActual = actualSales[actualSales.length - 1];
   const forecastOnly = sales_forecast.filter(r => r.is_forecast);
-  const uioActual    = uio_forecast.filter(r => !r.is_forecast);
-  const latestUIO    = uioActual[uioActual.length - 1];
-  const projectedUIO = uio_forecast[uio_forecast.length - 1];
 
   // ── Time-filtered data ──────────────────────────────────────────────────────
-  const mcsiTrend    = filterByRange(filterByYear(mcsi.monthly_trend, mcsiYear), mcsiRange);
   const fcstFiltered = filterByRange(filterByYear(sales_forecast, forecastYear), forecastRange);
 
 
@@ -274,124 +262,12 @@ export function BikeSales() {
     ), forecastRange);
   })();
 
-  const TABS: { key: Tab; label: string }[] = [
-    { key: "mcsi",     label: "MCSI Bike Sales (Stage 1)"    },
-    { key: "forecast", label: "Unit Sales Forecast (Stage 2)" },
-  ];
-
   return (
     <div className="flex-1 p-6 space-y-6 overflow-y-auto">
-      <h2 className="text-xl font-bold text-slate-800">Bike Sales &amp; Fleet Analytics</h2>
-      <p className="text-xs text-slate-500 -mt-4">Stages 1–3 · MCSI motorcycle sales, unit sales forecast, units-in-operation (UIO) growth model</p>
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard label="Total Bikes Sold"  value={fmt(mcsi.total_sold)}            sub={`${mcsi.date_from} → ${mcsi.date_to}`} color="blue"/>
-        <KpiCard label="Latest Monthly"    value={latestActual ? fmt(latestActual.actual ?? latestActual.forecast) : "—"} sub={latestActual?.period ?? ""} color="green"/>
-        <KpiCard label="12-mo Forecast"   value={fmt(forecastOnly.reduce((s,r)=>s+r.forecast,0))} sub="next 12 months" color="purple"/>
-        <KpiCard label="Current UIO"       value={fmt(latestUIO?.uio_total ?? 0)}   sub={`→ ${fmt(projectedUIO?.uio_total ?? 0)} by ${projectedUIO?.period ?? ""}`} color="teal"/>
-      </div>
+      <h2 className="text-xl font-bold text-slate-800">Unit Sales Forecast</h2>
+      <p className="text-xs text-slate-500 -mt-4">Stage 2 · Model-level unit sales forecast with uplift adjustments and monthly targets</p>
 
       <div className="bg-white rounded-xl shadow-sm p-5">
-        <div className="flex gap-1 mb-5 border-b border-slate-100 pb-2 flex-wrap">
-          {TABS.map(t => (
-            <button key={t.key} onClick={() => setTab(t.key)}
-              className={`px-4 py-1.5 text-sm rounded-lg font-medium transition-colors ${tab === t.key ? "bg-brand-blue text-white" : "text-slate-500 hover:bg-slate-50"}`}>
-              {t.label}
-            </button>
-          ))}
-        </div>
-
-        {/* ── MCSI tab ── */}
-        {tab === "mcsi" && (
-          <div className="space-y-5">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Monthly trend */}
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold text-slate-700">Monthly Sales — Units &amp; Revenue</h3>
-                  <div className="flex items-center gap-2">
-                    <YearPicker years={getYears(mcsi.monthly_trend)} value={mcsiYear} onChange={setMcsiYear}/>
-                    <TimePicker value={mcsiRange} onChange={setMcsiRange}/>
-                  </div>
-                </div>
-                <ResponsiveContainer width="100%" height={210}>
-                  <ComposedChart data={mcsiTrend} margin={{ top:5, right:44, left:0, bottom:5 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
-                    <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
-                      tickFormatter={p => monthLabel(p, mcsiYear !== "All")}/>
-                    <YAxis yAxisId="left"  tick={{ fontSize: 10 }} tickFormatter={fmt}/>
-                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10 }} tickFormatter={fmt}/>
-                    <Tooltip formatter={(v: unknown, name: unknown) => [`${name === "Revenue (LKR)" ? "LKR " : ""}${fmt(Number(v))}`, String(name)]}/>
-                    <Legend wrapperStyle={{ fontSize: 11 }}/>
-                    <Bar   yAxisId="left"  dataKey="sold"        name="Units Sold"    fill="#4361EE" radius={[3,3,0,0]} opacity={0.85}/>
-                    <Line  yAxisId="right" dataKey="revenue_lkr" name="Revenue (LKR)" stroke="#F97316" strokeWidth={2} dot={false}/>
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </div>
-
-              {/* By model */}
-              <div>
-                <h3 className="text-sm font-semibold text-slate-700 mb-2">Sales by Model</h3>
-                <ResponsiveContainer width="100%" height={210}>
-                  <BarChart data={mcsi.by_model} layout="vertical" margin={{ top:0, right:40, left:10, bottom:0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
-                    <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={fmt}/>
-                    <YAxis type="category" dataKey="model" tick={{ fontSize: 9 }} width={130}/>
-                    <Tooltip formatter={(v: unknown, n: unknown) => [Number(v).toLocaleString(), n === "count" ? "Units" : String(n)]}/>
-                    <Bar dataKey="count" radius={[0,3,3,0]}>
-                      {mcsi.by_model.map((d, i) => <Cell key={d.model} fill={MODEL_COLORS[i % MODEL_COLORS.length]}/>)}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            {/* Province breakdown */}
-            <div>
-              <h3 className="text-sm font-semibold text-slate-700 mb-2">Sales by Province</h3>
-              <ResponsiveContainer width="100%" height={180}>
-                <BarChart data={mcsi.by_province} margin={{ top:5, right:10, left:0, bottom:0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
-                  <XAxis dataKey="province" tick={{ fontSize: 11 }}/>
-                  <YAxis tick={{ fontSize: 11 }} tickFormatter={fmt}/>
-                  <Tooltip formatter={(v: unknown) => Number(v).toLocaleString()}/>
-                  <Bar dataKey="count" radius={[4,4,0,0]}>
-                    {mcsi.by_province.map((d, i) => <Cell key={d.province} fill={PROV_COLORS[i % PROV_COLORS.length]}/>)}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-
-            {/* Model table */}
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
-                    <th className="py-2 pr-4">Model</th>
-                    <th className="py-2 pr-4 text-right">Units Sold</th>
-                    <th className="py-2 text-right">Share %</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {mcsi.by_model.map((r, i) => (
-                    <tr key={r.model} className="border-b border-slate-50 hover:bg-slate-50/50">
-                      <td className="py-2 pr-4 flex items-center gap-2">
-                        <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ background: MODEL_COLORS[i % MODEL_COLORS.length] }}/>
-                        {r.model}
-                      </td>
-                      <td className="py-2 pr-4 text-right font-semibold">{r.count.toLocaleString()}</td>
-                      <td className="py-2 text-right text-slate-500">{r.pct.toFixed(1)}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-          </div>
-        )}
-
-        {/* ── Unit Sales Forecast tab ── */}
-        {tab === "forecast" && (
           <div className="space-y-5">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <KpiCard label="Latest Actual"  value={fmt(latestActual?.actual ?? 0)}    sub={latestActual?.period ?? ""} color="blue"/>
@@ -895,7 +771,6 @@ export function BikeSales() {
             )}
             </div>{/* end forecast section */}
           </div>
-        )}
 
       </div>
     </div>
