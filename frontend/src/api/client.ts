@@ -464,6 +464,21 @@ export interface TargetBreakdownRow {
 export const fetchTargetBreakdown = (monthKey: string, target: number) =>
   api.get<TargetBreakdownRow[]>("/bikes/target-breakdown", { params: { month_key: monthKey, target } }).then(r => r.data);
 
+export interface UpliftFactorsRow {
+  month_key: string;
+  promotion_pct: number;
+  new_model_pct: number;
+  dealer_pct: number;
+  pricing_pct: number;
+  other_pct: number;
+}
+export const fetchUpliftInputs = () =>
+  api.get<UpliftFactorsRow[]>("/bikes/uplift-inputs").then(r => r.data);
+export const saveUpliftInputs = (rows: UpliftFactorsRow[]) =>
+  api.post<{ ok: boolean }>("/bikes/uplift-inputs", rows).then(r => r.data);
+export const fetchDealerUpliftBaseline = () =>
+  api.get<Record<string, number>>("/bikes/dealer-uplift-baseline").then(r => r.data);
+
 // ── Stage 6: Part Master ───────────────────────────────────────────────────
 
 export interface PartMasterRow {

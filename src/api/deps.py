@@ -13,6 +13,7 @@ import pandas as pd
 from src.config.paths import DATA_INTERIM, DATA_OUTPUTS, DATA_RAW
 
 _TARGETS_PATH = DATA_INTERIM / "sales_targets.json"
+_UPLIFT_PATH  = DATA_INTERIM / "uplift_factors.json"
 
 
 def get_sales_targets() -> dict[str, Any]:
@@ -24,6 +25,17 @@ def get_sales_targets() -> dict[str, Any]:
 
 def set_sales_targets(data: dict[str, Any]) -> None:
     _TARGETS_PATH.write_text(json.dumps(data, indent=2))
+
+
+def get_uplift_factors() -> list[dict[str, Any]]:
+    if _UPLIFT_PATH.exists():
+        result: list[dict[str, Any]] = json.loads(_UPLIFT_PATH.read_text())
+        return result
+    return []
+
+
+def set_uplift_factors(data: list[dict[str, Any]]) -> None:
+    _UPLIFT_PATH.write_text(json.dumps(data, indent=2))
 
 
 _df_cache: dict[str, pd.DataFrame] = {}

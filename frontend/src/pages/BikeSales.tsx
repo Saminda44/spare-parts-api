@@ -6,7 +6,9 @@ import {
 import { Check } from "lucide-react";
 import {
   fetchBikes, fetchModelForecast, fetchTargets, saveTargets, fetchTargetBreakdown,
+  fetchUpliftInputs, saveUpliftInputs, fetchDealerUpliftBaseline,
   type BikesData, type ModelForecastData, type SalesTargets, type TargetBreakdownRow,
+  type UpliftFactorsRow,
 } from "../api/client";
 import { KpiCard } from "../components/KpiCard";
 import { TimePicker, filterByRange, type TimeRange, YearPicker, filterByYear, getYears, monthLabel } from "../components/TimePicker";
@@ -56,6 +58,12 @@ export function BikeSales() {
   const [breakdownTarget,  setBreakdownTarget]  = useState<number | null>(null);
   const [breakdownLoading, setBreakdownLoading] = useState(false);
 
+  // Uplift factors state
+  const [upliftOpen,        setUpliftOpen]        = useState(false);
+  const [upliftInputs,      setUpliftInputs]      = useState<Record<string, UpliftFactorsRow>>({});
+  const [dealerBaseline,    setDealerBaseline]    = useState<Record<string, number>>({});
+  const [savingUplift,      setSavingUplift]      = useState(false);
+
   useEffect(() => {
     fetchBikes().then(d => {
       setData(d);
@@ -73,6 +81,12 @@ export function BikeSales() {
       setPinnedMonths(new Set(Object.keys(t.monthly_overrides).filter(k => k.startsWith(`${year}-`))));
       loadBreakdown("Yearly", t.yearly_target);
     });
+    fetchUpliftInputs().then(rows => {
+      const map: Record<string, UpliftFactorsRow> = {};
+      rows.forEach(r => { map[r.month_key] = r; });
+      setUpliftInputs(map);
+    });
+    fetchDealerUpliftBaseline().then(setDealerBaseline);
   }, []);
 
   const TARGET_YEAR = typeof forecastYear === "number" ? forecastYear : new Date().getFullYear();
@@ -156,6 +170,33 @@ export function BikeSales() {
     setBreakdownLoading(true);
     setBreakdown(null);
     fetchTargetBreakdown(k, targetVal).then(d => { setBreakdown(d); setBreakdownLoading(false); });
+  }
+
+  function getUpliftRow(k: string): UpliftFactorsRow {
+    return upliftInputs[k] ?? {
+      month_key: k,
+      promotion_pct: 0, new_model_pct: 0,
+      dealer_pct: dealerBaseline[k] ?? 0,
+      pricing_pct: 0, other_pct: 0,
+    };
+  }
+
+  function setUpliftField(k: string, field: keyof Omit<UpliftFactorsRow, "month_key">, val: string) {
+    setUpliftInputs(prev => ({
+      ...prev,
+      [k]: { ...getUpliftRow(k), [field]: parseFloat(val) || 0 },
+    }));
+  }
+
+  function totalUpliftPct(k: string): number {
+    const r = getUpliftRow(k);
+    return r.promotion_pct + r.new_model_pct + r.dealer_pct + r.pricing_pct + r.other_pct;
+  }
+
+  function handleSaveUplift() {
+    setSavingUplift(true);
+    const rows = Object.values(upliftInputs);
+    saveUpliftInputs(rows).finally(() => setSavingUplift(false));
   }
 
   function handleSaveTargets() {
@@ -557,6 +598,124 @@ export function BikeSales() {
                 </div>
               </div>
 
+              {/* ── Uplift Factors accordion ── */}
+              {(() => {
+                const FACTORS: { key: keyof Omit<UpliftFactorsRow, "month_key">; label: string }[] = [
+                  { key: "promotion_pct",  label: "Promotions" },
+                  { key: "new_model_pct", label: "New Model" },
+                  { key: "dealer_pct",    label: "Dealer Exp." },
+                  { key: "pricing_pct",   label: "Pricing" },
+                  { key: "other_pct",     label: "Other" },
+                ];
+                return (
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    {/* Accordion header */}
+                    <button
+                      onClick={() => setUpliftOpen(o => !o)}
+                      className="w-full flex items-center justify-between px-4 py-2.5 bg-slate-50 hover:bg-slate-100 transition-colors text-left"
+                    >
+                      <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">
+                        ▲ Uplift Factors
+                        <span className="ml-2 font-normal text-slate-400 normal-case tracking-normal">
+                          — adjust base forecast for promotions, new models, dealer growth, pricing
+                        </span>
+                      </span>
+                      <span className="text-xs text-slate-400">{upliftOpen ? "▲ collapse" : "▼ expand"}</span>
+                    </button>
+
+                    {upliftOpen && (
+                      <div className="p-4 space-y-3 bg-white">
+                        <div className="overflow-x-auto">
+                          <table className="text-xs w-full">
+                            <thead>
+                              <tr className="border-b border-slate-200">
+                                <th className="py-1.5 pr-4 text-left font-medium text-slate-500 uppercase tracking-wide w-28">Factor</th>
+                                {MONTH_LABELS.map((lbl, idx) => {
+                                  const k = monthKey(TARGET_YEAR, idx + 1);
+                                  const tot = totalUpliftPct(k);
+                                  return (
+                                    <th key={k} className="py-1.5 px-1 text-center font-medium text-slate-500 min-w-[58px]">
+                                      <div>{lbl}</div>
+                                      {tot !== 0 && (
+                                        <div className={`text-[10px] font-bold ${tot > 0 ? "text-green-600" : "text-red-500"}`}>
+                                          {tot > 0 ? "+" : ""}{tot.toFixed(1)}%
+                                        </div>
+                                      )}
+                                    </th>
+                                  );
+                                })}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {FACTORS.map(({ key, label }) => (
+                                <tr key={key} className="border-b border-slate-50">
+                                  <td className="py-1.5 pr-4 font-medium text-slate-600">
+                                    {label}
+                                    {key === "dealer_pct" && (
+                                      <span className="ml-1 text-[10px] text-slate-400">*auto</span>
+                                    )}
+                                  </td>
+                                  {MONTH_LABELS.map((_, idx) => {
+                                    const k = monthKey(TARGET_YEAR, idx + 1);
+                                    const val = getUpliftRow(k)[key];
+                                    return (
+                                      <td key={k} className="py-1 px-1">
+                                        <div className="relative">
+                                          <input
+                                            type="number"
+                                            step="0.1"
+                                            value={val === 0 ? "" : val}
+                                            placeholder="0"
+                                            onChange={e => setUpliftField(k, key, e.target.value)}
+                                            className={`w-full rounded px-1 py-1 text-[11px] text-center border focus:outline-none focus:ring-1 focus:ring-brand-blue/40 ${
+                                              val > 0 ? "border-green-300 bg-green-50 text-green-700" :
+                                              val < 0 ? "border-red-300 bg-red-50 text-red-700" :
+                                              "border-slate-200 bg-white text-slate-500"
+                                            }`}
+                                          />
+                                          <span className="absolute right-1 top-1/2 -translate-y-1/2 text-[9px] text-slate-400 pointer-events-none">%</span>
+                                        </div>
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                              {/* Total row */}
+                              <tr className="bg-slate-50 font-semibold">
+                                <td className="py-1.5 pr-4 text-slate-700">Total uplift</td>
+                                {MONTH_LABELS.map((_, idx) => {
+                                  const k = monthKey(TARGET_YEAR, idx + 1);
+                                  const tot = totalUpliftPct(k);
+                                  return (
+                                    <td key={k} className={`py-1.5 px-1 text-center text-[11px] ${
+                                      tot > 0 ? "text-green-600" : tot < 0 ? "text-red-500" : "text-slate-400"
+                                    }`}>
+                                      {tot !== 0 ? `${tot > 0 ? "+" : ""}${tot.toFixed(1)}%` : "—"}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                        <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+                          <p className="text-[11px] text-slate-400">
+                            *Dealer Exp. auto-filled from MCSI active-dealer trend (0.8× elasticity) — editable
+                          </p>
+                          <button
+                            onClick={handleSaveUplift}
+                            disabled={savingUplift}
+                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-brand-blue text-white hover:bg-blue-700 transition-colors disabled:opacity-50"
+                          >
+                            <Check size={13}/> {savingUplift ? "Saving…" : "Save Uplift"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               {selectedModel === "All Models" && (
               <>
                 <div>
@@ -644,7 +803,8 @@ export function BikeSales() {
                   <thead>
                     <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
                       <th className="py-2 pr-3">Period</th>
-                      <th className="py-2 pr-3 text-right">Forecast</th>
+                      <th className="py-2 pr-3 text-right">Base Forecast</th>
+                      <th className="py-2 pr-3 text-right text-violet-600">Adjusted</th>
                       <th className="py-2 pr-3 text-right">Lower 80%</th>
                       <th className="py-2 pr-3 text-right">Upper 80%</th>
                       <th className="py-2 pr-3 text-right">Actual</th>
@@ -653,19 +813,34 @@ export function BikeSales() {
                     </tr>
                   </thead>
                   <tbody>
-                    {fcstFiltered.map(r => (
+                    {fcstFiltered.map(r => {
+                      const upliftPct = totalUpliftPct(r.period);
+                      const adjusted = r.actual != null
+                        ? r.actual
+                        : Math.round(r.forecast * (1 + upliftPct / 100));
+                      const adjGap = r.target != null ? adjusted - r.target : null;
+                      return (
                       <tr key={r.period} className={`border-b border-slate-50 hover:bg-slate-50/50 ${r.is_forecast ? "bg-blue-50/30" : ""}`}>
                         <td className="py-2 pr-3 font-mono text-xs">{r.period}</td>
                         <td className="py-2 pr-3 text-right font-semibold text-brand-blue">{r.forecast.toLocaleString()}</td>
+                        <td className="py-2 pr-3 text-right font-bold text-violet-600">
+                          {adjusted.toLocaleString()}
+                          {r.actual == null && upliftPct !== 0 && (
+                            <span className={`ml-1 text-[10px] font-normal ${upliftPct > 0 ? "text-green-500" : "text-red-400"}`}>
+                              ({upliftPct > 0 ? "+" : ""}{upliftPct.toFixed(1)}%)
+                            </span>
+                          )}
+                        </td>
                         <td className="py-2 pr-3 text-right text-xs text-slate-400">{r.lower_80.toLocaleString()}</td>
                         <td className="py-2 pr-3 text-right text-xs text-slate-400">{r.upper_80.toLocaleString()}</td>
                         <td className="py-2 pr-3 text-right">{r.actual != null ? r.actual.toLocaleString() : <span className="text-slate-300">—</span>}</td>
                         <td className="py-2 pr-3 text-right text-xs text-amber-600">{r.target != null ? r.target.toLocaleString() : "—"}</td>
-                        <td className="py-2 text-right text-xs" style={{ color: (r.target_gap ?? 0) < 0 ? "#EF4444" : "#2CC56F" }}>
-                          {r.target_gap != null ? r.target_gap.toLocaleString() : "—"}
+                        <td className="py-2 text-right text-xs" style={{ color: (adjGap ?? 0) < 0 ? "#EF4444" : "#2CC56F" }}>
+                          {adjGap != null ? adjGap.toLocaleString() : "—"}
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

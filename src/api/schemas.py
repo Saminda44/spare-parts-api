@@ -688,6 +688,19 @@ class TargetBreakdownRow(BaseModel):
     allocated_units: int
 
 
+class UpliftFactorsRow(BaseModel):
+    month_key: str
+    promotion_pct: float = 0.0
+    new_model_pct: float = 0.0
+    dealer_pct: float = 0.0
+    pricing_pct: float = 0.0
+    other_pct: float = 0.0
+
+    @property
+    def total_pct(self) -> float:
+        return self.promotion_pct + self.new_model_pct + self.dealer_pct + self.pricing_pct + self.other_pct
+
+
 class GeoColorResponse(BaseModel):
     rm: GeoMatrixLevel  # entity = RM,       keys = SAP color names
     ase: GeoMatrixLevel  # entity = ASE,       keys = SAP color names

@@ -14,7 +14,9 @@ from src.api.deps import (
     get_uio_external,
     get_uio_forecast,
     get_unit_sales_forecast,
+    get_uplift_factors,
     set_sales_targets,
+    set_uplift_factors,
 )
 from src.api.schemas import (
     BikesResponse,
@@ -46,6 +48,7 @@ from src.api.schemas import (
     SalesForecastRow,
     UIOComparisonResponse,
     TargetBreakdownRow,
+    UpliftFactorsRow,
     UIODemandResponse,
     UIODemandRow,
     UIOExternalRow,
@@ -946,6 +949,77 @@ def write_targets(body: dict = Body(...)) -> dict:  # noqa: B008
     """
     set_sales_targets(body)
     return {"ok": True}
+
+
+# ── Uplift Factors ────────────────────────────────────────────────────────────
+
+@router.get("/uplift-inputs", response_model=list[UpliftFactorsRow])
+def read_uplift_inputs() -> list[UpliftFactorsRow]:
+    """Return saved per-month uplift factor percentages."""
+    rows = get_uplift_factors()
+    return [UpliftFactorsRow(**r) for r in rows]
+
+
+@router.post("/uplift-inputs")
+def write_uplift_inputs(body: list[UpliftFactorsRow] = Body(...)) -> dict:  # noqa: B008
+    """Persist per-month uplift factors.
+
+    Body: list of { month_key, promotion_pct, new_model_pct, dealer_pct, pricing_pct, other_pct }
+    """
+    set_uplift_factors([r.model_dump() for r in body])
+    return {"ok": True}
+
+
+@router.get("/dealer-uplift-baseline")
+def get_dealer_uplift_baseline() -> dict[str, float]:
+    """Compute month-over-month dealer uplift % from MCSI active-dealer counts.
+
+    Business meaning: each additional active dealer relative to the 6-month
+    baseline contributes ~0.8% uplift (elasticity assumption). Returns a dict
+    of { period: uplift_pct } for every month present in MCSI data plus a
+    12-month forward projection using the trailing trend.
+    """
+    mcsi = get_mcsi_clean()
+    if mcsi.empty or "Billing Date" not in mcsi.columns or "Customer" not in mcsi.columns:
+        return {}
+
+    DEALER_ELASTICITY = 0.8  # 1% more active dealers → 0.8% more sales
+
+    dates = pd.to_datetime(mcsi["Billing Date"], errors="coerce")
+    mcsi = mcsi.copy()
+    mcsi["_period"] = dates.dt.to_period("M").astype(str)
+
+    # Active dealers per month = distinct Customer codes with at least one sale
+    monthly = (
+        mcsi.groupby("_period")["Customer"]
+        .nunique()
+        .sort_index()
+        .reset_index(name="dealer_count")
+    )
+    if len(monthly) < 2:
+        return {}
+
+    # Baseline = mean of first 6 months (or all available if fewer)
+    baseline_count = float(monthly["dealer_count"].iloc[: min(6, len(monthly))].mean())
+    if baseline_count == 0:
+        return {}
+
+    result: dict[str, float] = {}
+    for _, row in monthly.iterrows():
+        delta = float(row["dealer_count"]) - baseline_count
+        result[str(row["_period"])] = round(delta / baseline_count * 100 * DEALER_ELASTICITY, 2)
+
+    # Project the trailing 3-month average trend into the next 12 months
+    last_period = pd.Period(monthly["_period"].iloc[-1], freq="M")
+    trailing_avg_pct = (
+        sum(result[monthly["_period"].iloc[i]] for i in range(-min(3, len(monthly)), 0))
+        / min(3, len(monthly))
+    )
+    for i in range(1, 13):
+        fwd = str(last_period + i)
+        result[fwd] = round(trailing_avg_pct, 2)
+
+    return result
 
 
 @router.get("/uio-demand", response_model=UIODemandResponse)
