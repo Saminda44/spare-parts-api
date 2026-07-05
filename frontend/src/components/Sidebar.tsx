@@ -11,8 +11,8 @@ const NAV_OVERVIEW = [
 
 // ── Motorcycles ───────────────────────────────────────────────────────────
 const NAV_MOTO = [
-  { to: "/bikes",    label: "Bike Sales & Forecast", Icon: TrendingUp },
   { to: "/mcsi-eda", label: "MC Analysis",            Icon: Search     },
+  { to: "/bikes",    label: "MC Sales Forecast",      Icon: TrendingUp },
   { to: "/uio",      label: "UIO Snapshot",           Icon: Activity   },
 ];
 
