@@ -142,6 +142,12 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
     return "other";
   }
 
+  // Column index map (must stay in sync with catalog.py rows column order):
+  // 0=section  1=ref_no  2=part_no  3=description  4=qty
+  // 5=nine_digit_part_no  6=superseded_part_no  7=remarks  [8=kind when colour selected]
+  const COL_REMARKS = 7;
+  const COL_KIND    = 8;
+
   // ── All rows for selected variant (PDF order, variant qty decoded) ────────
   const extractedRows: string[][] = data.rows
     .filter(row => {
@@ -161,18 +167,18 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
   // Annotate every row with a Kind tag when a colour is selected.
   // Rows are NEVER hidden — the user always sees the complete motorcycle catalogue.
   const displayRows: string[][] = selColour
-    ? extractedRows.map(row => [...row.slice(0, 6), getRowKind(row[5] ?? "")])
+    ? extractedRows.map(row => [...row.slice(0, COL_REMARKS + 1), getRowKind(row[COL_REMARKS] ?? "")])
     : extractedRows;
 
   const sectionOptions: string[] = data.sections;
 
   // Colour breakdown counts (only meaningful when colour is selected)
   const colourSpecificCount = selColour
-    ? displayRows.filter(r => r[6] === "colour_specific").length : 0;
+    ? displayRows.filter(r => r[COL_KIND] === "colour_specific").length : 0;
   const sharedCount = selColour
-    ? displayRows.filter(r => r[6] === "shared").length : 0;
+    ? displayRows.filter(r => r[COL_KIND] === "shared").length : 0;
   const otherCount = selColour
-    ? displayRows.filter(r => r[6] === "other").length : 0;
+    ? displayRows.filter(r => r[COL_KIND] === "other").length : 0;
 
   const hasColourTabs = variantColours.length > 0 || (agentLoading && !agentResult);
 
@@ -387,8 +393,8 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
             <>
               {displayRows.map((row, ri) => {
                 const isFirstInSection = ri === 0 || row[0] !== displayRows[ri - 1][0];
-                // row[6] = kind when colour is selected: "shared" | "colour_specific" | "other"
-                const kind = row[6];
+                // kind tag is appended at COL_KIND when colour is selected
+                const kind = row[COL_KIND];
                 const rowBg = kind === "colour_specific"
                   ? (ri % 2 === 0 ? "bg-amber-50/60" : "bg-amber-50/90")
                   : kind === "shared"
@@ -399,14 +405,15 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
                 const rowOpacity = kind === "other" ? "opacity-40" : "";
                 return (
                   <tr key={ri} className={`${rowBg} ${rowOpacity}`}>
-                    {row.slice(0, 6).map((cell, ci) => (
+                    {row.slice(0, COL_REMARKS + 1).map((cell, ci) => (
                       <td key={ci}
                         className={`py-2 px-3 border-b border-slate-100 whitespace-nowrap
                           ${ci === 0 && isFirstInSection ? "font-semibold text-slate-800" : ""}
                           ${ci === 0 && !isFirstInSection ? "text-slate-300" : ""}
                           ${ci === 2 ? "font-mono text-xs text-slate-700" : ""}
                           ${ci === 4 ? "text-center font-semibold text-brand-blue" : ""}
-                          ${ci === 5 ? "text-slate-400 text-xs" : ""}
+                          ${ci === 5 || ci === 6 ? "font-mono text-xs text-indigo-600" : ""}
+                          ${ci === COL_REMARKS ? "text-slate-400 text-xs" : ""}
                         `}>
                         {ci === 0 && !isFirstInSection ? "" : cell}
                       </td>

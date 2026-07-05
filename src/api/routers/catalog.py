@@ -121,8 +121,10 @@ def extract_pdf_tables(
 ) -> dict[str, Any]:
     """Extract parts from one Yamaha PDF using YamahaCatalogueExtractor.
 
-    Returns the same seven-column layout as GPD155D-A_Parts_Catalogue.xlsx:
-        Section | Fig. No. | Ref. No. | Part No. | Description | Q'ty | Remarks
+    Returns up to nine columns depending on PDF type:
+        Section | Ref. No. | Part No. | Description | Q'ty
+        | 9 Digit Part No. | Superseded Part No. | Remarks
+    The extra columns are only populated for India-market PDFs that carry them.
     """
     target = (PDF_ROOT / file_path).resolve()
     if not str(target).startswith(str(PDF_ROOT)):
@@ -136,8 +138,10 @@ def extract_pdf_tables(
     if result.error:
         raise HTTPException(status_code=500, detail=result.error)
 
-    rows = [[r[c] for c in ["section", "ref_no", "part_no", "description", "qty", "remarks"]]
-            for r in result.rows]
+    rows = [[r[c] for c in [
+        "section", "ref_no", "part_no", "description", "qty",
+        "nine_digit_part_no", "superseded_part_no", "remarks",
+    ]] for r in result.rows]
     sections = sorted({r[0] for r in rows if r[0]})
 
     return {

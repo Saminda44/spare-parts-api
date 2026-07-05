@@ -52,11 +52,15 @@ from loguru import logger
 
 COLUMNS: list[str] = [
     "section", "fig_no", "ref_no", "part_no",
-    "description", "qty", "remarks",
+    "description", "qty",
+    "nine_digit_part_no", "superseded_part_no",
+    "remarks",
 ]
 DISPLAY_HEADERS: list[str] = [
     "Section", "Ref. No.", "Part No.",
-    "Description", "Q'ty", "Remarks",
+    "Description", "Q'ty",
+    "9 Digit Part No.", "Superseded Part No.",
+    "Remarks",
 ]
 
 # Yamaha part numbers.  Some PDFs encode hyphens as U+2013 (en-dash) instead
@@ -205,17 +209,17 @@ _Y_TOL = 5
 class ColBounds:
     """X-coordinate boundaries for the right-hand columns of a Yamaha parts page.
 
-    rem_start    — x-start of the REMARKS column; used to strip trailing
-                   cross-reference codes from the Q'ty zone.
-    qty_col_xs   — x-centre of each variant Q'ty column, in left-to-right order.
-                   Empty for single-variant PDFs.  When present, digit words in a
-                   data row are assigned to the nearest column so that
-                   partial-coverage parts (where some variant cells are blank)
-                   produce a "/" -separated qty string with "" for absent variants,
-                   e.g. "1//1/" for a part that only applies to variants 0 and 2.
+    rem_start         — x-start of the REMARKS column.
+    qty_col_xs        — x-centre of each variant Q'ty column, left-to-right.
+                        Empty for single-variant PDFs.
+    nine_digit_start  — x-start of the "9 DIGIT PART NO." column present in some
+                        India-market PDFs (e.g. YBX125).  9999.0 when absent.
+    superseded_start  — x-start of the "SUPERSEDED PART NO." column.  9999.0 when absent.
     """
-    rem_start:   float      = 9999.0
-    qty_col_xs:  list[float] = field(default_factory=list)
+    rem_start:        float       = 9999.0
+    qty_col_xs:       list[float] = field(default_factory=list)
+    nine_digit_start: float       = 9999.0
+    superseded_start: float       = 9999.0
 
 
 @dataclass
@@ -349,6 +353,10 @@ class YamahaCatalogueExtractor:
                                 new_bounds.rem_start = last_bounds.rem_start
                             if not new_bounds.qty_col_xs:
                                 new_bounds.qty_col_xs = last_bounds.qty_col_xs
+                            if new_bounds.nine_digit_start >= 9000:
+                                new_bounds.nine_digit_start = last_bounds.nine_digit_start
+                            if new_bounds.superseded_start >= 9000:
+                                new_bounds.superseded_start = last_bounds.superseded_start
                         bounds = new_bounds
 
                     page_rows, new_section, new_fig, page_sects = (
@@ -576,13 +584,19 @@ class YamahaCatalogueExtractor:
         - "REMARKS" keyword  → sets rem_start (rightmost column anchor)
         - Variant-code tokens (e.g. "J56B", "L56B", "M56B", "N56B") on header
           rows (rows without part numbers) → accumulates x-centres as qty_col_xs
+        - "9 DIGIT PART NO." and "SUPERSEDED PART NO." column headers →
+          sets nine_digit_start and superseded_start using a flat x-proximity
+          scan so split-row headers (where "9" and "DIGIT" fall on different
+          Y-rows) are still detected correctly.
 
         Some PDFs split the variant-code header across two Y-rows (e.g. AEROX:
         "L56B M56B N56B" on y=45, "J56B" on y=50).  The previous single-row
         detection missed the second row.  We now accumulate codes from ALL
         header rows and sort by x-position, so every qty column is captured.
         """
-        rem_start = 9999.0
+        rem_start        = 9999.0
+        nine_digit_start = 9999.0
+        superseded_start = 9999.0
         raw_vc_xs: list[float] = []   # accumulate variant-code x-centres
 
         for _y, ws in word_rows[:25]:
@@ -594,7 +608,8 @@ class YamahaCatalogueExtractor:
             if rem_idx is not None:
                 rem_start = ws[rem_idx]["x0"]
 
-            # CRUX-style "9 DIGIT" header
+            # CRUX-style "12 DIGIT" + "9 DIGIT" double-header — both show "DIGIT";
+            # when two DIGIT tokens appear, the second marks where REMARKS begins.
             digit_indices = [i for i, t in enumerate(texts) if t == "DIGIT"]
             if len(digit_indices) >= 2:
                 rem_start = ws[digit_indices[-1] - 1]["x0"]
@@ -616,8 +631,39 @@ class YamahaCatalogueExtractor:
             if not qty_col_xs or cx - qty_col_xs[-1] > 8.0:
                 qty_col_xs.append(cx)
 
-        if rem_start < 9000 or qty_col_xs:
-            return ColBounds(rem_start=rem_start, qty_col_xs=qty_col_xs)
+        # ── India-market extra column detection ───────────────────────────────
+        # "9 DIGIT PART NO." and "SUPERSEDED PART NO." headers may be split
+        # across different Y-rows (pdfplumber groups words by Y-band, so "9" at
+        # y=40 and "DIGIT" at y=44 land in separate word-rows).  A flat x-proximity
+        # scan across all header rows handles this reliably: we pair each "DIGIT"
+        # token with any "9" token whose x0 is within 50 pts to its left.
+        flat_words   = [w for _, ws in word_rows[:25] for w in ws]
+        digit_x_list = [w["x0"] for w in flat_words if w["text"].upper() == "DIGIT"]
+        nine_x_list  = [w["x0"] for w in flat_words if w["text"].upper() == "9"]
+        sup_words    = [w for w in flat_words if w["text"].upper() == "SUPERSEDED"]
+
+        for dig_x in digit_x_list:
+            near_nines = [x for x in nine_x_list if x < dig_x and dig_x - x < 50]
+            if near_nines and nine_digit_start >= 9000:
+                nine_digit_start = max(near_nines)  # nearest "9" left of "DIGIT"
+                break
+
+        if sup_words and superseded_start >= 9000:
+            superseded_start = min(w["x0"] for w in sup_words)
+
+        if nine_digit_start < 9000 or superseded_start < 9000:
+            logger.debug(
+                f"Extra columns detected: nine_digit_start={nine_digit_start:.1f} "
+                f"superseded_start={superseded_start:.1f} rem_start={rem_start:.1f}"
+            )
+
+        if rem_start < 9000 or qty_col_xs or nine_digit_start < 9000 or superseded_start < 9000:
+            return ColBounds(
+                rem_start=rem_start,
+                qty_col_xs=qty_col_xs,
+                nine_digit_start=nine_digit_start,
+                superseded_start=superseded_start,
+            )
         return None
 
     @staticmethod
@@ -1192,17 +1238,20 @@ class YamahaCatalogueExtractor:
             # TEXT-BASED FALLBACK (no column bounds / single-variant):
             #   Use _split_after heuristics (existing behaviour).
 
+            # Initialise extra-column accumulators here so they are always defined
+            # regardless of which extraction mode runs below.
+            nine_digit_parts: list[str] = []
+            superseded_parts: list[str] = []
+
             if bounds and bounds.qty_col_xs and pn_word:
                 n_cols     = len(bounds.qty_col_xs)
                 qty_zone_x = min(bounds.qty_col_xs) - 15.0
                 max_qty_cx = max(bounds.qty_col_xs)   # x-centre of rightmost qty col
-                slots:         list[str] = [""] * n_cols
-                desc_parts:    list[str] = []
-                rem_parts:     list[str] = []
-                # Words in the gap between the last qty column and the REMARKS
-                # column header (e.g. colour codes like "DBNM8", market qualifiers).
-                # They are appended AFTER explicit-remarks words so that the reading
-                # order is preserved: "FOR YB" (from REMARKS zone) + "DBNM8" (gap).
+                slots:      list[str] = [""] * n_cols
+                desc_parts: list[str] = []
+                rem_parts:  list[str] = []
+                # Words in the gap between the last qty column and the first extra
+                # column (or REMARKS when no extra columns exist).
                 pre_rem_parts: list[str] = []
                 # Only use the gap-zone when the REMARKS boundary is known;
                 # without rem_start we cannot define the gap reliably.
@@ -1214,8 +1263,18 @@ class YamahaCatalogueExtractor:
                     if use_gap_zone and w["x0"] >= bounds.rem_start:
                         rem_parts.append(w["text"])
                         continue
+                    # Route words into extra columns by x-position (right → left priority)
+                    if bounds.superseded_start < 9000 and w["x0"] >= bounds.superseded_start:
+                        superseded_parts.append(w["text"])
+                        continue
+                    if bounds.nine_digit_start < 9000 and w["x0"] >= bounds.nine_digit_start:
+                        nine_digit_parts.append(w["text"])
+                        continue
                     w_cx = (w["x0"] + w["x1"]) / 2
-                    if w_cx >= qty_zone_x and re.match(r'^\d+$', w["text"]):
+                    # Qty slot: accept 1–5 digit strings only.  India-market PDFs
+                    # have 9-char all-digit nine_digit values (e.g. "344010109") to
+                    # the right of qty columns; those must NOT contaminate qty slots.
+                    if w_cx >= qty_zone_x and re.match(r'^\d{1,5}$', w["text"]):
                         nearest = min(
                             range(n_cols),
                             key=lambda i: abs(bounds.qty_col_xs[i] - w_cx),
@@ -1253,6 +1312,24 @@ class YamahaCatalogueExtractor:
                 # Collapse "1/1/1/1" → "1" only when EVERY slot is filled identically
                 if filled and len(set(filled)) == 1 and len(filled) == n_cols:
                     qty = filled[0]
+                # Pattern-based fallback for India-market PDFs where header
+                # detection failed to set nine_digit_start / superseded_start.
+                # Nine-digit part numbers are exactly 9 alphanumeric chars.
+                # Superseded part numbers are exactly 12 alphanumeric chars.
+                # This is safe for standard PDFs: their gap-zone tokens (colour
+                # codes like "DBNM8", qualifiers like "FOR") are never 9 or 12
+                # chars of pure uppercase alphanumeric.
+                if bounds.nine_digit_start >= 9000 and pre_rem_parts:
+                    leftover: list[str] = []
+                    for _tok in pre_rem_parts:
+                        if re.match(r'^[A-Z0-9]{9}$', _tok, re.IGNORECASE):
+                            nine_digit_parts.append(_tok)
+                        elif re.match(r'^[A-Z0-9]{12}$', _tok, re.IGNORECASE):
+                            superseded_parts.append(_tok)
+                        else:
+                            leftover.append(_tok)
+                    pre_rem_parts = leftover
+
                 # Combine gap-zone words with explicit-remarks words.
                 # Gap-zone words (pre_rem_parts) appear to the LEFT of the
                 # REMARKS column in the PDF, so they always come first.
@@ -1304,13 +1381,15 @@ class YamahaCatalogueExtractor:
                 ref_no = last_ref_no
 
             rows.append({
-                "section":     new_section,
-                "fig_no":      new_fig,
-                "ref_no":      ref_no,
-                "part_no":     pn,
-                "description": desc.strip(),
-                "qty":         qty,
-                "remarks":     remarks,
+                "section":            new_section,
+                "fig_no":             new_fig,
+                "ref_no":             ref_no,
+                "part_no":            pn,
+                "description":        desc.strip(),
+                "qty":                qty,
+                "nine_digit_part_no": " ".join(nine_digit_parts),
+                "superseded_part_no": " ".join(superseded_parts),
+                "remarks":            remarks,
             })
 
         return rows, new_section, new_fig, sections_seen
@@ -1375,13 +1454,15 @@ class YamahaCatalogueExtractor:
                         desc, qty, remarks = self._split_after(after, num_variants=0)
 
                         rows.append({
-                            "section":     current_section,
-                            "fig_no":      current_fig,
-                            "ref_no":      ref_no,
-                            "part_no":     pn,
-                            "description": desc,
-                            "qty":         qty,
-                            "remarks":     remarks,
+                            "section":            current_section,
+                            "fig_no":             current_fig,
+                            "ref_no":             ref_no,
+                            "part_no":            pn,
+                            "description":        desc,
+                            "qty":                qty,
+                            "nine_digit_part_no": "",
+                            "superseded_part_no": "",
+                            "remarks":            remarks,
                         })
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Text fallback failed for {pdf_path}: {exc}")
