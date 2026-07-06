@@ -543,17 +543,8 @@ def _run_part_master_rebuild(run_missing_agents: bool) -> None:
                 rel = pdf_path.relative_to(PDF_ROOT).as_posix()
                 cache = _cache_path(rel)
                 if cache.exists():
-                    # Skip only if the cached JSON actually has parts.
-                    # A 0-part cache means the agent previously failed or the
-                    # PDF is not a catalogue — re-run so we don't silently drop it.
-                    try:
-                        _cached = json.loads(cache.read_text(encoding="utf-8"))
-                        _parts = sum(len(b.get("parts", [])) for b in _cached.get("builds", []))
-                    except Exception:  # noqa: BLE001
-                        _parts = 0
-                    if _parts > 0:
-                        skipped.append(pdf_path.name)
-                        continue
+                    skipped.append(pdf_path.name)
+                    continue
                 try:
                     result = agent.run(pdf_path)
                     out = result.to_dict()

@@ -90,6 +90,7 @@ _AGENT_BUILDS_DIR = Path("data/outputs/agent_builds")
 _PDF_ROOT = Path("data/raw/pdf_catalogues")
 _PARQUET_OUT = Path("data/interim/catalogue_part_master.parquet")
 _XLSX_OUT = Path("data/outputs/catalogue_part_master.xlsx")
+_CATALOG_PARTS_PARQUET = Path("data/interim/catalog_parts.parquet")
 _PDF_EXTS = {".pdf", ".PDF"}
 
 
@@ -415,17 +416,44 @@ def build_part_master(
             model_display,
         )
 
-    # ── Process uncached PDFs via basic extractor ─────────────────────────────
+    # ── Load catalog_parts.parquet for reuse as extraction fallback ──────────
+    # Prefer already-extracted data over re-running the extractor on every PDF.
+    catalog_by_file: dict[str, list[_PartRow]] = defaultdict(list)
+    if _CATALOG_PARTS_PARQUET.exists():
+        try:
+            _cp = pd.read_parquet(str(_CATALOG_PARTS_PARQUET))
+            for _, _row in _cp.iterrows():
+                _pn = str(_row.get("part_no", "") or "").strip()
+                if not _pn:
+                    continue
+                _fname = str(_row.get("source_file", "") or "")
+                catalog_by_file[_fname].append(
+                    (
+                        _pn,
+                        str(_row.get("description", "") or "").strip(),
+                        str(_row.get("section", "") or "").strip(),
+                        "",  # no variant detail from basic extraction
+                        str(_row.get("model", "") or "").strip(),
+                    )
+                )
+            logger.info(
+                "Loaded catalog_parts.parquet — {} filenames indexed",
+                len(catalog_by_file),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not load catalog_parts.parquet: {}", exc)
+
+    # ── Process uncached PDFs: catalog parquet → extractor live fallback ──────
     for pdf_path, model_folder in uncached_pdfs:
-        logger.info("Extracting (fallback) {} …", pdf_path.name)
-        rows = _parts_from_extractor(pdf_path, model_folder)
-        _ingest(rows, pdf_path.name, kind="shared")
-        logger.info(
-            "Extractor fallback {} → {} parts ({})",
-            pdf_path.name,
-            len(rows),
-            model_folder,
-        )
+        fname = pdf_path.name
+        if catalog_by_file.get(fname):
+            rows = catalog_by_file[fname]
+            logger.info("Catalog parquet {} → {} parts ({})", fname, len(rows), model_folder)
+        else:
+            logger.info("Extracting (live fallback) {} …", fname)
+            rows = _parts_from_extractor(pdf_path, model_folder)
+            logger.info("Extractor fallback {} → {} parts ({})", fname, len(rows), model_folder)
+        _ingest(rows, fname, kind="shared")
 
     if not desc_ctr:
         logger.warning("No parts collected — returning empty DataFrame")
