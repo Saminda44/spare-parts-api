@@ -2,22 +2,73 @@
 
 from __future__ import annotations
 
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from loguru import logger
 
 from src.api import deps as _deps
 from src.api.routers import (
-    bikes, catalog, classification, eda, forecast, inventory, overview, parts, policy, rl, sku,
+    bikes,
+    catalog,
+    classification,
+    eda,
+    forecast,
+    inventory,
+    overview,
+    parts,
+    policy,
+    rl,
+    sku,
 )
 
 _DIST = Path(__file__).parent.parent.parent / "frontend" / "dist"
 
+
+def _warm_caches() -> None:
+    """Pre-load parquets and pre-compute default EDA responses into cache.
+
+    Runs in a daemon thread at startup so the server accepts requests immediately
+    while warming proceeds in the background. First dashboard load will be fast
+    once this completes (~5-15 s depending on parquet sizes).
+    """
+    try:
+        logger.info("Cache warming: loading parquets …")
+        _deps.get_orders_clean()
+        _deps.get_sales_clean()
+        _deps.get_orders_rejection_log()
+        logger.info("Cache warming: parquets loaded — pre-computing EDA responses …")
+        # Pre-populate EDA caches for the two most-requested parameter combinations.
+        # Calling route functions directly with explicit args bypasses FastAPI Query objects.
+        from src.api.routers.eda import get_orders_eda, get_sales_eda  # noqa: PLC0415
+
+        get_orders_eda(rejection_limit=200, dealer_type="ALL", mc_category="ALL", year=0)
+        get_orders_eda(rejection_limit=200, dealer_type="MC", mc_category="ALL", year=0)
+        get_sales_eda(dealer_type="ALL", mc_category="ALL", year=0)
+        get_sales_eda(dealer_type="MC", mc_category="ALL", year=0)
+        logger.info("Cache warming complete — all default EDA responses cached.")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Cache warming failed (non-fatal): {exc}")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: RUF029
+    threading.Thread(target=_warm_caches, daemon=True, name="cache-warmer").start()
+    yield
+
+
 app = FastAPI(
     title="Yamaha Inventory Optimisation API",
+    lifespan=lifespan,
     description=(
         "REST API for the 14-stage spare-parts inventory pipeline. "
         "Exposes classification, demand forecasting, stock tracking, "
@@ -30,7 +81,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten in production
+    allow_origins=["*"],  # tighten in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,18 +89,18 @@ app.add_middleware(
 
 _PREFIX = "/api/v1"
 # Stages 1-8
-app.include_router(bikes.router,           prefix=_PREFIX)
-app.include_router(parts.router,           prefix=_PREFIX)
-app.include_router(eda.router,             prefix=_PREFIX)
-app.include_router(catalog.router,         prefix=_PREFIX)
+app.include_router(bikes.router, prefix=_PREFIX)
+app.include_router(parts.router, prefix=_PREFIX)
+app.include_router(eda.router, prefix=_PREFIX)
+app.include_router(catalog.router, prefix=_PREFIX)
 # Stages 9-14
-app.include_router(overview.router,        prefix=_PREFIX)
-app.include_router(classification.router,  prefix=_PREFIX)
-app.include_router(forecast.router,        prefix=_PREFIX)
-app.include_router(inventory.router,       prefix=_PREFIX)
-app.include_router(policy.router,          prefix=_PREFIX)
-app.include_router(rl.router,              prefix=_PREFIX)
-app.include_router(sku.router,             prefix=_PREFIX)
+app.include_router(overview.router, prefix=_PREFIX)
+app.include_router(classification.router, prefix=_PREFIX)
+app.include_router(forecast.router, prefix=_PREFIX)
+app.include_router(inventory.router, prefix=_PREFIX)
+app.include_router(policy.router, prefix=_PREFIX)
+app.include_router(rl.router, prefix=_PREFIX)
+app.include_router(sku.router, prefix=_PREFIX)
 
 
 @app.get("/health", tags=["Meta"])

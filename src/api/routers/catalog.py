@@ -12,21 +12,26 @@ from fastapi.responses import FileResponse
 
 from src.api.deps import get_catalog_parts
 from src.api.schemas import (
-    CatalogCoverageResponse, CatalogCoverageRow,
-    CatalogFile, CatalogModel, CatalogPartRow, CatalogResponse,
-)
-from src.models.master_data.pdf_catalogue_extractor import (
-    DISPLAY_HEADERS, YamahaCatalogueExtractor,
+    CatalogCoverageResponse,
+    CatalogCoverageRow,
+    CatalogFile,
+    CatalogModel,
+    CatalogPartRow,
+    CatalogResponse,
 )
 from src.models.master_data.catalogue_agent import CatalogueAgent
 from src.models.master_data.catalogue_part_master import (
-    build_part_master, load_part_master,
+    build_part_master,
+)
+from src.models.master_data.pdf_catalogue_extractor import (
+    DISPLAY_HEADERS,
+    YamahaCatalogueExtractor,
 )
 
-PDF_ROOT   = Path("data/raw/pdf_catalogues").resolve()
-PDF_EXTS   = {".pdf", ".PDF"}
-RAW_ROOT   = Path("data/raw").resolve()
-XLSX_EXTS  = {".xlsx", ".xls"}
+PDF_ROOT = Path("data/raw/pdf_catalogues").resolve()
+PDF_EXTS = {".pdf", ".PDF"}
+RAW_ROOT = Path("data/raw").resolve()
+XLSX_EXTS = {".xlsx", ".xls"}
 AGENT_CACHE = Path("data/outputs/agent_builds").resolve()
 
 router = APIRouter(prefix="/catalog", tags=["Catalog"])
@@ -47,11 +52,13 @@ def list_catalog() -> CatalogResponse:
         for pdf in sorted(folder.rglob("*"), key=lambda p: p.name.upper()):
             if pdf.suffix in PDF_EXTS and pdf.is_file():
                 rel = pdf.relative_to(PDF_ROOT)
-                files.append(CatalogFile(
-                    filename=pdf.name,
-                    rel_path=rel.as_posix(),
-                    size_kb=round(pdf.stat().st_size / 1024, 1),
-                ))
+                files.append(
+                    CatalogFile(
+                        filename=pdf.name,
+                        rel_path=rel.as_posix(),
+                        size_kb=round(pdf.stat().st_size / 1024, 1),
+                    )
+                )
         if files:
             total += len(files)
             models.append(CatalogModel(model=folder.name, pdf_count=len(files), files=files))
@@ -67,7 +74,9 @@ def serve_pdf(file_path: str) -> FileResponse:
         raise HTTPException(status_code=403, detail="Forbidden")
     if not target.exists() or target.suffix not in PDF_EXTS:
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(str(target), media_type="application/pdf", headers={"Content-Disposition": "inline"})
+    return FileResponse(
+        str(target), media_type="application/pdf", headers={"Content-Disposition": "inline"}
+    )
 
 
 @router.get("/folders")
@@ -80,7 +89,7 @@ def list_folders() -> list[str]:
 
 @router.post("/upload")
 async def upload_pdf(
-    file: UploadFile = File(...),
+    file: UploadFile = File(...),  # noqa: B008
     folder: str = Form(...),
 ) -> dict[str, str]:
     """Upload a PDF catalogue into pdf_catalogues/{folder}/. Creates the folder if needed."""
@@ -104,13 +113,15 @@ async def upload_pdf(
     return {
         "rel_path": dest.relative_to(PDF_ROOT).as_posix(),
         "filename": dest.name,
-        "folder":   folder_clean,
+        "folder": folder_clean,
     }
 
 
 _EXTRACTOR = YamahaCatalogueExtractor(max_pages=500)
-_INTERIM   = Path("data/interim")
+_INTERIM = Path("data/interim")
+_OUTPUTS = Path("data/outputs")
 _PARTS_OUT = _INTERIM / "catalog_parts.parquet"
+_PARTS_XLSX = _OUTPUTS / "catalog_parts.xlsx"
 _EXTRACT_STATUS: dict[str, Any] = {"running": False, "last_result": None}
 
 
@@ -138,32 +149,47 @@ def extract_pdf_tables(
     if result.error:
         raise HTTPException(status_code=500, detail=result.error)
 
-    rows = [[r[c] for c in [
-        "section", "ref_no", "part_no", "description", "qty",
-        "nine_digit_part_no", "superseded_part_no", "remarks",
-    ]] for r in result.rows]
+    rows = [
+        [
+            r[c]
+            for c in [
+                "section",
+                "ref_no",
+                "part_no",
+                "description",
+                "qty",
+                "nine_digit_part_no",
+                "superseded_part_no",
+                "remarks",
+            ]
+        ]
+        for r in result.rows
+    ]
     sections = sorted({r[0] for r in rows if r[0]})
 
     return {
-        "headers":          DISPLAY_HEADERS,
-        "rows":             rows,
-        "total":            len(rows),
-        "sections":         sections,
-        "variants":         result.variants,
-        "colour_codes":     result.colour_codes,
+        "headers": DISPLAY_HEADERS,
+        "rows": rows,
+        "total": len(rows),
+        "sections": sections,
+        "variants": result.variants,
+        "colour_codes": result.colour_codes,
         "available_colours": result.available_colours,
         "manufacture_year": result.manufacture_year,
-        "pages_scanned":    result.pages_scanned,
-        "sections_found":   result.sections_found,
-        "ocr_flagged":      result.ocr_flagged,
-        "warnings":         result.warnings,
+        "pages_scanned": result.pages_scanned,
+        "sections_found": result.sections_found,
+        "ocr_flagged": result.ocr_flagged,
+        "warnings": result.warnings,
         # NEW: Colour matching metadata for debugging
         "colour_extraction_metadata": {
             "source": "pdf_cover" if result.available_colours else "agent_web",
-            "unmapped_count": len(result.available_colours or []) - len(result.available_colour_map),
+            "unmapped_count": len(result.available_colours or [])
+            - len(result.available_colour_map),
             "total_available": len(result.available_colours or []),
             "matched_count": len(result.available_colour_map),
-            "has_warnings": any("colour" in w.lower() or "unmapped" in w.lower() for w in result.warnings),
+            "has_warnings": any(
+                "colour" in w.lower() or "unmapped" in w.lower() for w in result.warnings
+            ),
         },
     }
 
@@ -183,13 +209,18 @@ def run_batch_extraction(background_tasks: BackgroundTasks) -> dict[str, Any]:
         _EXTRACT_STATUS["last_result"] = None
         try:
             _INTERIM.mkdir(parents=True, exist_ok=True)
+            _OUTPUTS.mkdir(parents=True, exist_ok=True)
             df = _EXTRACTOR.extract_all(PDF_ROOT, save_path=_PARTS_OUT)
+            # Also save Excel for easy download / business review
+            if not df.empty:
+                df.to_excel(_PARTS_XLSX, index=False, engine="openpyxl")
             _EXTRACT_STATUS["last_result"] = {
                 "ok": True,
-                "total_rows":      len(df),
-                "distinct_parts":  int(df["part_no"].nunique()) if not df.empty else 0,
-                "models":          int(df["model"].nunique()) if not df.empty else 0,
-                "parquet":         str(_PARTS_OUT),
+                "total_rows": len(df),
+                "distinct_parts": int(df["part_no"].nunique()) if not df.empty else 0,
+                "models": int(df["model"].nunique()) if not df.empty else 0,
+                "parquet": str(_PARTS_OUT),
+                "excel": str(_PARTS_XLSX) if not df.empty else None,
             }
         except Exception as exc:  # noqa: BLE001
             _EXTRACT_STATUS["last_result"] = {"ok": False, "error": str(exc)}
@@ -204,13 +235,40 @@ def run_batch_extraction(background_tasks: BackgroundTasks) -> dict[str, Any]:
 def get_extraction_status() -> dict[str, Any]:
     """Return current state of the batch extraction job."""
     return {
-        "running":     _EXTRACT_STATUS["running"],
+        "running": _EXTRACT_STATUS["running"],
         "last_result": _EXTRACT_STATUS["last_result"],
         "parquet_exists": _PARTS_OUT.exists(),
         "parquet_size_kb": (
             round(_PARTS_OUT.stat().st_size / 1024, 1) if _PARTS_OUT.exists() else 0
         ),
+        "excel_exists": _PARTS_XLSX.exists(),
     }
+
+
+@router.get("/download")
+def download_catalog_excel() -> FileResponse:
+    """Download extracted catalog parts as Excel (.xlsx).
+
+    The file is regenerated from the current catalog_parts.parquet on each call
+    so it always reflects the latest extraction run.
+    Triggers a re-generate if the parquet is newer than the cached Excel.
+    """
+    if not _PARTS_OUT.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="No catalog data found. Run POST /catalog/run-extraction first.",
+        )
+    # Re-generate Excel if parquet is newer than the saved xlsx (or xlsx missing)
+    if not _PARTS_XLSX.exists() or _PARTS_OUT.stat().st_mtime > _PARTS_XLSX.stat().st_mtime:
+        import pandas as pd  # noqa: PLC0415
+
+        _OUTPUTS.mkdir(parents=True, exist_ok=True)
+        pd.read_parquet(_PARTS_OUT).to_excel(_PARTS_XLSX, index=False, engine="openpyxl")
+    return FileResponse(
+        path=_PARTS_XLSX,
+        filename="catalog_parts.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 @router.get("/coverage", response_model=CatalogCoverageResponse)
@@ -224,8 +282,11 @@ def get_catalog_coverage() -> CatalogCoverageResponse:
 
     if df.empty:
         return CatalogCoverageResponse(
-            extracted=False, total_part_references=0,
-            distinct_parts=0, distinct_models=0, rows=[],
+            extracted=False,
+            total_part_references=0,
+            distinct_parts=0,
+            distinct_models=0,
+            rows=[],
         )
 
     # Count PDFs per model from the live file system (for pdf_count)
@@ -233,9 +294,7 @@ def get_catalog_coverage() -> CatalogCoverageResponse:
     if PDF_ROOT.exists():
         for folder in PDF_ROOT.iterdir():
             if folder.is_dir():
-                pdf_counts[folder.name] = sum(
-                    1 for f in folder.rglob("*") if f.suffix in PDF_EXTS
-                )
+                pdf_counts[folder.name] = sum(1 for f in folder.rglob("*") if f.suffix in PDF_EXTS)
 
     pn_col = "part_no" if "part_no" in df.columns else "part_number"
     rows: list[CatalogCoverageRow] = []
@@ -251,12 +310,14 @@ def get_catalog_coverage() -> CatalogCoverageResponse:
         )
         for _, r in grp.iterrows():
             model_name = str(r["model"])
-            rows.append(CatalogCoverageRow(
-                model=model_name,
-                pdf_count=pdf_counts.get(model_name, 0),
-                distinct_parts=int(r["distinct_parts"]),
-                ocr_pages=int(r.get("ocr_pages", 0)),
-            ))
+            rows.append(
+                CatalogCoverageRow(
+                    model=model_name,
+                    pdf_count=pdf_counts.get(model_name, 0),
+                    distinct_parts=int(r["distinct_parts"]),
+                    ocr_pages=int(r.get("ocr_pages", 0)),
+                )
+            )
 
     return CatalogCoverageResponse(
         extracted=True,
@@ -274,11 +335,13 @@ def list_excel_catalogues() -> list[dict[str, Any]]:
     if RAW_ROOT.exists():
         for f in sorted(RAW_ROOT.glob("*"), key=lambda p: p.name.upper()):
             if f.is_file() and f.suffix in XLSX_EXTS and "catalogue" in f.stem.lower():
-                result.append({
-                    "filename": f.name,
-                    "stem":     f.stem,
-                    "size_kb":  round(f.stat().st_size / 1024, 1),
-                })
+                result.append(
+                    {
+                        "filename": f.name,
+                        "stem": f.stem,
+                        "size_kb": round(f.stat().st_size / 1024, 1),
+                    }
+                )
     return result
 
 
@@ -286,7 +349,7 @@ def list_excel_catalogues() -> list[dict[str, Any]]:
 def get_excel_catalogue(
     filename: str,
     section: str | None = Query(None),
-    search: str | None  = Query(None),
+    search: str | None = Query(None),
 ) -> dict[str, Any]:
     """Return all rows from an Excel parts catalogue in data/raw/.
 
@@ -324,13 +387,13 @@ def get_excel_catalogue(
 
     # Derive column indices for filtering
     try:
-        sec_idx  = headers.index("Section")
+        sec_idx = headers.index("Section")
     except ValueError:
-        sec_idx  = 0
+        sec_idx = 0
     try:
-        pn_idx   = headers.index("Part No.")
+        pn_idx = headers.index("Part No.")
     except ValueError:
-        pn_idx   = 2
+        pn_idx = 2
     try:
         desc_idx = headers.index("Description")
     except ValueError:
@@ -346,9 +409,9 @@ def get_excel_catalogue(
 
     return {
         "filename": filename,
-        "headers":  headers,
-        "rows":     rows,
-        "total":    len(rows),
+        "headers": headers,
+        "rows": rows,
+        "total": len(rows),
         "sections": sections,
     }
 
@@ -368,11 +431,13 @@ def get_parts_for_model(
     pn_col = "part_no" if "part_no" in df.columns else "part_number"
     result: list[CatalogPartRow] = []
     for _, r in sub.iterrows():
-        result.append(CatalogPartRow(
-            part_number=str(r.get(pn_col, "")),
-            source_file=str(r.get("source_file", "")),
-            ocr_used=bool(r.get("ocr_used", False)),
-        ))
+        result.append(
+            CatalogPartRow(
+                part_number=str(r.get(pn_col, "")),
+                source_file=str(r.get("source_file", "")),
+                ocr_used=bool(r.get("ocr_used", False)),
+            )
+        )
     return result
 
 
@@ -381,7 +446,7 @@ def get_parts_for_model(
 # ---------------------------------------------------------------------------
 
 _AGENT = CatalogueAgent(max_pages=500)
-_AGENT_STATUS: dict[str, Any] = {}   # file_path → {running, cached, error}
+_AGENT_STATUS: dict[str, Any] = {}  # file_path → {running, cached, error}
 
 
 def _cache_path(rel: str) -> Path:
@@ -483,11 +548,11 @@ def _run_part_master_rebuild(run_missing_agents: bool) -> None:
 
         _PM_STATUS["last_result"] = {
             "ok": True,
-            "total_parts":     len(df),
-            "total_pdfs":      len(list(AGENT_CACHE.glob("*.json"))),
-            "agents_run":      len(processed),
-            "agents_skipped":  len(skipped),
-            "agent_errors":    errors,
+            "total_parts": len(df),
+            "total_pdfs": len(list(AGENT_CACHE.glob("*.json"))),
+            "agents_run": len(processed),
+            "agents_skipped": len(skipped),
+            "agent_errors": errors,
         }
     except Exception as exc:  # noqa: BLE001
         _PM_STATUS["last_result"] = {"ok": False, "error": str(exc)}
@@ -537,8 +602,8 @@ def part_master_status() -> dict[str, Any]:
     """Return the status of the last part master rebuild."""
     pm_parquet = Path("data/interim/catalogue_part_master.parquet").resolve()
     return {
-        "running":       _PM_STATUS["running"],
-        "last_result":   _PM_STATUS["last_result"],
+        "running": _PM_STATUS["running"],
+        "last_result": _PM_STATUS["last_result"],
         "parquet_exists": pm_parquet.exists(),
         "parquet_size_kb": (
             round(pm_parquet.stat().st_size / 1024, 1) if pm_parquet.exists() else 0
