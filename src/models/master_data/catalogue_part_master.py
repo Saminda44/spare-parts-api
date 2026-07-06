@@ -418,12 +418,15 @@ def build_part_master(
 
     # ── Load catalog_parts.parquet for reuse as extraction fallback ──────────
     # Prefer already-extracted data over re-running the extractor on every PDF.
+    # The parquet column for part number is "part_number" (from batch extractor);
+    # description and section are absent — use empty strings where missing.
     catalog_by_file: dict[str, list[_PartRow]] = defaultdict(list)
     if _CATALOG_PARTS_PARQUET.exists():
         try:
             _cp = pd.read_parquet(str(_CATALOG_PARTS_PARQUET))
+            _pn_col = "part_number" if "part_number" in _cp.columns else "part_no"
             for _, _row in _cp.iterrows():
-                _pn = str(_row.get("part_no", "") or "").strip()
+                _pn = str(_row.get(_pn_col, "") or "").strip()
                 if not _pn:
                     continue
                 _fname = str(_row.get("source_file", "") or "")
