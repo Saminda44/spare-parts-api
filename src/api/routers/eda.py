@@ -19,6 +19,7 @@ from src.api.schemas import (
     AssociationRule,
     CategoryMixRow,
     CoOccurrenceGroup,
+    CustomerRecommendation,
     DealerPerfRow,
     DistrictPerfRow,
     FillRateBandRow,
@@ -26,16 +27,14 @@ from src.api.schemas import (
     FulfillmentAnalysis,
     FulfillmentLineBucket,
     IntermittentSkuRow,
-    CustomerRecommendation,
     ItemRecommendations,
     ItemSimilarity,
     LargeInvoice,
     MarketBasketMLResponse,
     MarketBasketResponse,
+    McMonthlyCategoryPoint,
     MLCluster,
     MLModelInfo,
-    UmapPoint,
-    McMonthlyCategoryPoint,
     MovementMonthlyPoint,
     MovementsResponse,
     OrdersEdaDealer,
@@ -60,6 +59,7 @@ from src.api.schemas import (
     ShortShipRow,
     SparePartsEdaResponse,
     TopSkuRow,
+    UmapPoint,
     YoYGrowthRow,
 )
 
@@ -1859,7 +1859,7 @@ def get_spare_parts_eda() -> SparePartsEdaResponse:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Market Basket Analysis endpoint  (service.xlsx)
+# Market Basket Analysis endpoint  (orders_clean — MC dealers only)
 # ─────────────────────────────────────────────────────────────────────────────
 @router.get("/market-basket")
 def market_basket(
@@ -1868,27 +1868,22 @@ def market_basket(
     min_lift: float = Query(1.0, ge=0.0),
     max_rules: int = Query(200, ge=1, le=1000),
 ) -> MarketBasketResponse:
-    """Market Basket Analysis on service.xlsx billing data.
+    """Market Basket Analysis on MC dealer purchase orders (orders_clean).
 
-    Business meaning: discovers which spare parts are co-purchased on the
-    same invoice, enabling cross-selling recommendations and kitting decisions.
-    Basket = one Billing Document. Items = Material (part number).
-    Returns only actual sales (SlsVolQty > 0).
+    Business meaning: discovers which spare parts are co-ordered in the same
+    purchase order, enabling cross-selling recommendations and kitting decisions.
+    Basket = one Sales Document (purchase order). Items = Material (part number).
+    Only MC-type dealers from dealers.xlsx are included.
     """
-    from pathlib import Path
-
     from mlxtend.frequent_patterns import association_rules, fpgrowth
     from mlxtend.preprocessing import TransactionEncoder
 
-    raw_path = Path("data/raw/service.xlsx")
-    df = pd.read_excel(raw_path, engine="openpyxl")
+    raw = get_orders_clean()
+    df = raw[(raw["dealer_type"] == "MC") & (raw["doc_type"] == "PO")].copy()
 
-    # Keep only actual sales (exclude returns / zero-qty lines)
-    df = df[df["SlsVolQty"] > 0].copy()
-
-    # Build baskets: one list of unique materials per Billing Document
+    # Build baskets: one list of unique materials per Sales Document (purchase order)
     baskets = (
-        df.groupby("Billing Document")["Material"]
+        df.groupby("Sales Document")["Material"]
         .apply(lambda items: sorted(set(str(m).strip() for m in items)))
         .tolist()
     )
@@ -1975,12 +1970,12 @@ def market_basket(
             )
         )
 
-    # Large invoices: all invoices with 3+ items, sorted by size desc
+    # Large orders: all purchase orders with 3+ items, sorted by size desc
     inv_info = (
-        df.groupby("Billing Document")
+        df.groupby("Sales Document")
         .agg(
-            billing_date=("Billing Date", "first"),
-            payer=("Payer", "first"),
+            billing_date=("Document Date", "first"),
+            payer=("Dealer Name", "first"),
             materials=("Material", lambda x: sorted(set(str(m).strip() for m in x))),
         )
         .reset_index()
@@ -1995,7 +1990,7 @@ def market_basket(
             bd_str = row["billing_date"].strftime("%Y-%m-%d")
         large_invoices.append(
             LargeInvoice(
-                billing_document=str(row["Billing Document"]),
+                billing_document=str(row["Sales Document"]),
                 billing_date=bd_str,
                 payer=str(row["payer"]),
                 items=row["materials"],
@@ -2022,16 +2017,14 @@ def market_basket(
 # ─────────────────────────────────────────────────────────────────────────────
 @router.get("/market-basket/ml")
 def market_basket_ml() -> MarketBasketMLResponse:
-    """ML-based market basket analysis on service.xlsx.
+    """ML-based market basket analysis on MC dealer purchase orders (orders_clean).
 
     Business meaning: trains Item2Vec (Word2Vec on purchase baskets) and
     SVD collaborative filtering to surface item-item similarities and
     per-customer recommendations that go beyond simple co-occurrence counts.
     UMAP projects embeddings to 2D for visualisation; KMeans clusters items
-    by purchase-pattern similarity.
+    by purchase-pattern similarity. Only MC-type dealers from dealers.xlsx included.
     """
-    import math
-    from pathlib import Path
 
     import numpy as np
     import umap as _umap
@@ -2041,13 +2034,12 @@ def market_basket_ml() -> MarketBasketMLResponse:
     from sklearn.metrics.pairwise import cosine_similarity
     from sklearn.preprocessing import normalize
 
-    raw_path = Path("data/raw/service.xlsx")
-    df = pd.read_excel(raw_path, engine="openpyxl")
-    df = df[df["SlsVolQty"] > 0].copy()
+    raw = get_orders_clean()
+    df = raw[(raw["dealer_type"] == "MC") & (raw["doc_type"] == "PO")].copy()
 
-    # Baskets: one sorted list of unique material names per Billing Document
+    # Baskets: one sorted list of unique material names per Sales Document (purchase order)
     baskets: list[list[str]] = (
-        df.groupby("Billing Document")["Material"]
+        df.groupby("Sales Document")["Material"]
         .apply(lambda items: sorted(set(str(m).strip() for m in items)))
         .tolist()
     )
@@ -2061,11 +2053,11 @@ def market_basket_ml() -> MarketBasketMLResponse:
     w2v = Word2Vec(
         sentences=baskets,
         vector_size=32,
-        window=10,       # large: basket items are unordered
+        window=10,  # large: basket items are unordered
         min_count=2,
         workers=4,
         epochs=100,
-        sg=1,            # skip-gram
+        sg=1,  # skip-gram
         seed=42,
     )
     vocab: list[str] = list(w2v.wv.key_to_index.keys())
@@ -2080,19 +2072,17 @@ def market_basket_ml() -> MarketBasketMLResponse:
 
     # ── 2. SVD Collaborative Filtering ───────────────────────────────────
     payer_item = (
-        df.groupby(["Payer", "Material"])["SlsVolQty"]
-        .sum()
-        .unstack(fill_value=0)
+        df.groupby(["Dealer Code", "Material"])["Order Quantity (Item)"].sum().unstack(fill_value=0)
     )
     n_comp = min(20, payer_item.shape[0] - 1, payer_item.shape[1] - 1)
     svd = TruncatedSVD(n_components=n_comp, random_state=42)
-    # Fit on payer×item matrix: rows=payers, cols=items
-    payer_latent: np.ndarray = svd.fit_transform(payer_item)   # (n_payers, n_comp)
-    item_latent: np.ndarray  = svd.components_.T               # (n_items,  n_comp)
+    # Fit on dealer×item matrix: rows=dealers, cols=items
+    payer_latent: np.ndarray = svd.fit_transform(payer_item)  # (n_dealers, n_comp)
+    item_latent: np.ndarray = svd.components_.T  # (n_items,   n_comp)
     item_latent_norm = normalize(item_latent)
     item_cols: list[str] = list(payer_item.columns)
 
-    sim_matrix = cosine_similarity(item_latent_norm)       # (n_items, n_items)
+    sim_matrix = cosine_similarity(item_latent_norm)  # (n_items, n_items)
     svd_sims: dict[str, list[ItemSimilarity]] = {}
     for i, item in enumerate(item_cols):
         ranked = sorted(
@@ -2100,12 +2090,11 @@ def market_basket_ml() -> MarketBasketMLResponse:
             key=lambda x: -x[1],
         )
         svd_sims[item] = [
-            ItemSimilarity(item=s, score=round(float(sc), 4), method="svd")
-            for s, sc in ranked[:10]
+            ItemSimilarity(item=s, score=round(float(sc), 4), method="svd") for s, sc in ranked[:10]
         ]
 
     # Per-customer predictions: reconstruct the payer×item score matrix
-    predicted = payer_latent @ item_latent.T               # (n_payers, n_items)
+    predicted = payer_latent @ item_latent.T  # (n_payers, n_items)
 
     customer_recs: list[CustomerRecommendation] = []
     for pi, payer in enumerate(payer_item.index):
