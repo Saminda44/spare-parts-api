@@ -64,7 +64,7 @@ export function OBMEDA() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <KpiCard label="Purchase Orders"  value={ordersData ? fmt(ordersData.total_po)    : "…"} color="blue"/>
         <KpiCard label="Avg Fill Rate"    value={ordersData ? `${(ordersData.avg_fill_rate*100).toFixed(1)}%` : "…"} sub={`${ordersData?.fill_rate_lt1_count ?? 0} lines short-shipped`} color="green"/>
-        <KpiCard label="OBM Revenue"      value={salesData  ? `LKR ${fmt(salesData.total_sale_value_lkr)}` : "…"} color="purple"/>
+        <KpiCard label="OBM Net Revenue"  value={salesData  ? `LKR ${fmt(salesData.net_sale_value_lkr)}`  : "…"} sub="sales EDA · billed minus returns" color="purple"/>
         <KpiCard label="Avg Lead Time"    value={ordersData ? `${ordersData.avg_lead_time_days.toFixed(1)} days` : "…"} color="teal"/>
       </div>
 

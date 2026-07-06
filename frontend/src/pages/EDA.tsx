@@ -113,7 +113,7 @@ export function EDA() {
       <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
         <KpiCard label="Purchase Orders" value={ordersData ? fmt(ordersData.total_po)                           : "…"} color="blue"/>
         <KpiCard label="Avg Fill Rate"   value={ordersData ? `${(ordersData.avg_fill_rate*100).toFixed(1)}%`    : "…"} sub={`${ordersData?.fill_rate_lt1_count ?? 0} lines short-shipped`} color="green"/>
-        <KpiCard label="Parts Revenue"   value={salesData  ? `LKR ${fmt(salesData.total_sale_value_lkr)}`       : "…"} color="purple"/>
+        <KpiCard label="Net Revenue"      value={salesData  ? `LKR ${fmt(salesData.net_sale_value_lkr)}`        : "…"} sub="sales EDA · billed minus returns" color="purple"/>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm p-5">

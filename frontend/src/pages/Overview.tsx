@@ -239,7 +239,7 @@ export function Overview() {
             <KpiRow items={[
               { label: "Purchase Orders",    value: fmt(orders.total_po),                         sub: `${fmt(orders.total_po_documents)} documents` },
               { label: "Avg Fill Rate",      value: `${(orders.avg_fill_rate * 100).toFixed(1)}%`, sub: `${fmt(orders.fill_rate_lt1_count)} lines short-shipped`, badge: orders.avg_fill_rate < 0.9 ? "warn" : "ok" },
-              { label: "Parts Revenue",      value: `LKR ${fmt(sales.total_sale_value_lkr)}`,     sub: `${sales.data_year}` },
+              { label: "Net Revenue",        value: `LKR ${fmt(sales.net_sale_value_lkr)}`,      sub: `${sales.data_year} · billed minus returns` },
               { label: "Return Rate",        value: `${sales.return_rate_pct.toFixed(2)}%`,        sub: `LKR ${fmt(sales.total_return_value_lkr)}`, badge: sales.return_rate_pct > 10 ? "danger" : sales.return_rate_pct > 5 ? "warn" : "ok" },
               { label: "Unique Parts",       value: fmt(sales.unique_parts),                       sub: `${fmt(sales.unique_dealers)} dealers` },
               { label: "Fulfillment Rate",   value: `${sales.fulfillment_pct.toFixed(1)}%`,        sub: "order received → confirmed", badge: sales.fulfillment_pct < 80 ? "warn" : "ok" },
