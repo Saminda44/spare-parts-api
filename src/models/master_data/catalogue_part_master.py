@@ -317,9 +317,21 @@ def build_part_master(
     Returns:
         DataFrame sorted by part_no.  Empty when no sources found.
     """
-    # ── Discover all agent-cached JSONs ──────────────────────────────────────
+    # ── Discover all agent-cached JSONs that actually have parts ─────────────
+    # A JSON with 0 parts (agent ran but extracted nothing) is NOT considered
+    # cached — those PDFs fall through to the YamahaCatalogueExtractor fallback.
     json_files = sorted(agent_builds_dir.glob("*.json"))
-    cached_stems: set[str] = {jf.stem for jf in json_files}  # "AEROX_...pdf"
+    cached_stems: set[str] = set()
+    for jf in json_files:
+        try:
+            _jdata = json.loads(jf.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        total_parts = sum(len(b.get("parts", [])) for b in _jdata.get("builds", []))
+        if total_parts > 0:
+            cached_stems.add(jf.stem)
+        else:
+            logger.debug("JSON has 0 parts — will fall back to extractor: {}", jf.name)
 
     # ── Discover all PDFs, compute which ones are NOT cached ─────────────────
     uncached_pdfs: list[tuple[Path, str]] = []  # (pdf_path, model_folder)
@@ -337,8 +349,8 @@ def build_part_master(
                     uncached_pdfs.append((pdf_path, model_folder))
 
     logger.info(
-        "Part master build: {} agent JSONs + {} uncached PDFs to extract",
-        len(json_files),
+        "Part master build: {} agent JSONs with parts + {} PDFs for extractor fallback",
+        len(cached_stems),
         len(uncached_pdfs),
     )
 
