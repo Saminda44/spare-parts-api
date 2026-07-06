@@ -927,11 +927,14 @@ export interface ExtractionStatus {
   running: boolean;
   last_result: {
     ok: boolean; total_rows?: number; distinct_parts?: number;
-    models?: number; parquet?: string; error?: string;
+    models?: number; parquet?: string; excel?: string | null; error?: string;
   } | null;
   parquet_exists: boolean;
   parquet_size_kb: number;
+  excel_exists: boolean;
 }
+
+export const downloadCatalogExcelUrl = () => `/api/v1/catalog/download`;
 export const fetchExtractionStatus = () =>
   api.get<ExtractionStatus>("/catalog/extraction-status").then(r => r.data);
 export const runBatchExtraction = () =>

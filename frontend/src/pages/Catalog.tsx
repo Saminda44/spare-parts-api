@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   FileText, ArrowLeft, Search, X, Loader2,
-  CheckCircle2, AlertTriangle, Upload,
+  CheckCircle2, AlertTriangle, Upload, Database, Play, Download,
+  RefreshCw, ChevronRight,
 } from "lucide-react";
 import {
   fetchCatalog, fetchPdfTables, catalogFileUrl,
   fetchCatalogFolders, uploadCatalogPdf,
   fetchAgentBuilds,
+  fetchExtractionStatus, runBatchExtraction,
+  fetchCatalogCoverage, fetchCatalogParts,
+  downloadCatalogExcelUrl,
   type CatalogData, type CatalogModel, type PdfTableResult, type ColourCode,
   type AgentResult, type VariantColourEntry,
+  type ExtractionStatus, type CatalogCoverageData, type CatalogPartRow,
 } from "../api/client";
 
 const MODEL_COLORS: Record<string, string> = {
@@ -892,9 +897,314 @@ function ModelTable({ models, search, onSearch, onSelect }: {
   );
 }
 
+// ── Database extraction view ───────────────────────────────────────────────────
+
+function StatusBadge({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+      ok ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-600"
+    }`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-red-500"}`} />
+      {label}
+    </span>
+  );
+}
+
+function DatabaseView() {
+  const [status,   setStatus]   = useState<ExtractionStatus | null>(null);
+  const [coverage, setCoverage] = useState<CatalogCoverageData | null>(null);
+  const [parts,    setParts]    = useState<CatalogPartRow[] | null>(null);
+  const [selModel, setSelModel] = useState<string | null>(null);
+  const [partsLoading, setPartsLoading] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refreshStatus = () =>
+    fetchExtractionStatus()
+      .then(s => { setStatus(s); setStatusLoading(false); })
+      .catch(() => setStatusLoading(false));
+
+  const refreshCoverage = () =>
+    fetchCatalogCoverage().then(setCoverage).catch(() => {});
+
+  // Initial load
+  useEffect(() => {
+    refreshStatus();
+    refreshCoverage();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Poll every 2 s while extraction is running
+  useEffect(() => {
+    if (!status?.running) {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      return;
+    }
+    pollRef.current = setInterval(() => {
+      fetchExtractionStatus().then(s => {
+        setStatus(s);
+        if (!s.running) {
+          clearInterval(pollRef.current!); pollRef.current = null;
+          refreshCoverage();
+        }
+      });
+    }, 2000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.running]);
+
+  const handleRun = async () => {
+    setStarting(true);
+    try { await runBatchExtraction(); } finally { setStarting(false); }
+    setTimeout(refreshStatus, 400);
+  };
+
+  const handleModelClick = (model: string) => {
+    if (selModel === model) { setSelModel(null); setParts(null); return; }
+    setSelModel(model);
+    setPartsLoading(true);
+    fetchCatalogParts(model, 500)
+      .then(p => { setParts(p); setPartsLoading(false); })
+      .catch(() => setPartsLoading(false));
+  };
+
+  const lr = status?.last_result;
+  const isRunning = status?.running ?? false;
+  const hasData = status?.parquet_exists ?? false;
+
+  return (
+    <div className="space-y-5">
+
+      {/* ── Action bar ─────────────────────────────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          onClick={handleRun}
+          disabled={isRunning || starting}
+          className="flex items-center gap-2 px-4 py-2 text-sm rounded-lg bg-brand-blue text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium"
+        >
+          {(isRunning || starting)
+            ? <><Loader2 size={14} className="animate-spin" /> Extracting…</>
+            : <><Play size={14} /> Run Extraction</>}
+        </button>
+
+        {hasData && (
+          <a
+            href={downloadCatalogExcelUrl()}
+            download="catalog_parts.xlsx"
+            className="flex items-center gap-2 px-4 py-2 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors font-medium"
+          >
+            <Download size={14} /> Download Excel
+          </a>
+        )}
+
+        <button
+          onClick={() => { setStatusLoading(true); refreshStatus(); refreshCoverage(); }}
+          className="flex items-center gap-1.5 px-3 py-2 text-xs rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 transition-colors"
+        >
+          <RefreshCw size={12} /> Refresh
+        </button>
+
+        <div className="ml-auto flex items-center gap-2 text-xs text-slate-500">
+          <Database size={13} className="text-slate-400" />
+          <span className="font-mono">DATA_BACKEND</span>
+          <span className="px-2 py-0.5 rounded bg-slate-100 font-semibold text-slate-700">excel</span>
+          <span className="text-slate-300">→ set to postgres to sync to DB</span>
+        </div>
+      </div>
+
+      {/* ── Extraction status card ──────────────────────────────────────── */}
+      {statusLoading ? (
+        <div className="flex items-center gap-2 text-xs text-slate-400 py-4">
+          <Loader2 size={13} className="animate-spin" /> Loading extraction status…
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            {
+              label: "Parquet",
+              value: hasData ? "Present" : "Not yet run",
+              sub: hasData ? `${status!.parquet_size_kb} KB` : "Run extraction first",
+              ok: hasData,
+            },
+            {
+              label: "Part References",
+              value: lr?.ok ? (lr.total_rows ?? 0).toLocaleString() : "—",
+              sub: "rows extracted",
+              ok: !!(lr?.ok),
+            },
+            {
+              label: "Distinct Parts",
+              value: lr?.ok ? (lr.distinct_parts ?? 0).toLocaleString() : "—",
+              sub: "unique part numbers",
+              ok: !!(lr?.ok),
+            },
+            {
+              label: "Models",
+              value: lr?.ok ? (lr.models ?? 0).toLocaleString() : "—",
+              sub: "motorcycle models",
+              ok: !!(lr?.ok),
+            },
+          ].map(c => (
+            <div key={c.label} className={`rounded-xl border px-4 py-3 ${
+              c.ok ? "border-emerald-100 bg-emerald-50/30" : "border-slate-100 bg-slate-50/50"
+            }`}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-slate-500 font-medium">{c.label}</span>
+                <StatusBadge ok={c.ok} label={c.ok ? "OK" : "—"} />
+              </div>
+              <p className="text-lg font-bold text-slate-800">{c.value}</p>
+              <p className="text-xs text-slate-400">{c.sub}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Error state */}
+      {lr && !lr.ok && (
+        <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-red-50 border border-red-100 text-sm text-red-600">
+          <AlertTriangle size={14} className="shrink-0" />
+          <span>Last extraction failed: {lr.error}</span>
+        </div>
+      )}
+
+      {/* Running progress bar */}
+      {isRunning && (
+        <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-blue-50 border border-blue-100 text-sm text-blue-700">
+          <Loader2 size={14} className="animate-spin shrink-0" />
+          <span>Extraction in progress — scanning all PDFs…</span>
+          <span className="text-xs text-blue-400 ml-auto">polling every 2 s</span>
+        </div>
+      )}
+
+      {/* ── Coverage table ──────────────────────────────────────────────── */}
+      {coverage && coverage.extracted ? (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-slate-700">
+              Extracted Parts — by Model
+            </h3>
+            <span className="text-xs text-slate-400">
+              {coverage.total_part_references.toLocaleString()} total rows ·{" "}
+              {coverage.distinct_parts.toLocaleString()} distinct parts ·{" "}
+              {coverage.distinct_models} models
+            </span>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ background: "#1B3A6B" }}>
+                  {["Model", "PDF Count", "Distinct Parts", "OCR Pages", ""].map(h => (
+                    <th key={h} className="py-2.5 px-4 text-left text-xs font-bold text-white whitespace-nowrap">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {coverage.rows.map((row, i) => {
+                  const isSelected = selModel === row.model;
+                  return (
+                    <>
+                      <tr
+                        key={row.model}
+                        onClick={() => handleModelClick(row.model)}
+                        className={`border-b border-slate-100 cursor-pointer transition-colors ${
+                          isSelected ? "bg-blue-50" : i % 2 === 0 ? "bg-white hover:bg-slate-50" : "bg-slate-50/40 hover:bg-slate-100/60"
+                        }`}
+                      >
+                        <td className="py-2.5 px-4 font-medium text-slate-800">
+                          <div className="flex items-center gap-2">
+                            <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ background: modelColor(row.model) }} />
+                            {row.model}
+                          </div>
+                        </td>
+                        <td className="py-2.5 px-4 text-slate-600">{row.pdf_count}</td>
+                        <td className="py-2.5 px-4 font-semibold text-brand-blue">{row.distinct_parts.toLocaleString()}</td>
+                        <td className="py-2.5 px-4">
+                          {row.ocr_pages > 0 ? (
+                            <span className="flex items-center gap-1 text-amber-600 text-xs">
+                              <AlertTriangle size={11} /> {row.ocr_pages}
+                            </span>
+                          ) : <span className="text-slate-300 text-xs">—</span>}
+                        </td>
+                        <td className="py-2.5 px-4">
+                          <ChevronRight size={14} className={`text-slate-300 transition-transform ${isSelected ? "rotate-90 text-brand-blue" : ""}`} />
+                        </td>
+                      </tr>
+
+                      {/* Drill-down parts panel */}
+                      {isSelected && (
+                        <tr key={`${row.model}-parts`}>
+                          <td colSpan={5} className="p-0 border-b border-slate-200">
+                            <div className="bg-blue-50/60 border-t border-blue-100 px-6 py-4">
+                              {partsLoading ? (
+                                <div className="flex items-center gap-2 text-xs text-slate-400 py-2">
+                                  <Loader2 size={12} className="animate-spin" /> Loading parts for {row.model}…
+                                </div>
+                              ) : parts && parts.length > 0 ? (
+                                <>
+                                  <p className="text-xs font-semibold text-slate-600 mb-2">
+                                    {parts.length} parts extracted from {row.model} PDFs
+                                    {parts.length === 500 && <span className="text-slate-400 font-normal"> (showing first 500)</span>}
+                                  </p>
+                                  <div className="overflow-auto rounded-lg border border-blue-200" style={{ maxHeight: "280px" }}>
+                                    <table className="w-full text-xs">
+                                      <thead className="sticky top-0 bg-blue-100">
+                                        <tr>
+                                          <th className="py-1.5 px-3 text-left font-semibold text-blue-800">Part Number</th>
+                                          <th className="py-1.5 px-3 text-left font-semibold text-blue-800">Source File</th>
+                                          <th className="py-1.5 px-3 text-left font-semibold text-blue-800">OCR</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {parts.map((p, pi) => (
+                                          <tr key={pi} className={`border-t border-blue-100 ${pi % 2 === 0 ? "bg-white/60" : "bg-blue-50/30"}`}>
+                                            <td className="py-1.5 px-3 font-mono text-slate-800">{p.part_number || "—"}</td>
+                                            <td className="py-1.5 px-3 text-slate-500 truncate max-w-xs">{p.source_file}</td>
+                                            <td className="py-1.5 px-3">
+                                              {p.ocr_used
+                                                ? <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold">OCR</span>
+                                                : <span className="text-slate-300">—</span>}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </>
+                              ) : (
+                                <p className="text-xs text-slate-400 py-2">No parts found for this model</p>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : coverage && !coverage.extracted ? (
+        <div className="flex flex-col items-center justify-center py-16 gap-3 text-slate-400">
+          <Database size={36} className="text-slate-200" />
+          <p className="text-sm font-medium text-slate-500">No extraction data yet</p>
+          <p className="text-xs text-center max-w-xs">
+            Click <strong>Run Extraction</strong> to scan all PDF catalogues and populate the database table.
+          </p>
+        </div>
+      ) : null}
+
+    </div>
+  );
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────────
 
-type MainTab = "pdf" | "upload";
+type MainTab = "pdf" | "upload" | "db";
 
 export function Catalog() {
   const [pdfData,       setPdfData]       = useState<CatalogData | null>(null);
@@ -938,6 +1248,10 @@ export function Catalog() {
               className={`flex items-center gap-2 px-4 py-1.5 text-sm rounded-lg font-medium transition-colors ${mainTab === "upload" ? "bg-brand-blue text-white" : "text-slate-500 hover:bg-slate-50"}`}>
               <Upload size={14} /> Upload PDF
             </button>
+            <button onClick={() => setMainTab("db")}
+              className={`flex items-center gap-2 px-4 py-1.5 text-sm rounded-lg font-medium transition-colors ${mainTab === "db" ? "bg-brand-blue text-white" : "text-slate-500 hover:bg-slate-50"}`}>
+              <Database size={14} /> Database
+            </button>
           </div>
 
           {mainTab === "pdf" && pdfData && (
@@ -952,6 +1266,8 @@ export function Catalog() {
           {mainTab === "upload" && (
             <UploadPanel onCatalogRefresh={loadCatalog} />
           )}
+
+          {mainTab === "db" && <DatabaseView />}
         </div>
       </div>
     </div>

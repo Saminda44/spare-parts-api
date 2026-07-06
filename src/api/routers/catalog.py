@@ -208,12 +208,16 @@ def run_batch_extraction(background_tasks: BackgroundTasks) -> dict[str, Any]:
         _EXTRACT_STATUS["running"] = True
         _EXTRACT_STATUS["last_result"] = None
         try:
+            from src.db import save_catalog_parts  # noqa: PLC0415
+
             _INTERIM.mkdir(parents=True, exist_ok=True)
             _OUTPUTS.mkdir(parents=True, exist_ok=True)
             df = _EXTRACTOR.extract_all(PDF_ROOT, save_path=_PARTS_OUT)
             # Also save Excel for easy download / business review
             if not df.empty:
                 df.to_excel(_PARTS_XLSX, index=False, engine="openpyxl")
+            # Persist to PostgreSQL when DATA_BACKEND=postgres (non-fatal if unavailable)
+            save_catalog_parts(df)
             _EXTRACT_STATUS["last_result"] = {
                 "ok": True,
                 "total_rows": len(df),
