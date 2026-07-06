@@ -40,7 +40,7 @@ from __future__ import annotations
 import re
 from collections import Counter as _Counter
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path  # noqa: TCH003
 from typing import Any
 
 import pandas as pd
@@ -51,15 +51,24 @@ from loguru import logger
 # ---------------------------------------------------------------------------
 
 COLUMNS: list[str] = [
-    "section", "fig_no", "ref_no", "part_no",
-    "description", "qty",
-    "nine_digit_part_no", "superseded_part_no",
+    "section",
+    "fig_no",
+    "ref_no",
+    "part_no",
+    "description",
+    "qty",
+    "nine_digit_part_no",
+    "superseded_part_no",
     "remarks",
 ]
 DISPLAY_HEADERS: list[str] = [
-    "Section", "Ref. No.", "Part No.",
-    "Description", "Q'ty",
-    "9 Digit Part No.", "Superseded Part No.",
+    "Section",
+    "Ref. No.",
+    "Part No.",
+    "Description",
+    "Q'ty",
+    "9 Digit Part No.",
+    "Superseded Part No.",
     "Remarks",
 ]
 
@@ -73,89 +82,149 @@ DISPLAY_HEADERS: list[str] = [
 #       (bearing/seal codes where the suffix encodes type+size with letters)
 #   2-part mixed first seg:          e.g. 95E32-06010 (Yamaha fastener series)
 #   12-char: XXXXXXXXXXXX            e.g. 5DGE35860100 (ENTICER/YBX125)
-_DASH = r'[-–]'
+_DASH = r"[-–]"
 _PN_PAT = re.compile(
-    r'\b('
+    r"\b("
     # 3- or 4-segment: XXX-XXXXX-NN[-XX]
     # Third segment is [A-Z0-9]{2} (not [0-9]{2}) because Yamaha graphic/decal parts
     # use letter-prefixed revision codes: B65-F174G-C0, B65-F174H-D0, etc.
-    r'[A-Z0-9]{2,5}' + _DASH + r'[A-Z0-9]{3,8}' + _DASH + r'[A-Z0-9]{2}(?:' + _DASH + r'[A-Z0-9]{2})?'
+    r"[A-Z0-9]{2,5}"
+    + _DASH
+    + r"[A-Z0-9]{3,8}"
+    + _DASH
+    + r"[A-Z0-9]{2}(?:"
+    + _DASH
+    + r"[A-Z0-9]{2})?"
     # 2-segment with 5-char alphanumeric first segment, 3-8 char alphanumeric second
     # covers: NNNNN-NNNNN, NNNNN-NNNYX, XNNNN-NNNNN, etc.
-    r'|[A-Z0-9]{5}' + _DASH + r'[A-Z0-9]{3,8}'
-    r'|[A-Z0-9]{12}'
-    r')\b'
+    r"|[A-Z0-9]{5}" + _DASH + r"[A-Z0-9]{3,8}"
+    r"|[A-Z0-9]{12}"
+    r")\b"
 )
 # FIG. section header — "FIG. 1 (1D0) CYLINDER HEAD"
-_FIG_PAT = re.compile(
-    r'^FIG\.\s+(\d+[A-Z]?)\s*(?:\([^)]+\)\s*)?(.+)$', re.IGNORECASE
-)
+_FIG_PAT = re.compile(r"^FIG\.\s+(\d+[A-Z]?)\s*(?:\([^)]+\)\s*)?(.+)$", re.IGNORECASE)
 # Lines to skip (header labels, noise)
 _SKIP_PAT = re.compile(
-    r'^(REF\.?|PART\s+NO\.?|PART\s+NAME|DESCRIPTION|REMARKS|NO\.?|'
-    r'CONTENTS?|Q\'?TY\.?|12\s+DIGIT|9\s+DIGIT)$',
+    r"^(REF\.?|PART\s+NO\.?|PART\s+NAME|DESCRIPTION|REMARKS|NO\.?|"
+    r"CONTENTS?|Q\'?TY\.?|12\s+DIGIT|9\s+DIGIT)$",
     re.IGNORECASE,
 )
 # Model-code stamps at top of page, e.g. "1BV2", "21C1", "5AK5"
-_MODEL_STAMP_PAT = re.compile(r'^[A-Z0-9]{2,5}\d[A-Z]?$')
+_MODEL_STAMP_PAT = re.compile(r"^[A-Z0-9]{2,5}\d[A-Z]?$")
 # Copyright line injected by some PDFs
-_COPYRIGHT_PAT = re.compile(r'\s*No part of this Publication.*', re.IGNORECASE)
+_COPYRIGHT_PAT = re.compile(r"\s*No part of this Publication.*", re.IGNORECASE)
 # Page-type skips — these page formats are not FIG parts tables
 # KITS pages: "KITS-5YY6", "KITS 5YY6" — kit assembly lists
-_KITS_PAGE_PAT = re.compile(r'\bKITS[-\s]\S', re.IGNORECASE)
+_KITS_PAGE_PAT = re.compile(r"\bKITS[-\s]\S", re.IGNORECASE)
 # Cross-reference index pages: "PART NO." appears 3+ times, NOT necessarily consecutive —
 # the numerical index layout is "PART NO. | REF. NO. | PART NO. | REF. NO. | …" so the
 # old consecutive pattern never matched (REF. NO. broke the run).
 _XREF_PAGE_PAT = re.compile(
-    r'PART\s+NO.{0,60}PART\s+NO.{0,60}PART\s+NO',
+    r"PART\s+NO.{0,60}PART\s+NO.{0,60}PART\s+NO",
     re.IGNORECASE | re.DOTALL,
 )
 # Index-page title guard: catches "NUMERICAL INDEX", "ALPHABETICAL INDEX", etc.
 _INDEX_PAGE_PAT = re.compile(
-    r'(?:NUMERICAL|ALPHABETICAL|COLOUR|GENERAL)\s+INDEX',
+    r"(?:NUMERICAL|ALPHABETICAL|COLOUR|GENERAL)\s+INDEX",
     re.IGNORECASE,
 )
 # CID glyph fallback artifact from pdfplumber font decoding (e.g. "(cid:2)")
-_CID_PAT = re.compile(r'\s*\(cid:\d+\)', re.IGNORECASE)
+_CID_PAT = re.compile(r"\s*\(cid:\d+\)", re.IGNORECASE)
 
 # Cover-page variant code pattern: Yamaha writes each variant as "( B65J )"
 # on the title page listing all models covered by the catalogue.
-_COVER_VARIANT_PAT = re.compile(r'\(\s*([A-Z0-9]{3,5})\s*\)')
+_COVER_VARIANT_PAT = re.compile(r"\(\s*([A-Z0-9]{3,5})\s*\)")
 # Slash-separated pair pattern for catalogues that list two variants as
 # "B811/B821" or "(B9E1 / B9E2)" without separate paren wrapping.
-_SLASH_VARIANT_PAT = re.compile(r'\b([A-Z0-9]{3,5})\s*/\s*([A-Z0-9]{3,5})\b')
+_SLASH_VARIANT_PAT = re.compile(r"\b([A-Z0-9]{3,5})\s*/\s*([A-Z0-9]{3,5})\b")
 
 # Leading model/variant stamp that may precede "FIG." on the same pdfplumber
 # word-row, e.g. "B65J FIG. 14 FRAME" or "21C1 FIG. 1 CYLINDER HEAD".
-_STAMP_PREFIX_PAT = re.compile(r'^[A-Z0-9]{2,6}\s+', re.IGNORECASE)
+_STAMP_PREFIX_PAT = re.compile(r"^[A-Z0-9]{2,6}\s+", re.IGNORECASE)
 
 # Partial FIG line — just the number, section name absent or on the next row.
-_FIG_PARTIAL_PAT = re.compile(r'(?:^|.*\s)(FIG\.\s+(\d+[A-Z]?))\s*$', re.IGNORECASE)
+_FIG_PARTIAL_PAT = re.compile(r"(?:^|.*\s)(FIG\.\s+(\d+[A-Z]?))\s*$", re.IGNORECASE)
 
 # "AVAILABLE COLOUR" page header — these pages list bike colour variants as image captions,
 # e.g. "Yamaha Alpha Cygnus Black" / "Yamaha Alpha Cygnus Cyan".
-_AVAIL_COLOUR_PAT = re.compile(r'AVAILABLE\s+COLOU?RS?', re.IGNORECASE)
+_AVAIL_COLOUR_PAT = re.compile(r"AVAILABLE\s+COLOU?RS?", re.IGNORECASE)
 # Colour nouns used to validate caption lines on available-colour pages.
-_CAPTION_COLOUR_NOUNS: frozenset[str] = frozenset({
-    "black", "white", "blue", "red", "green", "yellow", "silver", "gray",
-    "grey", "orange", "gold", "cyan", "brown", "purple", "violet", "pink",
-    "cream", "champagne", "magenta", "maroon", "metallic",
-    "matte", "matt", "mat", "vivid", "racing", "bright", "dull",
-    "bluish", "purplish", "reddish", "greenish", "cocktail", "rally",
-    "navy", "cobalt", "candy", "sparkle", "pearl",
-    # "dark", "deep", "light" intentionally omitted — too generic;
-    # colours that use them (Dark Grey, Deep Blue) also have a specific colour noun.
-})
+_CAPTION_COLOUR_NOUNS: frozenset[str] = frozenset(
+    {
+        "black",
+        "white",
+        "blue",
+        "red",
+        "green",
+        "yellow",
+        "silver",
+        "gray",
+        "grey",
+        "orange",
+        "gold",
+        "cyan",
+        "brown",
+        "purple",
+        "violet",
+        "pink",
+        "cream",
+        "champagne",
+        "magenta",
+        "maroon",
+        "metallic",
+        "matte",
+        "matt",
+        "mat",
+        "vivid",
+        "racing",
+        "bright",
+        "dull",
+        "bluish",
+        "purplish",
+        "reddish",
+        "greenish",
+        "cocktail",
+        "rally",
+        "navy",
+        "cobalt",
+        "candy",
+        "sparkle",
+        "pearl",
+        # "dark", "deep", "light" intentionally omitted — too generic;
+        # colours that use them (Dark Grey, Deep Blue) also have a specific colour noun.
+    }
+)
 # Subset of colour nouns valid as standalone single-word colour names.
 # Modifiers ("metallic", "mat", "vivid", ...) must be accompanied by a named colour.
-_STANDALONE_COLOUR_NOUNS: frozenset[str] = frozenset({
-    "black", "white", "blue", "red", "green", "yellow", "silver", "gray",
-    "grey", "orange", "gold", "cyan", "brown", "purple", "violet", "pink",
-    "cream", "champagne", "magenta", "maroon", "cobalt", "navy",
-})
+_STANDALONE_COLOUR_NOUNS: frozenset[str] = frozenset(
+    {
+        "black",
+        "white",
+        "blue",
+        "red",
+        "green",
+        "yellow",
+        "silver",
+        "gray",
+        "grey",
+        "orange",
+        "gold",
+        "cyan",
+        "brown",
+        "purple",
+        "violet",
+        "pink",
+        "cream",
+        "champagne",
+        "magenta",
+        "maroon",
+        "cobalt",
+        "navy",
+    }
+)
 # Variant-code prefix that some catalogues use in colour captions:
 # "2SP3-Gold", "BP16-Cyan", "BP16-Black Metallic" etc.
-_VARIANT_CODE_PREFIX_PAT = re.compile(r'^([A-Z0-9]{2,6})-(.*)', re.IGNORECASE)
+_VARIANT_CODE_PREFIX_PAT = re.compile(r"^([A-Z0-9]{2,6})-(.*)", re.IGNORECASE)
 
 
 def _try_fig_match(
@@ -196,6 +265,7 @@ def _try_fig_match(
 
     return None
 
+
 # Y-tolerance for grouping words into the same logical row (points).
 # Using a sequential-window approach (not fixed buckets) so small baseline
 # variations (e.g. BB8-E1392-00 rendered 4 pts above its description text)
@@ -205,44 +275,60 @@ _Y_TOL = 5
 # Data classes
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ColBounds:
-    """X-coordinate boundaries for the right-hand columns of a Yamaha parts page.
+    """X-coordinate boundaries for ALL columns of a Yamaha parts page.
 
+    The extractor first identifies columns from the header row, then uses
+    these positions to classify each word into the correct column.
+
+    pn_start          — x-start of the PART NO. (or PART NAME) column.
+    desc_start        — x-start of the DESCRIPTION column.
+    qty_start         — x-start of the Q'TY column (single-variant PDFs only;
+                        multi-variant PDFs use qty_col_xs instead).
     rem_start         — x-start of the REMARKS column.
     qty_col_xs        — x-centre of each variant Q'ty column, left-to-right.
                         Empty for single-variant PDFs.
-    nine_digit_start  — x-start of the "9 DIGIT PART NO." column present in some
-                        India-market PDFs (e.g. YBX125).  9999.0 when absent.
+    nine_digit_start  — x-start of the "9 DIGIT PART NO." column present in
+                        some India-market PDFs (e.g. YBX125).  9999.0 when absent.
     superseded_start  — x-start of the "SUPERSEDED PART NO." column.  9999.0 when absent.
+    header_detected   — True when a column-header row was found and all
+                        positions above come from it (more reliable).
     """
-    rem_start:        float       = 9999.0
-    qty_col_xs:       list[float] = field(default_factory=list)
-    nine_digit_start: float       = 9999.0
-    superseded_start: float       = 9999.0
+
+    pn_start: float = 9999.0
+    desc_start: float = 9999.0
+    qty_start: float = 9999.0
+    rem_start: float = 9999.0
+    qty_col_xs: list[float] = field(default_factory=list)
+    nine_digit_start: float = 9999.0
+    superseded_start: float = 9999.0
+    header_detected: bool = False
 
 
 @dataclass
 class ExtractionResult:
     """Output of extracting one PDF file."""
-    pdf_path:       Path
-    model:          str
-    rows:           list[dict[str, str]]
-    pages_scanned:  int
+
+    pdf_path: Path
+    model: str
+    rows: list[dict[str, str]]
+    pages_scanned: int
     sections_found: int
-    ocr_flagged:    int    # pages that needed OCR but couldn't be handled
-    variants:          list[str] = field(default_factory=list)  # e.g. ["B65J","B65L","B65M","B65N"]
+    ocr_flagged: int  # pages that needed OCR but couldn't be handled
+    variants: list[str] = field(default_factory=list)  # e.g. ["B65J","B65L","B65M","B65N"]
     # colour_codes: [{abbreviation, name, code, is_model_colour}] from the PDF's colour table
-    colour_codes:      list[dict] = field(default_factory=list)
+    colour_codes: list[dict] = field(default_factory=list)
     # available_colours: captions from "AVAILABLE COLOUR" page, e.g.
     # ["Yamaha Alpha Cygnus Black", "Yamaha Alpha Cygnus Cyan"]
-    available_colours:    list[str] = field(default_factory=list)
+    available_colours: list[str] = field(default_factory=list)
     # available_colour_map: populated by CatalogueAgent after web/PDF colour matching;
     # empty when result comes directly from the extractor without agent post-processing.
     available_colour_map: dict[str, str] = field(default_factory=dict)
-    manufacture_year:  str | None = None   # e.g. "2019" from ©2019 on the cover page
-    warnings:          list[str] = field(default_factory=list)
-    error:             str | None = None
+    manufacture_year: str | None = None  # e.g. "2019" from ©2019 on the cover page
+    warnings: list[str] = field(default_factory=list)
+    error: str | None = None
 
     @property
     def df(self) -> pd.DataFrame:
@@ -264,6 +350,7 @@ class ExtractionResult:
 # Core extractor
 # ---------------------------------------------------------------------------
 
+
 class YamahaCatalogueExtractor:
     """Extract parts tables from Yamaha PDF catalogues.
 
@@ -274,7 +361,9 @@ class YamahaCatalogueExtractor:
     Usage::
 
         ex = YamahaCatalogueExtractor()
-        result = ex.extract(Path("data/raw/pdf_catalogues/FZ & FZS/FZ16 21C1.pdf"), model="FZ & FZS")
+        result = ex.extract(
+            Path("data/raw/pdf_catalogues/FZ & FZS/FZ16 21C1.pdf"), model="FZ & FZS"
+        )
         df = result.df  # pandas DataFrame with COLUMNS
 
         all_df = ex.extract_all(Path("data/raw/pdf_catalogues"))
@@ -313,8 +402,10 @@ class YamahaCatalogueExtractor:
                 for page in pdf.pages[: self.max_pages]:
                     pages_scanned += 1
                     words = page.extract_words(
-                        x_tolerance=4, y_tolerance=4,
-                        keep_blank_chars=False, use_text_flow=False,
+                        x_tolerance=4,
+                        y_tolerance=4,
+                        keep_blank_chars=False,
+                        use_text_flow=False,
                     )
 
                     if not words:
@@ -325,8 +416,7 @@ class YamahaCatalogueExtractor:
 
                     # Skip KITS pages, cross-reference index pages, and named index pages
                     page_header = " ".join(
-                        " ".join(w["text"] for w in ws)
-                        for _, ws in word_rows[:8]
+                        " ".join(w["text"] for w in ws) for _, ws in word_rows[:8]
                     )
                     if (
                         _KITS_PAGE_PAT.search(page_header)
@@ -359,8 +449,8 @@ class YamahaCatalogueExtractor:
                                 new_bounds.superseded_start = last_bounds.superseded_start
                         bounds = new_bounds
 
-                    page_rows, new_section, new_fig, page_sects = (
-                        self._parse_word_rows(word_rows, bounds, current_section, current_fig, num_variants)
+                    page_rows, new_section, new_fig, page_sects = self._parse_word_rows(
+                        word_rows, bounds, current_section, current_fig, num_variants
                     )
                     rows.extend(page_rows)
                     sections_seen.update(page_sects)
@@ -375,9 +465,14 @@ class YamahaCatalogueExtractor:
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Extraction failed for {pdf_path}: {exc}")
             return ExtractionResult(
-                pdf_path=pdf_path, model=model, rows=rows,
-                pages_scanned=pages_scanned, sections_found=len(sections_seen),
-                ocr_flagged=ocr_flagged, warnings=warnings, error=str(exc),
+                pdf_path=pdf_path,
+                model=model,
+                rows=rows,
+                pages_scanned=pages_scanned,
+                sections_found=len(sections_seen),
+                ocr_flagged=ocr_flagged,
+                warnings=warnings,
+                error=str(exc),
             )
 
         # Fallback: if positional extraction found nothing, try text-line parser
@@ -399,7 +494,9 @@ class YamahaCatalogueExtractor:
         # Extract available colour captions from the "AVAILABLE COLOUR" page
         available_colours = self._extract_available_colours(pdf_path)
         if available_colours:
-            logger.info(f"{pdf_path.name}: found {len(available_colours)} available colour(s) from page")
+            logger.info(
+                f"{pdf_path.name}: found {len(available_colours)} available colour(s) from page"
+            )
 
         # Extract manufacture year from cover page (©YYYY / "1st edition, May YYYY")
         manufacture_year = self._extract_manufacture_year(pdf_path)
@@ -407,10 +504,15 @@ class YamahaCatalogueExtractor:
             logger.info(f"{pdf_path.name}: manufacture year {manufacture_year}")
 
         return ExtractionResult(
-            pdf_path=pdf_path, model=model, rows=rows,
-            pages_scanned=pages_scanned, sections_found=len(sections_seen),
-            ocr_flagged=ocr_flagged, variants=variants,
-            colour_codes=colour_codes, available_colours=available_colours,
+            pdf_path=pdf_path,
+            model=model,
+            rows=rows,
+            pages_scanned=pages_scanned,
+            sections_found=len(sections_seen),
+            ocr_flagged=ocr_flagged,
+            variants=variants,
+            colour_codes=colour_codes,
+            available_colours=available_colours,
             manufacture_year=manufacture_year,
             warnings=warnings,
         )
@@ -445,9 +547,7 @@ class YamahaCatalogueExtractor:
         )
 
         if not pdf_files:
-            empty = pd.DataFrame(
-                columns=COLUMNS + ["model", "source_file", "ocr_used"]
-            )
+            empty = pd.DataFrame(columns=COLUMNS + ["model", "source_file", "ocr_used"])
             if save_path:
                 empty.to_parquet(save_path, index=False)
             return empty
@@ -467,7 +567,7 @@ class YamahaCatalogueExtractor:
                     return (pdf_file, model_name, None)
 
                 if not result.rows:
-                    logger.warning(f"  → no rows extracted")
+                    logger.warning("  → no rows extracted")
                     return (pdf_file, model_name, None)
 
                 df = result.df.copy()
@@ -482,9 +582,7 @@ class YamahaCatalogueExtractor:
         # Parallel extraction using ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(extract_one, pf): pf for pf in pdf_files}
-            completed = 0
-            for future in as_completed(futures):
-                completed += 1
+            for completed, future in enumerate(as_completed(futures), start=1):
                 try:
                     pdf_file, model_name, df = future.result()
                     if df is not None:
@@ -494,9 +592,7 @@ class YamahaCatalogueExtractor:
                     logger.error(f"Future failed: {exc}")
 
         if not all_dfs:
-            empty = pd.DataFrame(
-                columns=COLUMNS + ["model", "source_file", "ocr_used"]
-            )
+            empty = pd.DataFrame(columns=COLUMNS + ["model", "source_file", "ocr_used"])
             if save_path:
                 empty.to_parquet(save_path, index=False)
             return empty
@@ -520,9 +616,7 @@ class YamahaCatalogueExtractor:
         return merged
 
         if not all_dfs:
-            empty = pd.DataFrame(
-                columns=COLUMNS + ["model", "source_file", "ocr_used"]
-            )
+            empty = pd.DataFrame(columns=COLUMNS + ["model", "source_file", "ocr_used"])
             if save_path:
                 empty.to_parquet(save_path, index=False)
             return empty
@@ -578,26 +672,35 @@ class YamahaCatalogueExtractor:
     def _detect_col_bounds(
         word_rows: list[tuple[float, list[dict]]],
     ) -> ColBounds | None:
-        """Detect REMARKS and Q'ty column boundaries from the page header rows.
+        """Detect all column boundaries from the page header rows.
 
-        Scans the first 25 word-rows for:
-        - "REMARKS" keyword  → sets rem_start (rightmost column anchor)
-        - Variant-code tokens (e.g. "J56B", "L56B", "M56B", "N56B") on header
-          rows (rows without part numbers) → accumulates x-centres as qty_col_xs
-        - "9 DIGIT PART NO." and "SUPERSEDED PART NO." column headers →
-          sets nine_digit_start and superseded_start using a flat x-proximity
-          scan so split-row headers (where "9" and "DIGIT" fall on different
-          Y-rows) are still detected correctly.
+        Pass 1 — explicit header identification (_detect_header_row):
+          Scans for the header row (containing ≥3 column keywords such as PART,
+          DESCRIPTION, REMARKS, QTY) and records the x-start of every column
+          found there.  This gives us pn_start, desc_start, and qty_start which
+          the old code never detected.
 
-        Some PDFs split the variant-code header across two Y-rows (e.g. AEROX:
-        "L56B M56B N56B" on y=45, "J56B" on y=50).  The previous single-row
-        detection missed the second row.  We now accumulate codes from ALL
-        header rows and sort by x-position, so every qty column is captured.
+        Pass 2 — specialised detection (existing logic, unchanged):
+          - "REMARKS" keyword  → rem_start (rightmost column anchor)
+          - Variant-code tokens on header rows → qty_col_xs (multi-variant)
+          - "9 DIGIT PART NO." / "SUPERSEDED PART NO." → extra column starts
+
+        Pass-2 results take precedence over Pass-1 for the columns they cover
+        (rem_start, nine_digit_start, superseded_start) because the existing
+        detection is tuned for split-row headers and CRUX-style double-headers.
         """
-        rem_start        = 9999.0
-        nine_digit_start = 9999.0
-        superseded_start = 9999.0
-        raw_vc_xs: list[float] = []   # accumulate variant-code x-centres
+        # ── Pass 1: full header row scan ──────────────────────────────────────
+        header = YamahaCatalogueExtractor._detect_header_row(word_rows)
+        pn_start = header.get("part_no", 9999.0)
+        desc_start = header.get("description", 9999.0)
+        qty_start = header.get("qty", 9999.0)
+        # Seed from header; Pass 2 may refine these three below.
+        rem_start = header.get("remarks", 9999.0)
+        nine_digit_start = header.get("nine_digit", 9999.0)
+        superseded_start = header.get("superseded", 9999.0)
+
+        # ── Pass 2: specialised detection (original logic) ────────────────────
+        raw_vc_xs: list[float] = []  # accumulate variant-code x-centres
 
         for _y, ws in word_rows[:25]:
             texts = [w["text"].upper() for w in ws]
@@ -637,10 +740,10 @@ class YamahaCatalogueExtractor:
         # y=40 and "DIGIT" at y=44 land in separate word-rows).  A flat x-proximity
         # scan across all header rows handles this reliably: we pair each "DIGIT"
         # token with any "9" token whose x0 is within 50 pts to its left.
-        flat_words   = [w for _, ws in word_rows[:25] for w in ws]
+        flat_words = [w for _, ws in word_rows[:25] for w in ws]
         digit_x_list = [w["x0"] for w in flat_words if w["text"].upper() == "DIGIT"]
-        nine_x_list  = [w["x0"] for w in flat_words if w["text"].upper() == "9"]
-        sup_words    = [w for w in flat_words if w["text"].upper() == "SUPERSEDED"]
+        nine_x_list = [w["x0"] for w in flat_words if w["text"].upper() == "9"]
+        sup_words = [w for w in flat_words if w["text"].upper() == "SUPERSEDED"]
 
         for dig_x in digit_x_list:
             near_nines = [x for x in nine_x_list if x < dig_x and dig_x - x < 50]
@@ -653,25 +756,118 @@ class YamahaCatalogueExtractor:
 
         if nine_digit_start < 9000 or superseded_start < 9000:
             logger.debug(
-                f"Extra columns detected: nine_digit_start={nine_digit_start:.1f} "
-                f"superseded_start={superseded_start:.1f} rem_start={rem_start:.1f}"
+                "Extra columns detected: nine_digit_start={:.1f} "
+                "superseded_start={:.1f} rem_start={:.1f}",
+                nine_digit_start,
+                superseded_start,
+                rem_start,
             )
 
-        if rem_start < 9000 or qty_col_xs or nine_digit_start < 9000 or superseded_start < 9000:
+        any_detected = (
+            rem_start < 9000
+            or qty_col_xs
+            or nine_digit_start < 9000
+            or superseded_start < 9000
+            or pn_start < 9000
+            or desc_start < 9000
+            or qty_start < 9000
+        )
+        if any_detected:
             return ColBounds(
+                pn_start=pn_start,
+                desc_start=desc_start,
+                qty_start=qty_start,
                 rem_start=rem_start,
                 qty_col_xs=qty_col_xs,
                 nine_digit_start=nine_digit_start,
                 superseded_start=superseded_start,
+                header_detected=bool(header),
             )
         return None
 
     @staticmethod
+    def _detect_header_row(
+        word_rows: list[tuple[float, list[dict]]],
+    ) -> dict[str, float]:
+        """Find the column-header row and return {logical_col: x_start}.
+
+        Scans the first 30 word-rows, skipping data rows (those that match
+        the part-number pattern). The first row that contains 3+ distinct
+        column-header keywords is taken as the header row and its word
+        x-positions are recorded for every recognised column.
+
+        Returned keys (only keys for columns that were actually found):
+          "ref_no", "part_no", "description", "qty", "remarks",
+          "nine_digit", "superseded"
+        """
+        # Keywords whose presence (in sufficient combination) marks a header row.
+        _KW = {
+            "REF",
+            "PART",
+            "NO",
+            "DESCRIPTION",
+            "DESC",
+            "QTY",
+            "REMARKS",
+            "SUPERSEDED",
+            "DIGIT",
+            "NAME",
+        }
+
+        for _y, ws in word_rows[:30]:
+            joined_raw = " ".join(w["text"] for w in ws)
+            if _PN_PAT.search(joined_raw):
+                continue  # data row
+
+            norms = [w["text"].upper().strip().rstrip(".") for w in ws]
+            # Strip internal apostrophe so "Q'TY" → "QTY"
+            bare_norms = [n.replace("'", "") for n in norms]
+
+            hits = sum(1 for n in bare_norms if n in _KW)
+            if hits < 3:
+                continue
+
+            # Identified as a header row — capture column x-positions.
+            col_starts: dict[str, float] = {}
+            for i, (norm, bare, w) in enumerate(zip(norms, bare_norms, ws, strict=False)):
+                if norm == "REF" and "ref_no" not in col_starts:
+                    col_starts["ref_no"] = w["x0"]
+                elif norm == "PART" and "part_no" not in col_starts:
+                    col_starts["part_no"] = w["x0"]
+                elif norm in ("DESCRIPTION", "DESC", "NAME") and "description" not in col_starts:
+                    col_starts["description"] = w["x0"]
+                elif bare in ("QTY", "QUANTITY") and "qty" not in col_starts:
+                    col_starts["qty"] = w["x0"]
+                elif norm == "REMARKS" and "remarks" not in col_starts:
+                    col_starts["remarks"] = w["x0"]
+                elif norm == "SUPERSEDED" and "superseded" not in col_starts:
+                    col_starts["superseded"] = w["x0"]
+                elif norm == "9" and "nine_digit" not in col_starts:
+                    # "9 DIGIT PART NO." — confirm next word is "DIGIT"
+                    for look in range(i + 1, min(i + 3, len(norms))):
+                        if norms[look] == "DIGIT":
+                            col_starts["nine_digit"] = w["x0"]
+                            break
+
+            if col_starts:
+                logger.debug(
+                    "Header row detected at y={:.1f}: {}",
+                    _y,
+                    ", ".join(f"{k}={v:.1f}" for k, v in sorted(col_starts.items())),
+                )
+                return col_starts
+
+        return {}
+
+    @staticmethod
     def _is_variant_code(s: str) -> bool:
         """True for short alphanumeric tokens that mix letters and digits (variant codes)."""
-        return (3 <= len(s) <= 5 and s.isalnum()
-                and any(c.isdigit() for c in s)
-                and any(c.isalpha() for c in s))
+        return (
+            3 <= len(s) <= 5
+            and s.isalnum()
+            and any(c.isdigit() for c in s)
+            and any(c.isalpha() for c in s)
+        )
 
     @staticmethod
     def _collect_variant_row(
@@ -708,11 +904,11 @@ class YamahaCatalogueExtractor:
         import pdfplumber as _plumber
 
         # ©YYYY or ©YYYY (full-width ©)
-        _COPYRIGHT = re.compile(r'[©©]\s*(\d{4})')
+        _COPYRIGHT = re.compile(r"[©©]\s*(\d{4})")
         # "edition, Month YYYY" or "edition YYYY"
-        _EDITION   = re.compile(r'edition[,\s]+\w+\s+(\d{4})', re.IGNORECASE)
+        _EDITION = re.compile(r"edition[,\s]+\w+\s+(\d{4})", re.IGNORECASE)
         # Standalone 4-digit year that looks plausible (avoid part numbers etc.)
-        _YEAR_BARE = re.compile(r'\b(19[89]\d|20[012]\d)\b')
+        _YEAR_BARE = re.compile(r"\b(19[89]\d|20[012]\d)\b")
 
         try:
             with _plumber.open(str(pdf_path)) as pdf:
@@ -742,18 +938,26 @@ class YamahaCatalogueExtractor:
         import pdfplumber as _plumber
 
         # Abbreviation: 2-8 alphanumeric chars, optionally followed by (*) or *
-        _ABBR_PAT = re.compile(r'^([A-Z0-9]{2,8})(\(\s*\*\s*\)|\*)?$')
+        _ABBR_PAT = re.compile(r"^([A-Z0-9]{2,8})(\(\s*\*\s*\)|\*)?$")
         # Paint code: 3-5 alphanumeric chars (e.g. "1344", "00V9", "0098", "SMX")
-        _CODE_PAT = re.compile(r'^[A-Z0-9]{3,5}$')
+        _CODE_PAT = re.compile(r"^[A-Z0-9]{3,5}$")
         # Words that indicate a header row — skip these
-        _HEADER_WORDS = frozenset({
-            'ABBREVIATION', 'ABBR', 'COLOUR', 'COLOR', 'NAME',
-            'CODE', 'COLOURNAME', 'COLOURCODE',
-        })
+        _HEADER_WORDS = frozenset(
+            {
+                "ABBREVIATION",
+                "ABBR",
+                "COLOUR",
+                "COLOR",
+                "NAME",
+                "CODE",
+                "COLOURNAME",
+                "COLOURCODE",
+            }
+        )
 
         def _parse_row(abbr_raw: str, name: str, code_raw: str) -> dict | None:
-            abbr_clean = abbr_raw.replace(' ', '').upper()
-            code_clean = code_raw.replace(' ', '').upper()
+            abbr_clean = abbr_raw.replace(" ", "").upper()
+            code_clean = code_raw.replace(" ", "").upper()
             m = _ABBR_PAT.match(abbr_clean)
             if not m or m.group(1) in _HEADER_WORDS:
                 return None
@@ -776,7 +980,7 @@ class YamahaCatalogueExtractor:
             with _plumber.open(str(pdf_path)) as pdf:
                 for page in pdf.pages[:15]:
                     # --- Strategy 1: pdfplumber ruled-table extraction ---
-                    for table in (page.extract_tables() or []):
+                    for table in page.extract_tables() or []:
                         if not table or len(table) < 3:
                             continue
                         entries: list[dict] = []
@@ -784,9 +988,9 @@ class YamahaCatalogueExtractor:
                             if not row or len(row) < 3:
                                 continue
                             e = _parse_row(
-                                str(row[0] or ''),
-                                str(row[1] or ''),
-                                str(row[2] or ''),
+                                str(row[0] or ""),
+                                str(row[1] or ""),
+                                str(row[2] or ""),
                             )
                             if e:
                                 entries.append(e)
@@ -801,29 +1005,31 @@ class YamahaCatalogueExtractor:
                     # Group words into Y-rows (same tolerance as main extractor)
                     rows_by_y: dict[float, list[dict]] = {}
                     for w in words:
-                        y_key = round(float(w.get('top', 0)) / _Y_TOL) * _Y_TOL
+                        y_key = round(float(w.get("top", 0)) / _Y_TOL) * _Y_TOL
                         rows_by_y.setdefault(y_key, []).append(w)
 
                     entries2: list[dict] = []
                     for y_key in sorted(rows_by_y):
-                        ws = sorted(rows_by_y[y_key], key=lambda w: w['x0'])
+                        ws = sorted(rows_by_y[y_key], key=lambda w: w["x0"])
                         if len(ws) < 3:
                             continue
 
                         # Left token may be split: "CM6" + "(*)" → join if next is a marker
-                        left_parts = [ws[0]['text'].strip()]
+                        left_parts = [ws[0]["text"].strip()]
                         rest_start = 1
-                        if len(ws) > 1 and ws[1]['text'].strip() in ('(*)', '*', '(*)'):
-                            left_parts.append(ws[1]['text'].strip())
+                        if len(ws) > 1 and ws[1]["text"].strip() in ("(*)", "*", "(*)"):
+                            left_parts.append(ws[1]["text"].strip())
                             rest_start = 2
 
-                        left = ''.join(left_parts).replace(' ', '').upper()
-                        right = ws[-1]['text'].strip()
+                        left = "".join(left_parts).replace(" ", "").upper()
+                        right = ws[-1]["text"].strip()
                         # Middle words form the colour name
                         middle_ws = ws[rest_start:-1]
-                        middle = ' '.join(w['text'] for w in middle_ws).strip()
+                        middle = " ".join(w["text"] for w in middle_ws).strip()
                         if not middle:
-                            middle = ws[rest_start]['text'].strip() if rest_start < len(ws) - 1 else ''
+                            middle = (
+                                ws[rest_start]["text"].strip() if rest_start < len(ws) - 1 else ""
+                            )
 
                         e = _parse_row(left, middle, right)
                         if e:
@@ -871,16 +1077,31 @@ class YamahaCatalogueExtractor:
         _MAX_WORDS = 8
         # 2–4 char ALL-CAPS endings that are paint-code abbreviations, not colours.
         # Common colour-word endings that are allowed even when all-caps:
-        _COLOUR_ENDINGS = frozenset({
-            "black", "white", "blue", "red", "cyan", "gray", "grey", "gold",
-            "pink", "green", "brown", "silver", "orange", "maroon", "purple",
-        })
+        _COLOUR_ENDINGS = frozenset(
+            {
+                "black",
+                "white",
+                "blue",
+                "red",
+                "cyan",
+                "gray",
+                "grey",
+                "gold",
+                "pink",
+                "green",
+                "brown",
+                "silver",
+                "orange",
+                "maroon",
+                "purple",
+            }
+        )
 
         def _split_by_gap(row_words: list[dict]) -> list[list[dict]]:
             groups: list[list[dict]] = []
             current: list[dict] = [row_words[0]]
-            for prev, cur in zip(row_words, row_words[1:]):
-                gap = float(cur.get('x0', 0)) - float(prev.get('x1', 0))
+            for prev, cur in zip(row_words, row_words[1:], strict=False):
+                gap = float(cur.get("x0", 0)) - float(prev.get("x1", 0))
                 if gap > _X_GAP:
                     groups.append(current)
                     current = [cur]
@@ -890,11 +1111,11 @@ class YamahaCatalogueExtractor:
             return groups
 
         def _group_has_colour(group: list[dict]) -> bool:
-            return any(w['text'].lower() in _CAPTION_COLOUR_NOUNS for w in group)
+            return any(w["text"].lower() in _CAPTION_COLOUR_NOUNS for w in group)
 
         def _caption_from_group(group: list[dict]) -> str | None:
             """Extract a colour name from one X-gap-split sub-group, or None."""
-            texts = [w['text'] for w in group]
+            texts = [w["text"] for w in group]
 
             # Sentence-length sub-groups are foreword text, not image captions.
             if len(texts) > _MAX_WORDS:
@@ -903,11 +1124,11 @@ class YamahaCatalogueExtractor:
             if _COPYRIGHT_PAT.search(" ".join(texts)):
                 return None
 
-            # Format B: VariantCode-ColourName, e.g. "2SP3-Gold", "BP16-Cyan", "5YY6-Dark Blue Pearl".
-            # Also handles: "BP16_Cyan Metallic" (underscore variant), "2SP3-Black-Pearl" (hyphenated colours).
+            # Format B: VariantCode-ColourName, e.g. "2SP3-Gold", "BP16-Cyan",
+            # "5YY6-Dark Blue Pearl".  Also: "BP16_Cyan Metallic" (underscore),
+            # "2SP3-Black-Pearl" (hyphenated colours).
             # Tried FIRST: the full token "2SP3-Gold" is a single word that isn't
             # itself a colour noun, so all downstream checks would wrongly reject it.
-            joined_first = " ".join(texts)
             m = _VARIANT_CODE_PREFIX_PAT.match(texts[0])
 
             # Guard: real variant codes (2SP3, BP16) always contain a digit.
@@ -919,11 +1140,11 @@ class YamahaCatalogueExtractor:
                     return colour_part
                 return None  # variant-code token but no colour → not a caption
 
-            # Format B variant: variant code with underscore instead of hyphen, e.g. "BP16_Cyan Metallic"
-            # Also multi-word colour after dash: "5YY6-Dark Blue Pearl" (dash in first word)
-            if "_" in texts[0] or ("-" in texts[0] and re.match(r'^[A-Z0-9]{2,6}-', texts[0])):
+            # Format B variant: underscore instead of hyphen ("BP16_Cyan Metallic")
+            # or multi-word colour after dash ("5YY6-Dark Blue Pearl").
+            if "_" in texts[0] or ("-" in texts[0] and re.match(r"^[A-Z0-9]{2,6}-", texts[0])):
                 # Split on underscore or dash
-                variant_and_colour = re.split(r'[_-]', texts[0], maxsplit=1)
+                variant_and_colour = re.split(r"[_-]", texts[0], maxsplit=1)
                 if len(variant_and_colour) == 2:
                     variant_code, colour_start = variant_and_colour
                     if any(c.isdigit() for c in variant_code) and variant_code.upper() != "YAMAHA":
@@ -934,12 +1155,12 @@ class YamahaCatalogueExtractor:
                         return None
 
             # Reject figure/code-reference prefixes: "FO/90", "1X/33/P1" etc.
-            if '/' in texts[0]:
+            if "/" in texts[0]:
                 return None
 
             # Reject paint-code table rows with embedded 4-digit paint-code numbers
             # e.g. "A 1124 WHITE METALLIC 6", "C 1177 VIVID PURPLISH BLUE COCKTAIL 5"
-            if any(re.match(r'^\d{4,5}$', t) for t in texts):
+            if any(re.match(r"^\d{4,5}$", t) for t in texts):
                 return None
 
             # Must contain at least one colour noun.
@@ -954,16 +1175,18 @@ class YamahaCatalogueExtractor:
             # Reject if last word is a short paint-code abbreviation:
             # e.g. "YB", "SMX", "DRMK" — but keep "BLACK", "BLUE", etc.
             last = texts[-1]
-            if (2 <= len(last) <= 4
-                    and last == last.upper()
-                    and last.isalpha()
-                    and last.lower() not in _COLOUR_ENDINGS):
+            if (
+                2 <= len(last) <= 4
+                and last == last.upper()
+                and last.isalpha()
+                and last.lower() not in _COLOUR_ENDINGS
+            ):
                 return None
 
             # Reject colour-code-table rows: first token is a short all-caps
             # abbreviation like "MBL2", "CM6(*)", "SMX(*)", "YB".
             first = texts[0]
-            if re.match(r'^[A-Z0-9]{2,8}(\([*]\)|\*)?$', first) and first.upper() != "YAMAHA":
+            if re.match(r"^[A-Z0-9]{2,8}(\([*]\)|\*)?$", first) and first.upper() != "YAMAHA":
                 return None
 
             return " ".join(texts)
@@ -972,13 +1195,13 @@ class YamahaCatalogueExtractor:
             """Extract all colour captions from one page's word list."""
             rows_by_y: dict[float, list[dict]] = {}
             for w in words:
-                y_key = round(float(w.get('top', 0)) / _Y_TOL) * _Y_TOL
+                y_key = round(float(w.get("top", 0)) / _Y_TOL) * _Y_TOL
                 rows_by_y.setdefault(y_key, []).append(w)
 
             found: list[str] = []
             seen_local: set[str] = set()
             for y_key in sorted(rows_by_y):
-                row_ws = sorted(rows_by_y[y_key], key=lambda w: w['x0'])
+                row_ws = sorted(rows_by_y[y_key], key=lambda w: w["x0"])
                 sub_groups = _split_by_gap(row_ws)
 
                 # Row-level guard: every sub-group with ≥2 words must contain a
@@ -989,7 +1212,7 @@ class YamahaCatalogueExtractor:
 
                 # Reject paint-code table rows: any sub-group starting with a
                 # 4-5 digit paint-code number ("0918", "0033" etc.).
-                if any(re.match(r'^\d{4,5}$', g[0]['text']) for g in sub_groups):
+                if any(re.match(r"^\d{4,5}$", g[0]["text"]) for g in sub_groups):
                     continue
 
                 for group in sub_groups:
@@ -1052,9 +1275,12 @@ class YamahaCatalogueExtractor:
         import pdfplumber  # already imported at call site, but safe to repeat
 
         def _is_vc(s: str) -> bool:
-            return (3 <= len(s) <= 5 and s.isalnum()
-                    and any(c.isdigit() for c in s)
-                    and any(c.isalpha() for c in s))
+            return (
+                3 <= len(s) <= 5
+                and s.isalnum()
+                and any(c.isdigit() for c in s)
+                and any(c.isalpha() for c in s)
+            )
 
         best_single: str | None = None  # single variant code found in parens across all pages
 
@@ -1096,6 +1322,7 @@ class YamahaCatalogueExtractor:
         # Scan filename tokens for first variant code — handles covers without parens
         # (e.g. "FZ S 21C6.pdf" → 21C6, "YBR 110 5TSK.pdf" → 5TSK)
         import re as _re
+
         for token in _re.split(r"[\s_\-]+", pdf_path.stem):
             if _is_vc(token.upper()):
                 return [token.upper()]
@@ -1181,9 +1408,11 @@ class YamahaCatalogueExtractor:
             if fig_m:
                 # Case (c): section name came from word_rows[idx], advance past it
                 partial_check = _FIG_PARTIAL_PAT.match(joined)
-                if (partial_check
-                        and not _FIG_PAT.match(joined)
-                        and not _FIG_PAT.match(_STAMP_PREFIX_PAT.sub("", joined))):
+                if (
+                    partial_check
+                    and not _FIG_PAT.match(joined)
+                    and not _FIG_PAT.match(_STAMP_PREFIX_PAT.sub("", joined))
+                ):
                     idx += 1
                 raw = _CID_PAT.sub("", fig_m.group(2)).strip()
                 new_fig = f"FIG. {fig_m.group(1)}"
@@ -1203,9 +1432,7 @@ class YamahaCatalogueExtractor:
             # Find the part number word's x0 to anchor the column layout.
             # Remove any words that are >50 pts to the left of it — these are
             # figure-illustration numbers printed in the margin (e.g. CRUX PDFs).
-            pn_word = next(
-                (w for w in ws if _PN_PAT.match(w["text"])), None
-            )
+            pn_word = next((w for w in ws if _PN_PAT.match(w["text"])), None)
             if pn_word:
                 x_cutoff = pn_word["x0"] - 50
                 ws_filtered = [w for w in ws if w["x0"] >= x_cutoff]
@@ -1244,12 +1471,12 @@ class YamahaCatalogueExtractor:
             superseded_parts: list[str] = []
 
             if bounds and bounds.qty_col_xs and pn_word:
-                n_cols     = len(bounds.qty_col_xs)
+                n_cols = len(bounds.qty_col_xs)
                 qty_zone_x = min(bounds.qty_col_xs) - 15.0
-                max_qty_cx = max(bounds.qty_col_xs)   # x-centre of rightmost qty col
-                slots:      list[str] = [""] * n_cols
+                max_qty_cx = max(bounds.qty_col_xs)  # x-centre of rightmost qty col
+                slots: list[str] = [""] * n_cols
                 desc_parts: list[str] = []
-                rem_parts:  list[str] = []
+                rem_parts: list[str] = []
                 # Words in the gap between the last qty column and the first extra
                 # column (or REMARKS when no extra columns exist).
                 pre_rem_parts: list[str] = []
@@ -1258,7 +1485,7 @@ class YamahaCatalogueExtractor:
                 use_gap_zone = bounds.rem_start < 9000
 
                 for w in ws_filtered:
-                    if w["x0"] < pn_word["x1"]:          # ref-no / part-number
+                    if w["x0"] < pn_word["x1"]:  # ref-no / part-number
                         continue
                     if use_gap_zone and w["x0"] >= bounds.rem_start:
                         rem_parts.append(w["text"])
@@ -1274,7 +1501,7 @@ class YamahaCatalogueExtractor:
                     # Qty slot: accept 1–5 digit strings only.  India-market PDFs
                     # have 9-char all-digit nine_digit values (e.g. "344010109") to
                     # the right of qty columns; those must NOT contaminate qty slots.
-                    if w_cx >= qty_zone_x and re.match(r'^\d{1,5}$', w["text"]):
+                    if w_cx >= qty_zone_x and re.match(r"^\d{1,5}$", w["text"]):
                         nearest = min(
                             range(n_cols),
                             key=lambda i: abs(bounds.qty_col_xs[i] - w_cx),
@@ -1293,10 +1520,12 @@ class YamahaCatalogueExtractor:
                 if not desc_parts and not pre_rem_parts and idx < len(word_rows):
                     _ny, next_ws = word_rows[idx]
                     next_joined = " ".join(w["text"] for w in next_ws).strip()
-                    if (next_joined
-                            and not _PN_PAT.search(next_joined)
-                            and not _FIG_PAT.match(next_joined)
-                            and not _SKIP_PAT.match(next_joined)):
+                    if (
+                        next_joined
+                        and not _PN_PAT.search(next_joined)
+                        and not _FIG_PAT.match(next_joined)
+                        and not _SKIP_PAT.match(next_joined)
+                    ):
                         desc_parts = [_COPYRIGHT_PAT.sub("", next_joined).strip()]
                         idx += 1
 
@@ -1307,7 +1536,7 @@ class YamahaCatalogueExtractor:
                 # contain a part number.
                 _pn_in_desc = _PN_PAT.search(desc_raw)
                 desc = desc_raw[: _pn_in_desc.start()].strip() if _pn_in_desc else desc_raw
-                qty  = "/".join(slots)
+                qty = "/".join(slots)
                 filled = [s for s in slots if s]
                 # Collapse "1/1/1/1" → "1" only when EVERY slot is filled identically
                 if filled and len(set(filled)) == 1 and len(filled) == n_cols:
@@ -1322,9 +1551,9 @@ class YamahaCatalogueExtractor:
                 if bounds.nine_digit_start >= 9000 and pre_rem_parts:
                     leftover: list[str] = []
                     for _tok in pre_rem_parts:
-                        if re.match(r'^[A-Z0-9]{9}$', _tok, re.IGNORECASE):
+                        if re.match(r"^[A-Z0-9]{9}$", _tok, re.IGNORECASE):
                             nine_digit_parts.append(_tok)
-                        elif re.match(r'^[A-Z0-9]{12}$', _tok, re.IGNORECASE):
+                        elif re.match(r"^[A-Z0-9]{12}$", _tok, re.IGNORECASE):
                             superseded_parts.append(_tok)
                         else:
                             leftover.append(_tok)
@@ -1337,9 +1566,61 @@ class YamahaCatalogueExtractor:
                 # e.g. gap=["FOR"]   rem=["SM12"]     → "FOR SM12"
                 remarks = " ".join(pre_rem_parts + rem_parts)
 
+            elif bounds and bounds.desc_start < 9000 and pn_word:
+                # ── Single-variant positional mode ──────────────────────────
+                # The header row was detected and gave us explicit column
+                # x-starts for DESCRIPTION, Q'TY, and REMARKS.  Classify every
+                # word after the part number by its x-position — no heuristics.
+                desc_sv: list[str] = []
+                qty_sv: list[str] = []
+                rem_sv: list[str] = []
+
+                for w in ws_filtered:
+                    if w["x0"] < pn_word["x1"]:  # ref-no / part-no zone
+                        continue
+                    if bounds.rem_start < 9000 and w["x0"] >= bounds.rem_start:
+                        rem_sv.append(w["text"])
+                        continue
+                    if bounds.superseded_start < 9000 and w["x0"] >= bounds.superseded_start:
+                        superseded_parts.append(w["text"])
+                        continue
+                    if bounds.nine_digit_start < 9000 and w["x0"] >= bounds.nine_digit_start:
+                        nine_digit_parts.append(w["text"])
+                        continue
+                    if bounds.qty_start < 9000 and w["x0"] >= bounds.qty_start:
+                        qty_sv.append(w["text"])
+                        continue
+                    desc_sv.append(w["text"])
+
+                # Lookahead when description zone is empty
+                if not desc_sv and idx < len(word_rows):
+                    _ny, next_ws = word_rows[idx]
+                    next_joined = " ".join(w["text"] for w in next_ws).strip()
+                    if (
+                        next_joined
+                        and not _PN_PAT.search(next_joined)
+                        and not _FIG_PAT.match(next_joined)
+                        and not _SKIP_PAT.match(next_joined)
+                    ):
+                        desc_sv = [_COPYRIGHT_PAT.sub("", next_joined).strip()]
+                        idx += 1
+
+                desc_raw_sv = " ".join(desc_sv)
+                _pn_in_desc_sv = _PN_PAT.search(desc_raw_sv)
+                desc = (
+                    desc_raw_sv[: _pn_in_desc_sv.start()].strip() if _pn_in_desc_sv else desc_raw_sv
+                )
+
+                # Extract the numeric qty from the qty zone words
+                qty_raw = " ".join(qty_sv)
+                qty_m = re.search(r"\d+", qty_raw)
+                qty = qty_m.group() if qty_m else ""
+
+                remarks = " ".join(rem_sv)
+
             else:
                 # ── Text-based fallback ─────────────────────────────────────
-                after = _COPYRIGHT_PAT.sub("", joined[pn_m.end():]).strip()
+                after = _COPYRIGHT_PAT.sub("", joined[pn_m.end() :]).strip()
 
                 # Strip remarks-zone words and save them
                 positional_remarks = ""
@@ -1355,10 +1636,12 @@ class YamahaCatalogueExtractor:
                 if not after and idx < len(word_rows):
                     _ny, next_ws = word_rows[idx]
                     next_joined = " ".join(w["text"] for w in next_ws).strip()
-                    if (next_joined
-                            and not _PN_PAT.search(next_joined)
-                            and not _FIG_PAT.match(next_joined)
-                            and not _SKIP_PAT.match(next_joined)):
+                    if (
+                        next_joined
+                        and not _PN_PAT.search(next_joined)
+                        and not _FIG_PAT.match(next_joined)
+                        and not _SKIP_PAT.match(next_joined)
+                    ):
                         after = _COPYRIGHT_PAT.sub("", next_joined).strip()
                         idx += 1
 
@@ -1367,8 +1650,8 @@ class YamahaCatalogueExtractor:
                     remarks = positional_remarks
 
             # ── Ref number ─────────────────────────────────────────────────
-            if re.match(r'^[\d\s]+$', before):
-                last_int = re.search(r'(\d{1,3})\s*$', before)
+            if re.match(r"^[\d\s]+$", before):
+                last_int = re.search(r"(\d{1,3})\s*$", before)
                 ref_no = last_int.group(1) if last_int else before.strip()
             else:
                 ref_no = before
@@ -1380,17 +1663,19 @@ class YamahaCatalogueExtractor:
             elif last_ref_no:
                 ref_no = last_ref_no
 
-            rows.append({
-                "section":            new_section,
-                "fig_no":             new_fig,
-                "ref_no":             ref_no,
-                "part_no":            pn,
-                "description":        desc.strip(),
-                "qty":                qty,
-                "nine_digit_part_no": " ".join(nine_digit_parts),
-                "superseded_part_no": " ".join(superseded_parts),
-                "remarks":            remarks,
-            })
+            rows.append(
+                {
+                    "section": new_section,
+                    "fig_no": new_fig,
+                    "ref_no": ref_no,
+                    "part_no": pn,
+                    "description": desc.strip(),
+                    "qty": qty,
+                    "nine_digit_part_no": " ".join(nine_digit_parts),
+                    "superseded_part_no": " ".join(superseded_parts),
+                    "remarks": remarks,
+                }
+            )
 
         return rows, new_section, new_fig, sections_seen
 
@@ -1398,9 +1683,7 @@ class YamahaCatalogueExtractor:
     # Text-line fallback (no positional data)
     # ------------------------------------------------------------------
 
-    def _text_fallback(
-        self, pdf_path: Path
-    ) -> tuple[list[dict[str, str]], set[str]]:
+    def _text_fallback(self, pdf_path: Path) -> tuple[list[dict[str, str]], set[str]]:
         """Text-line regex parser used when positional extraction yields nothing."""
         import pdfplumber
 
@@ -1447,23 +1730,25 @@ class YamahaCatalogueExtractor:
                             continue
 
                         before = line[: pn_m.start()].strip()
-                        after = _COPYRIGHT_PAT.sub("", line[pn_m.end():]).strip()
+                        after = _COPYRIGHT_PAT.sub("", line[pn_m.end() :]).strip()
 
-                        ref_m = re.match(r'^(\d{1,3})\s*$', before)
+                        ref_m = re.match(r"^(\d{1,3})\s*$", before)
                         ref_no = ref_m.group(1) if ref_m else before
                         desc, qty, remarks = self._split_after(after, num_variants=0)
 
-                        rows.append({
-                            "section":            current_section,
-                            "fig_no":             current_fig,
-                            "ref_no":             ref_no,
-                            "part_no":            pn,
-                            "description":        desc,
-                            "qty":                qty,
-                            "nine_digit_part_no": "",
-                            "superseded_part_no": "",
-                            "remarks":            remarks,
-                        })
+                        rows.append(
+                            {
+                                "section": current_section,
+                                "fig_no": current_fig,
+                                "ref_no": ref_no,
+                                "part_no": pn,
+                                "description": desc,
+                                "qty": qty,
+                                "nine_digit_part_no": "",
+                                "superseded_part_no": "",
+                                "remarks": remarks,
+                            }
+                        )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Text fallback failed for {pdf_path}: {exc}")
 
@@ -1493,7 +1778,7 @@ class YamahaCatalogueExtractor:
 
         # Step 1: extract optional remarks (last non-digit token)
         remarks = ""
-        if not re.match(r'^\d+$', tokens[-1]):
+        if not re.match(r"^\d+$", tokens[-1]):
             remarks = tokens.pop()
 
         if not tokens:
@@ -1504,12 +1789,12 @@ class YamahaCatalogueExtractor:
         if num_variants > 0:
             # Known variant count — pop at most num_variants digits from the right
             count = 0
-            while tokens and count < num_variants and re.match(r'^\d+$', tokens[-1]):
+            while tokens and count < num_variants and re.match(r"^\d+$", tokens[-1]):
                 qty_vals.insert(0, tokens.pop())
                 count += 1
         else:
             # Unknown — greedy: pop all trailing digit tokens
-            while tokens and re.match(r'^\d+$', tokens[-1]):
+            while tokens and re.match(r"^\d+$", tokens[-1]):
                 qty_vals.insert(0, tokens.pop())
 
         qty = "/".join(qty_vals) if qty_vals else ""
