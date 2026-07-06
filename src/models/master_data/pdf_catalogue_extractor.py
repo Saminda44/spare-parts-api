@@ -305,6 +305,9 @@ class ColBounds:
     nine_digit_start: float = 9999.0
     superseded_start: float = 9999.0
     header_detected: bool = False
+    # True when "REMARKS (9 DIGIT)" header means the REMARKS column IS the 9-digit column.
+    # In this layout rem_start is suppressed (set to 9999) so content routes to nine_digit_parts.
+    remarks_is_nine_digit: bool = False
 
 
 @dataclass
@@ -441,7 +444,17 @@ class YamahaCatalogueExtractor:
                         bounds = last_bounds
                     else:
                         if last_bounds is not None:
-                            if new_bounds.rem_start >= 9000:
+                            # Propagate remarks_is_nine_digit: once a page establishes
+                            # that REMARKS == 9-digit column, all subsequent pages must
+                            # respect that layout even if their partial header row only
+                            # has the REMARKS keyword (not the "(9 DIGIT)" qualifier).
+                            if not new_bounds.remarks_is_nine_digit:
+                                new_bounds.remarks_is_nine_digit = last_bounds.remarks_is_nine_digit
+                            # When remarks_is_nine_digit is active, rem_start must stay
+                            # suppressed (9999) so words route to nine_digit_parts.
+                            if new_bounds.remarks_is_nine_digit:
+                                new_bounds.rem_start = 9999.0
+                            elif new_bounds.rem_start >= 9000:
                                 new_bounds.rem_start = last_bounds.rem_start
                             if not new_bounds.qty_col_xs:
                                 new_bounds.qty_col_xs = last_bounds.qty_col_xs
@@ -521,7 +534,10 @@ class YamahaCatalogueExtractor:
             elif b.qty_start < 9000:
                 _detected.append((b.qty_start, "Q'ty"))
             if b.nine_digit_start < 9000:
-                _detected.append((b.nine_digit_start, "9 Digit Part No."))
+                # When remarks_is_nine_digit the REMARKS column IS the 9-digit column;
+                # show "Remarks (9 Digit)" so users see both facts at a glance.
+                label = "Remarks (9 Digit)" if b.remarks_is_nine_digit else "9 Digit Part No."
+                _detected.append((b.nine_digit_start, label))
             if b.superseded_start < 9000:
                 _detected.append((b.superseded_start, "Superseded Part No."))
             if b.rem_start < 9000:
@@ -739,7 +755,8 @@ class YamahaCatalogueExtractor:
 
             # CRUX-style "12 DIGIT" + "9 DIGIT" double-header — both show "DIGIT";
             # when two DIGIT tokens appear, the second marks where REMARKS begins.
-            digit_indices = [i for i, t in enumerate(texts) if t == "DIGIT"]
+            # Strip parentheses so "(9 DIGIT)" also counts (India-market catalogues).
+            digit_indices = [i for i, t in enumerate(texts) if t.strip("()") == "DIGIT"]
             if len(digit_indices) >= 2:
                 rem_start = ws[digit_indices[-1] - 1]["x0"]
 
@@ -767,8 +784,10 @@ class YamahaCatalogueExtractor:
         # scan across all header rows handles this reliably: we pair each "DIGIT"
         # token with any "9" token whose x0 is within 50 pts to its left.
         flat_words = [w for _, ws in word_rows[:25] for w in ws]
-        digit_x_list = [w["x0"] for w in flat_words if w["text"].upper() == "DIGIT"]
-        nine_x_list = [w["x0"] for w in flat_words if w["text"].upper() == "9"]
+        # Strip parentheses so "(9" matches "9" and "DIGIT)" matches "DIGIT".
+        # Handles "REMARKS (9 DIGIT)" column headers in India-market catalogues.
+        digit_x_list = [w["x0"] for w in flat_words if w["text"].upper().strip("()") == "DIGIT"]
+        nine_x_list = [w["x0"] for w in flat_words if w["text"].strip("()") == "9"]
         sup_words = [w for w in flat_words if w["text"].upper() == "SUPERSEDED"]
 
         for dig_x in digit_x_list:
@@ -780,13 +799,23 @@ class YamahaCatalogueExtractor:
         if sup_words and superseded_start >= 9000:
             superseded_start = min(w["x0"] for w in sup_words)
 
+        # Detect "REMARKS (9 DIGIT)" layout: rem_start and nine_digit_start land at
+        # the same physical column (within 40 pts).  In this layout there is no
+        # separate plain-text remarks column — the content IS the 9-digit part number.
+        # Suppress rem_start so extraction routes words to nine_digit_parts instead.
+        remarks_is_nine_digit = False
+        if nine_digit_start < 9000 and rem_start < 9000 and abs(nine_digit_start - rem_start) < 40:
+            remarks_is_nine_digit = True
+            rem_start = 9999.0
+
         if nine_digit_start < 9000 or superseded_start < 9000:
             logger.debug(
                 "Extra columns detected: nine_digit_start={:.1f} "
-                "superseded_start={:.1f} rem_start={:.1f}",
+                "superseded_start={:.1f} rem_start={:.1f} remarks_is_nine_digit={}",
                 nine_digit_start,
                 superseded_start,
                 rem_start,
+                remarks_is_nine_digit,
             )
 
         any_detected = (
@@ -808,6 +837,7 @@ class YamahaCatalogueExtractor:
                 nine_digit_start=nine_digit_start,
                 superseded_start=superseded_start,
                 header_detected=bool(header),
+                remarks_is_nine_digit=remarks_is_nine_digit,
             )
         return None
 
@@ -841,6 +871,9 @@ class YamahaCatalogueExtractor:
         def _classify(norms: list[str], ws_: list[dict], col_starts: dict[str, float]) -> None:
             """Classify words on one row into col_starts (in-place)."""
             bare = [n.replace("'", "") for n in norms]
+            # Strip parentheses so "(9" matches "9" and "DIGIT)" matches "DIGIT".
+            # This handles "REMARKS (9 DIGIT)" headers in India-market catalogues.
+            stripped = [n.strip("()") for n in norms]
             for i, (norm, br, w) in enumerate(zip(norms, bare, ws_, strict=False)):
                 if norm == "REF" and "ref_no" not in col_starts:
                     col_starts["ref_no"] = w["x0"]
@@ -854,9 +887,9 @@ class YamahaCatalogueExtractor:
                     col_starts["remarks"] = w["x0"]
                 elif norm == "SUPERSEDED" and "superseded" not in col_starts:
                     col_starts["superseded"] = w["x0"]
-                elif norm == "9" and "nine_digit" not in col_starts:
+                elif stripped[i] == "9" and "nine_digit" not in col_starts:
                     for look in range(i + 1, min(i + 3, len(norms))):
-                        if norms[look] == "DIGIT":
+                        if stripped[look] == "DIGIT":
                             col_starts["nine_digit"] = w["x0"]
                             break
 
