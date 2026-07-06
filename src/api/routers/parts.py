@@ -121,7 +121,6 @@ def parts_from_catalog(
             .reset_index()
         )
         grouped["section"] = ""
-        grouped["variants"] = ""
         grouped["variant_count"] = 1
         grouped["kind"] = "shared"
         all_models = sorted(df["model"].dropna().unique().tolist())
@@ -159,7 +158,6 @@ def parts_from_catalog(
             "description": str(r.get("description", "")),
             "section": str(r.get("section", "")),
             "compatible_models": str(r.get("compatible_models", "")),
-            "variants": str(r.get("variants", "")),
             "variant_count": int(r.get("variant_count", 1)),
             "source_count": int(r.get("source_count", 1)),
             "kind": str(r.get("kind", "shared")),

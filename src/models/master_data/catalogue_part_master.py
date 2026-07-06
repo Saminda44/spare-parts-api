@@ -442,17 +442,12 @@ def build_part_master(
         kind = "shared" if "shared" in kind_set[part_no] else "colour_specific"
         source_list = sorted(src_set[part_no])
 
-        # Variant codes only (no model name), deduplicated and sorted
-        variant_codes = sorted({v for _, v in compat[part_no] if v})
-        variants = ", ".join(variant_codes)
-
         output_rows.append(
             {
                 "part_no": part_no,
                 "description": description,
                 "section": section,
                 "compatible_models": compatible_models,
-                "variants": variants,
                 "variant_count": variant_count,
                 "source_count": len(source_list),
                 "source_pdfs": "; ".join(source_list),

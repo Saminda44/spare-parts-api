@@ -326,7 +326,7 @@ export function PartMaster() {
               <table className="w-full text-sm border-collapse">
                 <thead className="sticky top-0 z-10">
                   <tr style={{ background: "#1B3A6B" }}>
-                    {["Part No.", "Description", "Kind", "Compatible Models", "Variants"].map(h => (
+                    {["Part No.", "Description", "Kind", "Compatible Models"].map(h => (
                       <th key={h}
                         className="py-2.5 px-3 text-left text-xs font-bold text-white whitespace-nowrap border-r border-blue-800 last:border-r-0">
                         {h}
@@ -352,16 +352,6 @@ export function PartMaster() {
                       </td>
                       <td className="py-2 px-3 border-b border-slate-100">
                         <ModelBadges models={r.compatible_models} />
-                      </td>
-                      <td className="py-2 px-3 border-b border-slate-100 text-xs text-slate-500 max-w-[200px]">
-                        {r.variants
-                          ? r.variants.split(", ").map(v => (
-                              <span key={v}
-                                className="inline-block mr-1 mb-0.5 px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-mono text-[10px]">
-                                {v}
-                              </span>
-                            ))
-                          : <span className="text-slate-300">—</span>}
                       </td>
                     </tr>
                   ))}
