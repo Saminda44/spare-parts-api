@@ -749,8 +749,9 @@ def get_orders_eda(
     rejection_limit: int = Query(200, le=1000),
     dealer_type: str = Query("MC", pattern="^(MC|OBM|ALL)$"),
     mc_category: str = Query("ALL", pattern="^(ALL|Lubricant|Battery|Tyre|SpareParts)$"),
+    year: int = Query(0, ge=0),  # 0 = auto-select latest year in data
 ) -> OrdersEdaResponse | Response:
-    _cache_key = (dealer_type, mc_category, rejection_limit)
+    _cache_key = (dealer_type, mc_category, rejection_limit, year)
     if _cache_key in _orders_eda_cache:
         return Response(content=_orders_eda_cache[_cache_key], media_type="application/json")
 
@@ -776,8 +777,21 @@ def get_orders_eda(
         if not rej.empty and "mc_category" in rej.columns:
             rej = rej[rej["mc_category"] == actual_mc_cat]
 
+    # ── Year filter (align with Sales EDA default: latest year) ─────────────
+    available_years: list[int] = []
+    data_year = 0
+    if "Year_Month_str" in orders.columns and not orders.empty:
+        _yrs = sorted(orders["Year_Month_str"].str[:4].astype(int).unique().tolist(), reverse=True)
+        available_years = _yrs
+        data_year = year if year > 0 and year in _yrs else (_yrs[0] if _yrs else 0)
+        orders = orders[orders["Year_Month_str"].str[:4].astype(int) == data_year]
+        if not rej.empty and "Year_Month_str" in rej.columns:
+            rej = rej[rej["Year_Month_str"].str[:4].astype(int) == data_year]
+
     if orders.empty:
         return OrdersEdaResponse(
+            data_year=data_year,
+            available_years=available_years,
             total_po=0,
             total_returns=0,
             avg_fill_rate=0.0,
@@ -1197,6 +1211,8 @@ def get_orders_eda(
     )
 
     _result = OrdersEdaResponse(
+        data_year=data_year,
+        available_years=available_years,
         total_po=total_po,
         total_returns=total_returns,
         avg_fill_rate=avg_fill_rate,

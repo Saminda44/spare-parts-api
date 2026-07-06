@@ -55,6 +55,7 @@ export function EDA() {
   const [tab,             setTab]             = useState<Tab>("orders");
   const [ordersDt,        setOrdersDt]        = useState<DealerType>("ALL");
   const [ordersMcCat,     setOrdersMcCat]     = useState<McCategoryType>("ALL");
+  const [ordersApiYear,   setOrdersApiYear]   = useState<number>(0);  // 0 = latest year (API resolves)
   const [ordersYear,      setOrdersYear]      = useState<number | "All">("All");
   const [ordersRange,     setOrdersRange]     = useState<TimeRange>("YTD");
   const [ordersView,      setOrdersView]      = useState<OrdersView>("overview");
@@ -68,14 +69,16 @@ export function EDA() {
   const [salesDealerSearch, setSalesDealerSearch] = useState("");
 
   useEffect(() => {
-    fetchOrdersEda(ordersDt, ordersMcCat).then(d => {
+    fetchOrdersEda(ordersDt, ordersMcCat, ordersApiYear).then(d => {
       setOrdersData(null);
       setOrdersData(d);
+      // On first load (year=0) sync chart picker to the year the API resolved
+      if (ordersApiYear === 0 && d.data_year) setOrdersApiYear(d.data_year);
       const yrs = getYears(d.monthly_trend);
       if (yrs.length) setOrdersYear(yrs[0]);
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ordersDt, ordersMcCat]);
+  }, [ordersDt, ordersMcCat, ordersApiYear]);
 
   // Fetch companion sales data only when ALL/OBM is selected (staggered to avoid concurrent load)
   useEffect(() => {
@@ -128,13 +131,24 @@ export function EDA() {
           <div className="space-y-5">
             {/* Segment + view + category selectors */}
             <div className="space-y-2">
-              <div className="flex gap-1 flex-wrap">
-                {([["ALL","All"],["MC","MC Spare Parts"],["OBM","OBM Spare Parts"]] as [DealerType,string][]).map(([dt,label]) => (
-                  <button key={dt} onClick={() => { setOrdersDt(dt); setOrdersMcCat("ALL"); }}
-                    className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${ordersDt===dt ? "bg-brand-blue text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>
-                    {label}
-                  </button>
-                ))}
+              <div className="flex gap-2 flex-wrap items-center">
+                <div className="flex gap-1 flex-wrap">
+                  {([["ALL","All"],["MC","MC Spare Parts"],["OBM","OBM Spare Parts"]] as [DealerType,string][]).map(([dt,label]) => (
+                    <button key={dt} onClick={() => { setOrdersDt(dt); setOrdersMcCat("ALL"); }}
+                      className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${ordersDt===dt ? "bg-brand-blue text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {ordersData && ordersData.available_years.length > 0 && (
+                  <select
+                    value={ordersApiYear}
+                    onChange={e => setOrdersApiYear(Number(e.target.value))}
+                    className="border border-slate-200 rounded-lg px-3 py-1 text-xs font-medium text-slate-600 bg-white focus:outline-none focus:ring-2 focus:ring-brand-blue/30 cursor-pointer"
+                  >
+                    {ordersData.available_years.map(y => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                )}
               </div>
               {(ordersView === "overview" || ordersView === "parts") && ordersDt === "MC" && (
                 <div className="flex gap-1 flex-wrap">

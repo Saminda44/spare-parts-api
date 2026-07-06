@@ -698,7 +698,13 @@ class UpliftFactorsRow(BaseModel):
 
     @property
     def total_pct(self) -> float:
-        return self.promotion_pct + self.new_model_pct + self.dealer_pct + self.pricing_pct + self.other_pct
+        return (
+            self.promotion_pct
+            + self.new_model_pct
+            + self.dealer_pct
+            + self.pricing_pct
+            + self.other_pct
+        )
 
 
 class GeoColorResponse(BaseModel):
@@ -930,6 +936,8 @@ class FulfillmentAnalysis(BaseModel):
 
 
 class OrdersEdaResponse(BaseModel):
+    data_year: int = 0  # the year all KPIs are computed for (0 = all years)
+    available_years: list[int] = []  # years available in the dataset for the picker
     total_po: int
     total_returns: int
     avg_fill_rate: float  # qty-based fill rate including rejected lines (true overall)

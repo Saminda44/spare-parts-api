@@ -22,23 +22,31 @@ export function OBMEDA() {
   const [ordersData, setOrdersData] = useState<OrdersEdaData | null>(null);
   const [salesData,  setSalesData]  = useState<SalesEdaData  | null>(null);
   const [tab,         setTab]         = useState<Tab>("orders");
+  const [ordersApiYear, setOrdersApiYear] = useState<number>(0); // 0 = latest (API resolves)
   const [ordersYear,  setOrdersYear]  = useState<number | "All">("All");
   const [ordersRange, setOrdersRange] = useState<TimeRange>("YTD");
-  const [salesYear,   setSalesYear]   = useState<number | "All">("All");
+  const [salesYear,   setSalesYear]   = useState<number>(0);
   const [salesRange,  setSalesRange]  = useState<TimeRange>("YTD");
 
   useEffect(() => {
-    fetchOrdersEda("OBM").then(d => {
+    fetchOrdersEda("OBM", "ALL", ordersApiYear).then(d => {
       setOrdersData(d);
+      if (ordersApiYear === 0 && d.data_year) setOrdersApiYear(d.data_year);
       const yrs = getYears(d.monthly_trend);
       if (yrs.length) setOrdersYear(yrs[0]);
     });
-    fetchSalesEda("OBM").then(d => {
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ordersApiYear]);
+
+  useEffect(() => {
+    fetchSalesEda("OBM", "ALL", salesYear).then(d => {
       setSalesData(d);
+      if (salesYear === 0 && d.data_year) setSalesYear(d.data_year);
       const yrs = getYears(d.monthly_trend);
-      if (yrs.length) setSalesYear(yrs[0]);
+      if (yrs.length) setSalesYear(d.data_year || (yrs[0] ?? 0));
     });
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [salesYear]);
 
   const TABS = [
     { key: "orders" as Tab, label: "Orders EDA (Stage 4)" },
@@ -74,6 +82,19 @@ export function OBMEDA() {
         {tab === "orders" && (
           ordersData ? (
             <div className="space-y-5">
+              {/* Year picker */}
+              {ordersData.available_years.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-500">Year:</span>
+                  <select
+                    value={ordersApiYear}
+                    onChange={e => setOrdersApiYear(Number(e.target.value))}
+                    className="border border-slate-200 rounded-lg px-3 py-1 text-xs font-medium text-slate-600 bg-white focus:outline-none focus:ring-2 focus:ring-brand-blue/30 cursor-pointer"
+                  >
+                    {ordersData.available_years.map(y => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                </div>
+              )}
               {/* Row 1 — value KPIs */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <KpiCard label="Order Received"    value={`LKR ${fmt(ordersData.total_order_value_lkr)}`}              sub="All C-orders incl. cancelled/rejected"   color="blue"/>
@@ -179,6 +200,18 @@ export function OBMEDA() {
         {tab === "sales" && (
           salesData ? (
             <div className="space-y-5">
+              {salesData.available_years.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-500">Year:</span>
+                  <select
+                    value={salesYear}
+                    onChange={e => setSalesYear(Number(e.target.value))}
+                    className="border border-slate-200 rounded-lg px-3 py-1 text-xs font-medium text-slate-600 bg-white focus:outline-none focus:ring-2 focus:ring-brand-blue/30 cursor-pointer"
+                  >
+                    {salesData.available_years.map(y => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                </div>
+              )}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <KpiCard label="OBM Revenue"    value={`LKR ${fmt(salesData.total_sale_value_lkr)}`}   sub={`${salesData.total_sale_lines.toLocaleString()} lines`}  color="purple"/>
                 <KpiCard label="Return Value"   value={`LKR ${fmt(salesData.total_return_value_lkr)}`} sub={`${salesData.total_return_lines} lines`}                  color="red"/>
@@ -190,7 +223,13 @@ export function OBMEDA() {
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold text-slate-700">Monthly OBM Sales vs Returns (LKR)</h3>
                   <div className="flex items-center gap-2">
-                    <YearPicker years={getYears(salesData.monthly_trend)} value={salesYear} onChange={setSalesYear}/>
+                    <select
+                      value={salesYear}
+                      onChange={e => setSalesYear(Number(e.target.value))}
+                      className="border border-slate-200 rounded-lg px-3 py-1 text-xs font-medium text-slate-600 bg-white focus:outline-none focus:ring-2 focus:ring-brand-blue/30 cursor-pointer"
+                    >
+                      {salesData.available_years.map(y => <option key={y} value={y}>{y}</option>)}
+                    </select>
                     <TimePicker value={salesRange} onChange={setSalesRange}/>
                   </div>
                 </div>
@@ -198,7 +237,7 @@ export function OBMEDA() {
                   <BarChart data={filterByRange(filterByYear(salesData.monthly_trend, salesYear), salesRange)} margin={{ top:5, right:10, left:0, bottom:5 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
                     <XAxis dataKey="period" tick={{ fontSize: 10 }} interval={0}
-                      tickFormatter={p => monthLabel(p, salesYear !== "All")}/>
+                      tickFormatter={p => monthLabel(p, true)}/>
                     <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt}/>
                     <Tooltip formatter={(v: unknown, n: unknown) => [`LKR ${fmt(Number(v))}`, String(n)]}/>
                     <Legend wrapperStyle={{ fontSize: 10 }}/>

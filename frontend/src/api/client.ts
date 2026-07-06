@@ -651,6 +651,8 @@ export interface FulfillmentAnalysis {
 }
 
 export interface OrdersEdaData {
+  data_year: number;          // the year KPIs are computed for (0 = unknown)
+  available_years: number[];  // years available for the year picker
   total_po: number; total_returns: number; avg_fill_rate: number;
   avg_lead_time_days: number; fill_rate_lt1_count: number;
   total_order_value_lkr: number;    // Order Received value (all PO lines incl. rejected)
@@ -977,8 +979,8 @@ export const fetchCatalogParts = (model: string, limit = 500) =>
 export type DealerType = "MC" | "OBM" | "ALL";
 export type McCategoryType = "ALL" | "Lubricant" | "Battery" | "Tyre" | "SpareParts";
 
-export const fetchOrdersEda = (dealerType: DealerType = "MC", mcCategory: McCategoryType = "ALL") =>
-  api.get<OrdersEdaData>("/eda/orders", { params: { dealer_type: dealerType, mc_category: mcCategory }, timeout: 90_000 }).then(r => r.data);
+export const fetchOrdersEda = (dealerType: DealerType = "MC", mcCategory: McCategoryType = "ALL", year: number = 0) =>
+  api.get<OrdersEdaData>("/eda/orders", { params: { dealer_type: dealerType, mc_category: mcCategory, year }, timeout: 90_000 }).then(r => r.data);
 export const fetchSalesEda    = (dealerType: DealerType = "MC", mcCategory: string = "ALL", year: number = 0) =>
   api.get<SalesEdaData>("/eda/sales", { params: { dealer_type: dealerType, mc_category: mcCategory, year }, timeout: 60_000 }).then(r => r.data);
 export const fetchMovements   = () => api.get<MovementsData>("/eda/movements").then(r => r.data);
