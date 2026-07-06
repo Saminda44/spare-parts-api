@@ -167,8 +167,18 @@ def extract_pdf_tables(
     ]
     sections = sorted({r[0] for r in rows if r[0]})
 
+    # Drop optional columns (indices 5, 6) when this PDF has no data in them.
+    # nine_digit_part_no=5, superseded_part_no=6 are India-market only.
+    headers: list[str] = list(DISPLAY_HEADERS)
+    optional_cols = [5, 6]
+    drop = [c for c in optional_cols if not any(row[c].strip() for row in rows)]
+    if drop:
+        keep = [i for i in range(len(headers)) if i not in drop]
+        headers = [headers[i] for i in keep]
+        rows = [[row[i] for i in keep] for row in rows]
+
     return {
-        "headers": DISPLAY_HEADERS,
+        "headers": headers,
         "rows": rows,
         "total": len(rows),
         "sections": sections,
