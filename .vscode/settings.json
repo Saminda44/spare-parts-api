@@ -9,14 +9,30 @@
             "source.organizeImports.ruff": "explicit"
         }
     },
-    "mypy-type-checker.args": ["--ignore-missing-imports"],
+    "mypy-type-checker.args": [
+        "--ignore-missing-imports"
+    ],
     "python.testing.pytestEnabled": true,
-    "python.testing.pytestArgs": ["tests"],
+    "python.testing.pytestArgs": [
+        "tests"
+    ],
     "files.exclude": {
         "**/__pycache__": true,
         "**/.pytest_cache": true,
         "**/.mypy_cache": true,
         "**/.ruff_cache": true,
         "**/htmlcov": true
-    }
+    },
+    "sqltools.connections": [
+        {
+            "ssh": "Disabled",
+            "previewLimit": 50,
+            "server": "localhost",
+            "port": 5432,
+            "driver": "PostgreSQL",
+            "database": "yamaha",
+            "username": "saminda",
+            "name": "yamaha inventory optimisation"
+        }
+    ]
 }
