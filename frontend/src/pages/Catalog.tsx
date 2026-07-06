@@ -37,7 +37,7 @@ function variantQty(qty: string, varIdx: number, numVariants: number): string {
   return parts[offset + varIdx] ?? qty;
 }
 
-function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, manufactureYear }: {
+function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, manufactureYear, columnLayout }: {
   data: CatalogueData;
   relPath: string;
   pdfUrl?: string;
@@ -45,6 +45,7 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
   variants?: string[];
   colourCodes?: ColourCode[];
   manufactureYear?: string;
+  columnLayout?: string[];
 }) {
   const [section,    setSection]    = useState("");
   const [search,     setSearch]     = useState("");
@@ -188,22 +189,37 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
 
       {/* Extraction meta */}
       {meta && (
-        <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 mb-3">
-          <span className="font-medium text-slate-700">{data.total.toLocaleString()} parts extracted</span>
-          <span>·</span><span>{meta.sections} sections</span>
-          <span>·</span><span>{meta.pages} pages scanned</span>
-          {manufactureYear && (
-            <><span>·</span>
-            <span className="font-medium text-blue-600">{manufactureYear} model</span></>
-          )}
-          {meta.ocr > 0 && (
-            <><span>·</span>
-            <span className="text-amber-600 flex items-center gap-1">
-              <AlertTriangle size={11} /> {meta.ocr} image-only pages
-            </span></>
-          )}
-          {meta.warnings.length > 0 && (
-            <><span>·</span><span className="text-amber-600">{meta.warnings[0]}</span></>
+        <div className="space-y-1.5 mb-3">
+          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
+            <span className="font-medium text-slate-700">{data.total.toLocaleString()} parts extracted</span>
+            <span>·</span><span>{meta.sections} sections</span>
+            <span>·</span><span>{meta.pages} pages scanned</span>
+            {manufactureYear && (
+              <><span>·</span>
+              <span className="font-medium text-blue-600">{manufactureYear} model</span></>
+            )}
+            {meta.ocr > 0 && (
+              <><span>·</span>
+              <span className="text-amber-600 flex items-center gap-1">
+                <AlertTriangle size={11} /> {meta.ocr} image-only pages
+              </span></>
+            )}
+            {meta.warnings.length > 0 && (
+              <><span>·</span><span className="text-amber-600">{meta.warnings[0]}</span></>
+            )}
+          </div>
+          {columnLayout && columnLayout.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 bg-blue-50 border border-blue-100 rounded-lg">
+              <span className="text-[10px] font-semibold text-blue-500 uppercase tracking-wide mr-1 shrink-0">
+                Columns identified:
+              </span>
+              {columnLayout.map((col, i) => (
+                <span key={i}
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium whitespace-nowrap">
+                  {col}
+                </span>
+              ))}
+            </div>
           )}
         </div>
       )}
@@ -522,6 +538,7 @@ function PdfCatalogueViewer({ relPath, filename, pdfUrl, onBack }: {
          data={result} relPath={relPath} pdfUrl={pdfUrl} meta={meta}
          variants={result.variants} colourCodes={result.colour_codes}
          manufactureYear={result.manufacture_year}
+         columnLayout={result.column_layout}
        />}
     </div>
   );
@@ -575,7 +592,7 @@ function ExtractionModal({ relPath, filename, pdfUrl, onClose }: {
         <div className="flex-1 overflow-y-auto p-5">
           {loading ? <LoadingState label="Extracting parts from PDF…" /> :
            !result || result.headers.length === 0 ? <EmptyState /> :
-           <CatalogueTable data={result} relPath={relPath} meta={meta} variants={result.variants} colourCodes={result.colour_codes} manufactureYear={result.manufacture_year} />}
+           <CatalogueTable data={result} relPath={relPath} meta={meta} variants={result.variants} colourCodes={result.colour_codes} manufactureYear={result.manufacture_year} columnLayout={result.column_layout} />}
         </div>
       </div>
     </div>

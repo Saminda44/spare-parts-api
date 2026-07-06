@@ -190,6 +190,7 @@ def extract_pdf_tables(
         "sections_found": result.sections_found,
         "ocr_flagged": result.ocr_flagged,
         "warnings": result.warnings,
+        "column_layout": result.column_layout,
         # NEW: Colour matching metadata for debugging
         "colour_extraction_metadata": {
             "source": "pdf_cover" if result.available_colours else "agent_web",

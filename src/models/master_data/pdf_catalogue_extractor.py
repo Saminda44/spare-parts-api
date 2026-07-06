@@ -329,6 +329,8 @@ class ExtractionResult:
     manufacture_year: str | None = None  # e.g. "2019" from ©2019 on the cover page
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
+    # column_layout: detected column names in left-to-right order for display
+    column_layout: list[str] = field(default_factory=list)
 
     @property
     def df(self) -> pd.DataFrame:
@@ -503,6 +505,29 @@ class YamahaCatalogueExtractor:
         if manufacture_year:
             logger.info(f"{pdf_path.name}: manufacture year {manufacture_year}")
 
+        # Build column_layout: ordered list of detected column names (left → right)
+        # for display in the catalogue viewer.
+        column_layout: list[str] = []
+        if last_bounds is not None:
+            b = last_bounds
+            # Collect (x_start, display_name) pairs for every detected column
+            _detected: list[tuple[float, str]] = [
+                (0.0, "Ref. No."),  # ref is always present, starts at 0
+                (b.pn_start if b.pn_start < 9000 else 50.0, "Part No."),
+                (b.desc_start if b.desc_start < 9000 else 150.0, "Description"),
+            ]
+            if b.qty_col_xs:
+                _detected.append((min(b.qty_col_xs), "Q'ty (per variant)"))
+            elif b.qty_start < 9000:
+                _detected.append((b.qty_start, "Q'ty"))
+            if b.nine_digit_start < 9000:
+                _detected.append((b.nine_digit_start, "9 Digit Part No."))
+            if b.superseded_start < 9000:
+                _detected.append((b.superseded_start, "Superseded Part No."))
+            if b.rem_start < 9000:
+                _detected.append((b.rem_start, "Remarks"))
+            column_layout = [name for _, name in sorted(_detected, key=lambda t: t[0])]
+
         return ExtractionResult(
             pdf_path=pdf_path,
             model=model,
@@ -515,6 +540,7 @@ class YamahaCatalogueExtractor:
             available_colours=available_colours,
             manufacture_year=manufacture_year,
             warnings=warnings,
+            column_layout=column_layout,
         )
 
     def extract_all(
@@ -789,75 +815,88 @@ class YamahaCatalogueExtractor:
     def _detect_header_row(
         word_rows: list[tuple[float, list[dict]]],
     ) -> dict[str, float]:
-        """Find the column-header row and return {logical_col: x_start}.
+        """Find the column-header BLOCK and return {logical_col: x_start}.
 
-        Scans the first 30 word-rows, skipping data rows (those that match
-        the part-number pattern). The first row that contains 3+ distinct
-        column-header keywords is taken as the header row and its word
-        x-positions are recorded for every recognised column.
+        Yamaha PDFs frequently split column headers across two Y-rows, e.g.:
 
-        Returned keys (only keys for columns that were actually found):
+            Row A:  REF.   PART NO.   DESCRIPTION   REMARKS
+            Row B:  NO.               Q'TY
+
+        The old "first row with ≥3 hits" approach missed Q'TY on Row B,
+        causing QTY values to be classified as description.
+
+        New approach — scan the header BLOCK:
+        1. Find the first non-data row containing both a part-label keyword
+           ("PART" or "DESCRIPTION") and a column-anchor keyword
+           ("DESCRIPTION", "REMARKS", or "Q'TY"/"QTY").
+        2. From that row onward accumulate column x-positions across every
+           subsequent non-data row (up to 6 more rows).
+        3. Return the merged column map.
+
+        Returned keys (only present for detected columns):
           "ref_no", "part_no", "description", "qty", "remarks",
           "nine_digit", "superseded"
         """
-        # Keywords whose presence (in sufficient combination) marks a header row.
-        _KW = {
-            "REF",
-            "PART",
-            "NO",
-            "DESCRIPTION",
-            "DESC",
-            "QTY",
-            "REMARKS",
-            "SUPERSEDED",
-            "DIGIT",
-            "NAME",
-        }
 
-        for _y, ws in word_rows[:30]:
-            joined_raw = " ".join(w["text"] for w in ws)
-            if _PN_PAT.search(joined_raw):
-                continue  # data row
-
-            norms = [w["text"].upper().strip().rstrip(".") for w in ws]
-            # Strip internal apostrophe so "Q'TY" → "QTY"
-            bare_norms = [n.replace("'", "") for n in norms]
-
-            hits = sum(1 for n in bare_norms if n in _KW)
-            if hits < 3:
-                continue
-
-            # Identified as a header row — capture column x-positions.
-            col_starts: dict[str, float] = {}
-            for i, (norm, bare, w) in enumerate(zip(norms, bare_norms, ws, strict=False)):
+        def _classify(norms: list[str], ws_: list[dict], col_starts: dict[str, float]) -> None:
+            """Classify words on one row into col_starts (in-place)."""
+            bare = [n.replace("'", "") for n in norms]
+            for i, (norm, br, w) in enumerate(zip(norms, bare, ws_, strict=False)):
                 if norm == "REF" and "ref_no" not in col_starts:
                     col_starts["ref_no"] = w["x0"]
                 elif norm == "PART" and "part_no" not in col_starts:
                     col_starts["part_no"] = w["x0"]
                 elif norm in ("DESCRIPTION", "DESC", "NAME") and "description" not in col_starts:
                     col_starts["description"] = w["x0"]
-                elif bare in ("QTY", "QUANTITY") and "qty" not in col_starts:
+                elif br in ("QTY", "QUANTITY") and "qty" not in col_starts:
                     col_starts["qty"] = w["x0"]
                 elif norm == "REMARKS" and "remarks" not in col_starts:
                     col_starts["remarks"] = w["x0"]
                 elif norm == "SUPERSEDED" and "superseded" not in col_starts:
                     col_starts["superseded"] = w["x0"]
                 elif norm == "9" and "nine_digit" not in col_starts:
-                    # "9 DIGIT PART NO." — confirm next word is "DIGIT"
                     for look in range(i + 1, min(i + 3, len(norms))):
                         if norms[look] == "DIGIT":
                             col_starts["nine_digit"] = w["x0"]
                             break
 
-            if col_starts:
-                logger.debug(
-                    "Header row detected at y={:.1f}: {}",
-                    _y,
-                    ", ".join(f"{k}={v:.1f}" for k, v in sorted(col_starts.items())),
-                )
-                return col_starts
+        # ── Step 1: find the first row that anchors the header block ──────────
+        header_start: int | None = None
+        for idx, (_y, ws) in enumerate(word_rows[:30]):
+            joined_raw = " ".join(w["text"] for w in ws)
+            if _PN_PAT.search(joined_raw):
+                continue  # skip data rows
 
-        return {}
+            nset = {w["text"].upper().strip().rstrip(".") for w in ws}
+            bare_set = {n.replace("'", "") for n in nset}
+
+            has_part_label = "PART" in nset or "DESCRIPTION" in nset
+            has_col_anchor = "DESCRIPTION" in nset or "REMARKS" in nset or "QTY" in bare_set
+
+            if has_part_label and has_col_anchor:
+                header_start = idx
+                break
+
+        if header_start is None:
+            return {}
+
+        # ── Step 2: collect from the full header block ────────────────────────
+        col_starts: dict[str, float] = {}
+        for _y, ws in word_rows[header_start : min(header_start + 6, 30)]:
+            joined_raw = " ".join(w["text"] for w in ws)
+            if _PN_PAT.search(joined_raw):
+                break  # data row — header block ended
+
+            norms = [w["text"].upper().strip().rstrip(".") for w in ws]
+            _classify(norms, ws, col_starts)
+
+        if col_starts:
+            logger.debug(
+                "Header block (start={}): {}",
+                header_start,
+                ", ".join(f"{k}={v:.1f}" for k, v in sorted(col_starts.items())),
+            )
+        return col_starts
 
     @staticmethod
     def _is_variant_code(s: str) -> bool:
@@ -1607,14 +1646,20 @@ class YamahaCatalogueExtractor:
 
                 desc_raw_sv = " ".join(desc_sv)
                 _pn_in_desc_sv = _PN_PAT.search(desc_raw_sv)
-                desc = (
+                desc_sv_clean = (
                     desc_raw_sv[: _pn_in_desc_sv.start()].strip() if _pn_in_desc_sv else desc_raw_sv
                 )
 
-                # Extract the numeric qty from the qty zone words
-                qty_raw = " ".join(qty_sv)
-                qty_m = re.search(r"\d+", qty_raw)
-                qty = qty_m.group() if qty_m else ""
+                if bounds.qty_start < 9000:
+                    # Qty zone was detected — use positional result directly
+                    qty_raw = " ".join(qty_sv)
+                    qty_m = re.search(r"\d+", qty_raw)
+                    desc = desc_sv_clean
+                    qty = qty_m.group() if qty_m else ""
+                else:
+                    # Qty column not detected — apply _split_after heuristics
+                    # to the collected desc_sv words so qty isn't mis-filed.
+                    desc, qty, _ = self._split_after(desc_sv_clean, num_variants)
 
                 remarks = " ".join(rem_sv)
 
