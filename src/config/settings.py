@@ -14,9 +14,9 @@ class Settings(BaseSettings):
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_db: str = "spare_parts"
-    postgres_user: str = "analytics_ro"
+    postgres_user: str = "yamaha_rw"
     postgres_password: str = ""
-    postgres_sslmode: str = "require"
+    postgres_sslmode: str = "disable"  # use 'require' for remote/production
 
     # MLflow
     mlflow_tracking_uri: str = "./mlruns"
