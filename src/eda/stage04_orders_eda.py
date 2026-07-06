@@ -80,23 +80,35 @@ _CAT_COLORS = {
 
 
 def load_dealers() -> pd.DataFrame:
-    """Load dealers.xlsx — Active dealers only.
+    """Load dealers.xlsx — all dealers (Active + Inactive).
 
-    Returns columns: Dealer Code, Dealer Name, Province, District, ASE, RM, Type.
+    Returns columns: Dealer Code, Dealer Name, Province, District, ASE, RM, Type, dealer_status.
     Business meaning: authoritative dealer master; join key is Dealer Code = Sold-to Party.
+    dealer_status = "Active" | "Inactive" — downstream stages may filter as needed.
     """
     df = pd.read_excel(_DEALERS_RAW, dtype=str)
     df.columns = df.columns.str.strip()
     for col in df.select_dtypes("object").columns:
         df[col] = df[col].fillna("").str.strip()
 
-    before = len(df)
-    df = df[df["Status (Active/ Inactive)"].str.upper() == "ACTIVE"].copy()
+    df["dealer_status"] = df["Status (Active/ Inactive)"].str.strip()
+    n_active = (df["dealer_status"].str.upper() == "ACTIVE").sum()
+    n_inactive = (df["dealer_status"].str.upper() != "ACTIVE").sum()
     logger.info(
-        f"Dealer master: {before} total → {len(df)} Active  "
-        f"(MC={( df['Type']=='MC').sum()}, OBM={(df['Type']=='OBM').sum()})"
+        f"Dealer master: {len(df)} total  "
+        f"(Active={n_active}, Inactive={n_inactive})  "
+        f"MC={( df['Type']=='MC').sum()}, OBM={(df['Type']=='OBM').sum()}"
     )
-    keep = ["Dealer Code", "Dealer Name", "Province", "District", "ASE", "RM", "Type"]
+    keep = [
+        "Dealer Code",
+        "Dealer Name",
+        "Province",
+        "District",
+        "ASE",
+        "RM",
+        "Type",
+        "dealer_status",
+    ]
     return df[[c for c in keep if c in df.columns]].copy()
 
 
@@ -120,7 +132,7 @@ def load_orders(dealers: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     Steps:
       1. Parse date columns.
       2. Filter to SD Document Category C (Orders) and H (Returns).
-      3. Inner-join on Sold-to Party = Dealer Code (Active only).
+      3. Inner-join on Sold-to Party = Dealer Code (Active + Inactive).
          Rows not matched are non-Yamaha customers — excluded entirely.
       4. Attach Province / District / ASE / RM from dealer master.
       5. Classify dealer_type (MC / OBM) and mc_category (MC sub-category).
@@ -1309,7 +1321,7 @@ def write_excel_report(
     ws.write("A1", "Stage 4 — Orders EDA: Yamaha Spare Parts Dealer Orders", f["title"])
     ws.write(
         "A2",
-        "Active dealers only · MC: Lubricant, Battery, Tyre, Spare Parts · OBM single block",
+        "All dealers (Active + Inactive) · MC: Lubricant, Battery, Tyre, Spare Parts · OBM",
         f["sub"],
     )
     for r, (k, v) in enumerate(kpis.items()):
