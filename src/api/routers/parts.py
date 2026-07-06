@@ -30,10 +30,9 @@ def get_parts(
         df = pm.copy()
         if search:
             q = search.lower()
-            mask = (
-                df["part_number"].str.lower().str.contains(q, na=False) |
-                df["description"].str.lower().str.contains(q, na=False)
-            )
+            mask = df["part_number"].str.lower().str.contains(q, na=False) | df[
+                "description"
+            ].str.lower().str.contains(q, na=False)
             df = df[mask]
         if has_supersession is not None:
             df = df[df["has_supersession"] == has_supersession]
@@ -41,29 +40,35 @@ def get_parts(
         supersession_count = int(pm["has_supersession"].sum())
 
         for _, r in df.head(limit).iterrows():
-            rows.append(PartMasterRow(
-                part_number=str(r.get("part_number", "")),
-                description=str(r.get("description", "")),
-                compatible_models=str(r["compatible_models"]) if r.get("compatible_models") else None,
-                order_qty=int(r.get("order_qty", 0)),
-                eod_rate=float(r.get("eod_rate", 0.0)),
-                stock=float(r.get("stock", 0.0)),
-                on_order=float(r.get("on_order", 0.0)),
-                revised_order_qty=int(r.get("revised_order_qty", 0)),
-                forecast_monthly_qty=float(r.get("forecast_monthly_qty", 0.0)),
-                superseded_from=str(r["superseded_from"]) if r.get("superseded_from") else None,
-                has_supersession=bool(r.get("has_supersession", False)),
-            ))
+            rows.append(
+                PartMasterRow(
+                    part_number=str(r.get("part_number", "")),
+                    description=str(r.get("description", "")),
+                    compatible_models=(
+                        str(r["compatible_models"]) if r.get("compatible_models") else None
+                    ),
+                    order_qty=int(r.get("order_qty", 0)),
+                    eod_rate=float(r.get("eod_rate", 0.0)),
+                    stock=float(r.get("stock", 0.0)),
+                    on_order=float(r.get("on_order", 0.0)),
+                    revised_order_qty=int(r.get("revised_order_qty", 0)),
+                    forecast_monthly_qty=float(r.get("forecast_monthly_qty", 0.0)),
+                    superseded_from=str(r["superseded_from"]) if r.get("superseded_from") else None,
+                    has_supersession=bool(r.get("has_supersession", False)),
+                )
+            )
 
     if not ss.empty:
         for _, r in ss.iterrows():
-            supersessions.append(SupersessionRow(
-                requested_pn=str(r.get("requested_pn", "")),
-                current_pn=str(r.get("current_pn", "")),
-                hops=int(r.get("hops", 1)),
-                current_description=str(r.get("current_description", "")),
-                old_description=str(r.get("old_description", "")),
-            ))
+            supersessions.append(
+                SupersessionRow(
+                    requested_pn=str(r.get("requested_pn", "")),
+                    current_pn=str(r.get("current_pn", "")),
+                    hops=int(r.get("hops", 1)),
+                    current_description=str(r.get("current_description", "")),
+                    old_description=str(r.get("old_description", "")),
+                )
+            )
 
     return PartMasterResponse(
         total=len(pm),
@@ -76,9 +81,9 @@ def get_parts(
 @router.get("/from-catalog")
 def parts_from_catalog(
     search: str = Query("", description="Filter by part number or description"),
-    model: str  = Query("", description="Filter by model folder name"),
-    kind: str   = Query("", description="Filter by kind: 'shared' or 'colour_specific'"),
-    limit: int  = Query(5000, le=20000),
+    model: str = Query("", description="Filter by model folder name"),
+    kind: str = Query("", description="Filter by kind: 'shared' or 'colour_specific'"),
+    limit: int = Query(5000, le=20000),
 ) -> dict[str, Any]:
     """Return all unique parts from the catalogue part master (agent-derived).
 
@@ -103,15 +108,22 @@ def parts_from_catalog(
         grouped = (
             df.groupby("part_no", sort=True)
             .agg(
-                description      =("description", lambda x: x.mode().iloc[0] if not x.mode().empty else ""),
-                compatible_models=("model",        lambda x: ", ".join(sorted(x.dropna().unique()))),
-                source_count     =("source_file",  "count"),
+                description=(
+                    "description",
+                    lambda x: x.mode().iloc[0] if not x.mode().empty else "",
+                ),
+                compatible_models=(
+                    "model",
+                    lambda x: ", ".join(sorted(x.dropna().unique())),
+                ),
+                source_count=("source_file", "count"),
             )
             .reset_index()
         )
-        grouped["section"]       = ""
+        grouped["section"] = ""
+        grouped["variants"] = ""
         grouped["variant_count"] = 1
-        grouped["kind"]          = "shared"
+        grouped["kind"] = "shared"
         all_models = sorted(df["model"].dropna().unique().tolist())
     else:
         grouped = df.copy()
@@ -128,10 +140,9 @@ def parts_from_catalog(
     # ── Filtering ─────────────────────────────────────────────────────────────
     if search:
         q = search.lower()
-        mask = (
-            grouped["part_no"].str.lower().str.contains(q, na=False)
-            | grouped["description"].str.lower().str.contains(q, na=False)
-        )
+        mask = grouped["part_no"].str.lower().str.contains(q, na=False) | grouped[
+            "description"
+        ].str.lower().str.contains(q, na=False)
         grouped = grouped[mask]
 
     if model:
@@ -144,22 +155,23 @@ def parts_from_catalog(
 
     rows = [
         {
-            "part_no":           str(r["part_no"]),
-            "description":       str(r.get("description", "")),
-            "section":           str(r.get("section", "")),
+            "part_no": str(r["part_no"]),
+            "description": str(r.get("description", "")),
+            "section": str(r.get("section", "")),
             "compatible_models": str(r.get("compatible_models", "")),
-            "variant_count":     int(r.get("variant_count", 1)),
-            "source_count":      int(r.get("source_count", 1)),
-            "kind":              str(r.get("kind", "shared")),
+            "variants": str(r.get("variants", "")),
+            "variant_count": int(r.get("variant_count", 1)),
+            "source_count": int(r.get("source_count", 1)),
+            "kind": str(r.get("kind", "shared")),
         }
         for _, r in grouped.head(limit).iterrows()
     ]
 
     return {
-        "indexed":        True,
-        "agent_master":   is_agent_master,
-        "total":          len(grouped),
-        "total_models":   len(all_models),
-        "rows":           rows,
-        "models":         all_models,
+        "indexed": True,
+        "agent_master": is_agent_master,
+        "total": len(grouped),
+        "total_models": len(all_models),
+        "rows": rows,
+        "models": all_models,
     }

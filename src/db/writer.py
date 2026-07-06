@@ -27,6 +27,50 @@ def _get_commit_sha() -> str:
         return "unknown"
 
 
+def save_part_master(df: pd.DataFrame) -> None:
+    """Write the catalogue part master to PostgreSQL (interim.part_master).
+
+    Business meaning: full-refresh write of all unique parts aggregated from
+    PDF catalogues — part_no, description, kind, compatible_models, variants.
+    Skips gracefully if DATA_BACKEND != 'postgres' or Postgres is unreachable.
+
+    Args:
+        df: DataFrame produced by build_part_master().
+    """
+    if settings.data_backend != "postgres":
+        logger.debug("DB part-master write skipped — DATA_BACKEND={}", settings.data_backend)
+        return
+    if not settings.postgres_password:
+        logger.warning("DB part-master write skipped — postgres_password not configured in .env")
+        return
+    if df.empty:
+        logger.warning("DB part-master write skipped — DataFrame is empty")
+        return
+
+    try:
+        engine = create_engine(settings.postgres_dsn, pool_pre_ping=True)
+        with engine.begin() as conn:
+            conn.execute(text("CREATE SCHEMA IF NOT EXISTS interim"))
+
+        out = df.copy()
+        out["code_commit_sha"] = _get_commit_sha()
+        out["generated_at"] = datetime.now(tz=UTC)
+        out["model_version"] = "stage063-part-master"
+
+        out.to_sql(
+            "part_master",
+            engine,
+            schema="interim",
+            if_exists="replace",
+            index=False,
+            method="multi",
+            chunksize=500,
+        )
+        logger.info("interim.part_master written to PostgreSQL: {} rows", len(out))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("DB part-master write failed (non-fatal): {}", exc)
+
+
 def save_catalog_parts(df: pd.DataFrame) -> None:
     """Write extracted catalog parts to PostgreSQL (interim.catalog_parts).
 

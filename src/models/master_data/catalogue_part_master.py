@@ -33,15 +33,15 @@ from loguru import logger
 # Matches hyphenated Yamaha part numbers AND 12-char alphanumeric part numbers
 # when they appear embedded inside a description string.
 _EMBEDDED_PN_RE = re.compile(
-    r'\b(?:[A-Z0-9]{2,5}-[A-Z0-9]{3,8}-[A-Z0-9]{2}(?:-[A-Z0-9]{2})?'
-    r'|[A-Z0-9]{12})\b'
+    r"\b(?:[A-Z0-9]{2,5}-[A-Z0-9]{3,8}-[A-Z0-9]{2}(?:-[A-Z0-9]{2})?" r"|[A-Z0-9]{12})\b"
 )
 # Any Yamaha part number pattern (for raw-text description recovery)
 _ANY_PN_RE = re.compile(
-    r'\b([A-Z0-9]{2,5}-[A-Z0-9]{3,8}-[A-Z0-9]{2}(?:-[A-Z0-9]{2})?'
-    r'|[A-Z0-9]{5}-[A-Z0-9]{3,8}'
-    r'|[A-Z0-9]{12})\b'
+    r"\b([A-Z0-9]{2,5}-[A-Z0-9]{3,8}-[A-Z0-9]{2}(?:-[A-Z0-9]{2})?"
+    r"|[A-Z0-9]{5}-[A-Z0-9]{3,8}"
+    r"|[A-Z0-9]{12})\b"
 )
+
 
 def _is_garbled_description(desc: str) -> bool:
     """Return True if *desc* is a garbled PDF extraction artefact.
@@ -62,8 +62,8 @@ def _is_garbled_description(desc: str) -> bool:
         return True
     # Case 2: single PN + noise only
     cleaned = _EMBEDDED_PN_RE.sub(" ", upper)
-    cleaned = re.sub(r'\b[0-9][0-9\-]*\b', ' ', cleaned)   # strip number/ref tokens
-    real_chars = re.sub(r'[\s,./\-]', '', cleaned)
+    cleaned = re.sub(r"\b[0-9][0-9\-]*\b", " ", cleaned)  # strip number/ref tokens
+    real_chars = re.sub(r"[\s,./\-]", "", cleaned)
     return len(real_chars) < 3
 
 
@@ -78,23 +78,25 @@ def _best_description(counter: Counter[str]) -> str:
     # Pass 1: non-empty, non-garbled
     for desc, _ in counter.most_common():
         if desc and not _is_garbled_description(desc):
-            return desc.lstrip("., ")          # strip leading punctuation artefacts
+            return desc.lstrip("., ")  # strip leading punctuation artefacts
     # Pass 2: non-empty (garbled but at least has text)
     for desc, _ in counter.most_common():
         if desc:
             return desc.lstrip("., ")
     return ""
 
+
 _AGENT_BUILDS_DIR = Path("data/outputs/agent_builds")
-_PDF_ROOT          = Path("data/raw/pdf_catalogues")
-_PARQUET_OUT       = Path("data/interim/catalogue_part_master.parquet")
-_XLSX_OUT          = Path("data/outputs/catalogue_part_master.xlsx")
-_PDF_EXTS          = {".pdf", ".PDF"}
+_PDF_ROOT = Path("data/raw/pdf_catalogues")
+_PARQUET_OUT = Path("data/interim/catalogue_part_master.parquet")
+_XLSX_OUT = Path("data/outputs/catalogue_part_master.xlsx")
+_PDF_EXTS = {".pdf", ".PDF"}
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _model_from_cache_file(cache_file: Path) -> str:
     """Extract model-folder name from a cache filename.
@@ -102,9 +104,9 @@ def _model_from_cache_file(cache_file: Path) -> str:
     Cache files are ``{folder}_{pdf_name}.pdf.json``, e.g.
     ``AEROX_1UB65460EV-AEROX.pdf.json`` → "AEROX".
     """
-    stem = cache_file.stem          # remove .json
+    stem = cache_file.stem  # remove .json
     if stem.endswith(".pdf"):
-        stem = stem[:-4]            # remove .pdf
+        stem = stem[:-4]  # remove .pdf
     return stem.split("_", 1)[0]
 
 
@@ -132,7 +134,7 @@ def _parts_from_agent_json(
     appears at most once.
     """
     builds: list[dict[str, Any]] = json_data.get("builds", [])
-    seen: set[tuple[str, str]] = set()       # (part_no, variant)
+    seen: set[tuple[str, str]] = set()  # (part_no, variant)
     rows: list[_PartRow] = []
 
     for build in builds:
@@ -145,20 +147,20 @@ def _parts_from_agent_json(
             if key in seen:
                 continue
             seen.add(key)
-            rows.append((
-                part_no,
-                (part.get("description") or "").strip(),
-                (part.get("figure")      or "").strip(),
-                variant,
-                model_display,
-            ))
+            rows.append(
+                (
+                    part_no,
+                    (part.get("description") or "").strip(),
+                    (part.get("figure") or "").strip(),
+                    variant,
+                    model_display,
+                )
+            )
 
     return rows
 
 
-def _text_scan_descriptions(
-    pdf_path: Path, missing_pns: set[str]
-) -> dict[str, str]:
+def _text_scan_descriptions(pdf_path: Path, missing_pns: set[str]) -> dict[str, str]:
     """Recover descriptions for *missing_pns* from raw PDF text lines.
 
     The word-level extractor occasionally misses descriptions when the PDF
@@ -180,7 +182,7 @@ def _text_scan_descriptions(
         with pdfplumber.open(str(pdf_path)) as pdf:
             for page in pdf.pages:
                 if not missing_pns - recovered.keys():
-                    break                           # all found
+                    break  # all found
                 text = (page.extract_text() or "").upper()
                 for line in text.split("\n"):
                     m = _ANY_PN_RE.search(line)
@@ -190,15 +192,15 @@ def _text_scan_descriptions(
                     if pn not in missing_pns or pn in recovered:
                         continue
                     # Everything after the part number on this line
-                    after = line[m.end():].strip()
+                    after = line[m.end() :].strip()
                     if not after:
                         continue
                     tokens = after.split()
                     # Strip trailing qty (pure digits or digit/slash)
-                    while tokens and re.match(r'^\d[\d/]*$', tokens[-1]):
+                    while tokens and re.match(r"^\d[\d/]*$", tokens[-1]):
                         tokens.pop()
                     # Strip trailing non-alpha remarks (e.g. colour codes)
-                    while tokens and not re.search(r'[A-Z]', tokens[-1]):
+                    while tokens and not re.search(r"[A-Z]", tokens[-1]):
                         tokens.pop()
                     desc = " ".join(tokens).lstrip("., ").strip()
                     if desc and not _is_garbled_description(desc):
@@ -221,6 +223,7 @@ def _parts_from_extractor(pdf_path: Path, model_folder: str) -> list[_PartRow]:
     """
     try:
         from src.models.master_data.pdf_catalogue_extractor import YamahaCatalogueExtractor
+
         extractor = YamahaCatalogueExtractor(max_pages=500)
         result = extractor.extract(pdf_path)
     except Exception as exc:  # noqa: BLE001
@@ -234,48 +237,52 @@ def _parts_from_extractor(pdf_path: Path, model_folder: str) -> list[_PartRow]:
     # Accumulate all candidate descriptions per part_no
     # (same part can appear in multiple FIG sections)
     from collections import defaultdict as _dd
+
     candidates: dict[str, list[tuple[str, str]]] = _dd(list)  # pn → [(desc, section), …]
     for row in result.rows or []:
         part_no = (row.get("part_no") or "").strip()
         if not part_no:
             continue
-        desc    = (row.get("description") or "").strip()
-        section = (row.get("section")     or "").strip()
+        desc = (row.get("description") or "").strip()
+        section = (row.get("section") or "").strip()
         candidates[part_no].append((desc, section))
 
     rows: list[_PartRow] = []
     missing_desc: set[str] = set()
     for part_no, occurrences in candidates.items():
         # Pick the best description: non-garbled > non-empty > longest
-        best_desc    = ""
+        best_desc = ""
         best_section = occurrences[0][1] if occurrences else ""
         for desc, section in occurrences:
             if not desc or _is_garbled_description(desc):
                 continue
             if not best_desc or len(desc) > len(best_desc):
-                best_desc    = desc.lstrip("., ")
+                best_desc = desc.lstrip("., ")
                 best_section = section
         if not best_desc:
             missing_desc.add(part_no)
-        rows.append((
-            part_no,
-            best_desc,
-            best_section,
-            "",           # no variant info from basic extractor
-            model_folder,
-        ))
+        rows.append(
+            (
+                part_no,
+                best_desc,
+                best_section,
+                "",  # no variant info from basic extractor
+                model_folder,
+            )
+        )
 
     # ── Text-scan recovery for parts the word-level extractor missed ──────────
     if missing_desc:
         recovered = _text_scan_descriptions(pdf_path, missing_desc)
         if recovered:
             rows = [
-                (pn, recovered.get(pn, desc) if not desc else desc, sec, var, mdl)
+                (pn, desc if desc else recovered.get(pn, desc), sec, var, mdl)
                 for pn, desc, sec, var, mdl in rows
             ]
             logger.debug(
                 "Text-scan recovered {} descriptions from {}",
-                len(recovered), pdf_path.name,
+                len(recovered),
+                pdf_path.name,
             )
 
     return rows
@@ -284,6 +291,7 @@ def _parts_from_extractor(pdf_path: Path, model_folder: str) -> list[_PartRow]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def build_part_master(
     agent_builds_dir: Path = _AGENT_BUILDS_DIR,
@@ -311,10 +319,10 @@ def build_part_master(
     """
     # ── Discover all agent-cached JSONs ──────────────────────────────────────
     json_files = sorted(agent_builds_dir.glob("*.json"))
-    cached_stems: set[str] = {jf.stem for jf in json_files}   # "AEROX_...pdf"
+    cached_stems: set[str] = {jf.stem for jf in json_files}  # "AEROX_...pdf"
 
     # ── Discover all PDFs, compute which ones are NOT cached ─────────────────
-    uncached_pdfs: list[tuple[Path, str]] = []   # (pdf_path, model_folder)
+    uncached_pdfs: list[tuple[Path, str]] = []  # (pdf_path, model_folder)
     if pdf_root.exists():
         for folder in sorted(pdf_root.iterdir()):
             if not folder.is_dir():
@@ -324,26 +332,27 @@ def build_part_master(
                 if pdf_path.suffix not in _PDF_EXTS or not pdf_path.is_file():
                     continue
                 rel = pdf_path.relative_to(pdf_root).as_posix()
-                stem = _cache_key(rel)          # matches catalog.py naming
+                stem = _cache_key(rel)  # matches catalog.py naming
                 if stem not in cached_stems:
                     uncached_pdfs.append((pdf_path, model_folder))
 
     logger.info(
         "Part master build: {} agent JSONs + {} uncached PDFs to extract",
-        len(json_files), len(uncached_pdfs),
+        len(json_files),
+        len(uncached_pdfs),
     )
 
     # Accumulators keyed by part_no
-    desc_ctr:  dict[str, Counter[str]]       = defaultdict(Counter)
-    sec_ctr:   dict[str, Counter[str]]       = defaultdict(Counter)
-    compat:    dict[str, set[tuple[str,str]]] = defaultdict(set)  # (model, variant)
-    kind_set:  dict[str, set[str]]           = defaultdict(set)
-    src_set:   dict[str, set[str]]           = defaultdict(set)
+    desc_ctr: dict[str, Counter[str]] = defaultdict(Counter)
+    sec_ctr: dict[str, Counter[str]] = defaultdict(Counter)
+    compat: dict[str, set[tuple[str, str]]] = defaultdict(set)  # (model, variant)
+    kind_set: dict[str, set[str]] = defaultdict(set)
+    src_set: dict[str, set[str]] = defaultdict(set)
 
     def _ingest(rows: list[_PartRow], source_pdf: str, kind: str = "shared") -> None:
         for part_no, desc, section, variant, model in rows:
-            desc_ctr[part_no][desc]    += 1
-            sec_ctr[part_no][section]  += 1
+            desc_ctr[part_no][desc] += 1
+            sec_ctr[part_no][section] += 1
             compat[part_no].add((model, variant))
             kind_set[part_no].add(kind)
             src_set[part_no].add(source_pdf)
@@ -356,9 +365,9 @@ def build_part_master(
             logger.warning("Skipping %s: %s", json_file.name, exc)
             continue
 
-        model_folder  = _model_from_cache_file(json_file)
+        model_folder = _model_from_cache_file(json_file)
         model_display = (data.get("model") or "").strip() or model_folder
-        source_pdf    = data.get("source_pdf", json_file.stem)
+        source_pdf = data.get("source_pdf", json_file.stem)
 
         rows = _parts_from_agent_json(data, model_display, source_pdf)
 
@@ -368,14 +377,14 @@ def build_part_master(
         for build in data.get("builds", []):
             for part in build.get("parts", []):
                 pn = (part.get("part_no") or "").strip()
-                k  = part.get("kind", "shared")
+                k = part.get("kind", "shared")
                 if k == "colour_specific":
                     colour_specific_pns.add(pn)
                 else:
                     shared_pns.add(pn)
 
         for part_no, desc, section, variant, model in rows:
-            desc_ctr[part_no][desc]   += 1
+            desc_ctr[part_no][desc] += 1
             sec_ctr[part_no][section] += 1
             compat[part_no].add((model, variant))
             # shared wins: if a part is shared in ANY build, mark it shared
@@ -389,7 +398,9 @@ def build_part_master(
 
         logger.info(
             "Agent JSON {} → {} parts ({})",
-            json_file.name, len(rows), model_display,
+            json_file.name,
+            len(rows),
+            model_display,
         )
 
     # ── Process uncached PDFs via basic extractor ─────────────────────────────
@@ -399,7 +410,9 @@ def build_part_master(
         _ingest(rows, pdf_path.name, kind="shared")
         logger.info(
             "Extractor fallback {} → {} parts ({})",
-            pdf_path.name, len(rows), model_folder,
+            pdf_path.name,
+            len(rows),
+            model_folder,
         )
 
     if not desc_ctr:
@@ -412,7 +425,7 @@ def build_part_master(
     output_rows: list[dict[str, Any]] = []
     for part_no in sorted(desc_ctr.keys()):
         description = _best_description(desc_ctr[part_no])
-        section     = sec_ctr[part_no].most_common(1)[0][0]
+        section = sec_ctr[part_no].most_common(1)[0][0]
 
         # Sort compatible models: by model then variant
         sorted_compat = sorted(compat[part_no], key=lambda t: (t[0], t[1]))
@@ -429,16 +442,23 @@ def build_part_master(
         kind = "shared" if "shared" in kind_set[part_no] else "colour_specific"
         source_list = sorted(src_set[part_no])
 
-        output_rows.append({
-            "part_no":           part_no,
-            "description":       description,
-            "section":           section,
-            "compatible_models": compatible_models,
-            "variant_count":     variant_count,
-            "source_count":      len(source_list),
-            "source_pdfs":       "; ".join(source_list),
-            "kind":              kind,
-        })
+        # Variant codes only (no model name), deduplicated and sorted
+        variant_codes = sorted({v for _, v in compat[part_no] if v})
+        variants = ", ".join(variant_codes)
+
+        output_rows.append(
+            {
+                "part_no": part_no,
+                "description": description,
+                "section": section,
+                "compatible_models": compatible_models,
+                "variants": variants,
+                "variant_count": variant_count,
+                "source_count": len(source_list),
+                "source_pdfs": "; ".join(source_list),
+                "kind": kind,
+            }
+        )
 
     df = pd.DataFrame(output_rows)
 
@@ -460,6 +480,14 @@ def build_part_master(
             )
             by_section.to_excel(writer, sheet_name="By Section", index=False)
     logger.info("Wrote Excel → {}", xlsx_out)
+
+    # Persist to PostgreSQL when DATA_BACKEND=postgres (non-fatal)
+    try:
+        from src.db import save_part_master  # noqa: PLC0415
+
+        save_part_master(df)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Part master DB write skipped: {}", exc)
 
     return df
 

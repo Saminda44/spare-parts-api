@@ -505,6 +505,7 @@ export interface CatalogDerivedPartRow {
   description: string;
   section: string;
   compatible_models: string;
+  variants: string;
   variant_count: number;
   source_count: number;
   kind: "shared" | "colour_specific";

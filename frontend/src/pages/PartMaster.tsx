@@ -353,8 +353,15 @@ export function PartMaster() {
                       <td className="py-2 px-3 border-b border-slate-100">
                         <ModelBadges models={r.compatible_models} />
                       </td>
-                      <td className="py-2 px-3 border-b border-slate-100 text-center text-xs text-slate-400">
-                        {r.variant_count}
+                      <td className="py-2 px-3 border-b border-slate-100 text-xs text-slate-500 max-w-[200px]">
+                        {r.variants
+                          ? r.variants.split(", ").map(v => (
+                              <span key={v}
+                                className="inline-block mr-1 mb-0.5 px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-mono text-[10px]">
+                                {v}
+                              </span>
+                            ))
+                          : <span className="text-slate-300">—</span>}
                       </td>
                     </tr>
                   ))}
