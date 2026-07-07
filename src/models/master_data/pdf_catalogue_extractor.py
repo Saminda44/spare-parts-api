@@ -101,8 +101,8 @@ _PN_PAT = re.compile(
     r"|[A-Z0-9]{12}"
     r")\b"
 )
-# FIG. section header — "FIG. 1 (1D0) CYLINDER HEAD"
-_FIG_PAT = re.compile(r"^FIG\.\s+(\d+[A-Z]?)\s*(?:\([^)]+\)\s*)?(.+)$", re.IGNORECASE)
+# FIG. section header — "FIG. 1 (1D0) CYLINDER HEAD" or "FIG.1 CYLINDER" (no space after dot)
+_FIG_PAT = re.compile(r"^FIG\.\s*(\d+[A-Z]?)\s*(?:\([^)]+\)\s*)?(.+)$", re.IGNORECASE)
 # Lines to skip (header labels, noise)
 _SKIP_PAT = re.compile(
     r"^(REF\.?|PART\s+NO\.?|PART\s+NAME|DESCRIPTION|REMARKS|NO\.?|"
@@ -143,7 +143,7 @@ _SLASH_VARIANT_PAT = re.compile(r"\b([A-Z0-9]{3,5})\s*/\s*([A-Z0-9]{3,5})\b")
 _STAMP_PREFIX_PAT = re.compile(r"^[A-Z0-9]{2,6}\s+", re.IGNORECASE)
 
 # Partial FIG line — just the number, section name absent or on the next row.
-_FIG_PARTIAL_PAT = re.compile(r"(?:^|.*\s)(FIG\.\s+(\d+[A-Z]?))\s*$", re.IGNORECASE)
+_FIG_PARTIAL_PAT = re.compile(r"(?:^|.*\s)(FIG\.?\s*(\d+[A-Z]?))\s*$", re.IGNORECASE)
 
 # "AVAILABLE COLOUR" page header — these pages list bike colour variants as image captions,
 # e.g. "Yamaha Alpha Cygnus Black" / "Yamaha Alpha Cygnus Cyan".
@@ -305,8 +305,8 @@ class ColBounds:
     nine_digit_start: float = 9999.0
     superseded_start: float = 9999.0
     header_detected: bool = False
-    # True when "REMARKS (9 DIGIT)" header means the REMARKS column IS the 9-digit column.
-    # In this layout rem_start is suppressed (set to 9999) so content routes to nine_digit_parts.
+    # True when "REMARKS (9 DIGIT)" header means the REMARKS column IS the 9-digit part column.
+    # In this layout nine_digit_start is cleared (9999) so content routes via rem_start → remarks.
     remarks_is_nine_digit: bool = False
 
 
@@ -450,11 +450,7 @@ class YamahaCatalogueExtractor:
                             # has the REMARKS keyword (not the "(9 DIGIT)" qualifier).
                             if not new_bounds.remarks_is_nine_digit:
                                 new_bounds.remarks_is_nine_digit = last_bounds.remarks_is_nine_digit
-                            # When remarks_is_nine_digit is active, rem_start must stay
-                            # suppressed (9999) so words route to nine_digit_parts.
-                            if new_bounds.remarks_is_nine_digit:
-                                new_bounds.rem_start = 9999.0
-                            elif new_bounds.rem_start >= 9000:
+                            if new_bounds.rem_start >= 9000:
                                 new_bounds.rem_start = last_bounds.rem_start
                             if not new_bounds.qty_col_xs:
                                 new_bounds.qty_col_xs = last_bounds.qty_col_xs
@@ -534,14 +530,12 @@ class YamahaCatalogueExtractor:
             elif b.qty_start < 9000:
                 _detected.append((b.qty_start, "Q'ty"))
             if b.nine_digit_start < 9000:
-                # When remarks_is_nine_digit the REMARKS column IS the 9-digit column;
-                # show "Remarks (9 Digit)" so users see both facts at a glance.
-                label = "Remarks (9 Digit)" if b.remarks_is_nine_digit else "9 Digit Part No."
-                _detected.append((b.nine_digit_start, label))
+                _detected.append((b.nine_digit_start, "9 Digit Part No."))
             if b.superseded_start < 9000:
                 _detected.append((b.superseded_start, "Superseded Part No."))
             if b.rem_start < 9000:
-                _detected.append((b.rem_start, "Remarks"))
+                label = "Remarks (9 Digit)" if b.remarks_is_nine_digit else "Remarks"
+                _detected.append((b.rem_start, label))
             column_layout = [name for _, name in sorted(_detected, key=lambda t: t[0])]
 
         return ExtractionResult(
@@ -800,13 +794,16 @@ class YamahaCatalogueExtractor:
             superseded_start = min(w["x0"] for w in sup_words)
 
         # Detect "REMARKS (9 DIGIT)" layout: rem_start and nine_digit_start land at
-        # the same physical column (within 40 pts).  In this layout there is no
-        # separate plain-text remarks column — the content IS the 9-digit part number.
-        # Suppress rem_start so extraction routes words to nine_digit_parts instead.
+        # the same physical column (within 40 pts).  In this layout the REMARKS
+        # column IS the 9-digit part number column — content routes to rem_start
+        # (the remarks field) so nine_digit_start is cleared to avoid double-routing.
         remarks_is_nine_digit = False
         if nine_digit_start < 9000 and rem_start < 9000 and abs(nine_digit_start - rem_start) < 40:
             remarks_is_nine_digit = True
-            rem_start = 9999.0
+            # Use the leftmost anchor of the merged "REMARKS (9 DIGIT)" column header
+            # so data values aligned with either token are captured.
+            rem_start = min(rem_start, nine_digit_start)
+            nine_digit_start = 9999.0  # content routes via rem_start → remarks field
 
         if nine_digit_start < 9000 or superseded_start < 9000:
             logger.debug(

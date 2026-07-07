@@ -23,16 +23,5 @@
         "**/.ruff_cache": true,
         "**/htmlcov": true
     },
-    "sqltools.connections": [
-        {
-            "ssh": "Disabled",
-            "previewLimit": 50,
-            "server": "localhost",
-            "port": 5432,
-            "driver": "PostgreSQL",
-            "database": "yamaha",
-            "username": "saminda",
-            "name": "yamaha inventory optimisation"
-        }
-    ]
+    "sqltools.connections": []
 }
