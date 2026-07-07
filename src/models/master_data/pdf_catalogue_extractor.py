@@ -58,6 +58,7 @@ COLUMNS: list[str] = [
     "description",
     "qty",
     "nine_digit_part_no",
+    "escort_part_no",
     "superseded_part_no",
     "remarks",
 ]
@@ -68,6 +69,7 @@ DISPLAY_HEADERS: list[str] = [
     "Description",
     "Q'ty",
     "9 Digit Part No.",
+    "Escort Part No.",
     "Superseded Part No.",
     "Remarks",
 ]
@@ -106,7 +108,7 @@ _FIG_PAT = re.compile(r"^FIG\.\s*(\d+[A-Z]?)\s*(?:\([^)]+\)\s*)?(.+)$", re.IGNOR
 # Lines to skip (header labels, noise)
 _SKIP_PAT = re.compile(
     r"^(REF\.?|PART\s+NO\.?|PART\s+NAME|DESCRIPTION|REMARKS|NO\.?|"
-    r"CONTENTS?|Q\'?TY\.?|12\s+DIGIT|9\s+DIGIT)$",
+    r"CONTENTS?|Q\'?TY\.?|12\s+DIGITS?|9\s+DIGITS?)$",
     re.IGNORECASE,
 )
 # Model-code stamps at top of page, e.g. "1BV2", "21C1", "5AK5"
@@ -303,11 +305,16 @@ class ColBounds:
     rem_start: float = 9999.0
     qty_col_xs: list[float] = field(default_factory=list)
     nine_digit_start: float = 9999.0
+    escort_start: float = 9999.0  # "ESCORT 12 DIGIT PART NO." column (ENTICER-family)
     superseded_start: float = 9999.0
     header_detected: bool = False
     # True when "REMARKS (9 DIGIT)" header means the REMARKS column IS the 9-digit part column.
     # In this layout nine_digit_start is cleared (9999) so content routes via rem_start → remarks.
     remarks_is_nine_digit: bool = False
+    # Maps logical column name → the PDF's actual header label for that column.
+    # e.g. {"part_no": "Existing Part No.", "description": "Part Name"}
+    # Only populated for columns whose PDF label differs from the default.
+    col_labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -334,6 +341,11 @@ class ExtractionResult:
     error: str | None = None
     # column_layout: detected column names in left-to-right order for display
     column_layout: list[str] = field(default_factory=list)
+    # column_display_labels: maps logical field name → PDF's actual column header text.
+    # Only populated for columns whose PDF label differs from the default DISPLAY_HEADERS.
+    # e.g. {"part_no": "Existing Part No.", "description": "Part Name",
+    #        "escort_part_no": "Escort 12 Digit Part No."}
+    column_display_labels: dict[str, str] = field(default_factory=dict)
 
     @property
     def df(self) -> pd.DataFrame:
@@ -419,13 +431,18 @@ class YamahaCatalogueExtractor:
 
                     word_rows = self._group_by_y(words)
 
-                    # Skip KITS pages, cross-reference index pages, and named index pages
+                    # Skip KITS pages, cross-reference index pages, and named index pages.
+                    # Guard _XREF_PAGE_PAT with a FIG-header check: some catalogues
+                    # (e.g. ENTICER 5US1) have "PART NO. … PART NO. … PART NO." in
+                    # their column-header row, which is NOT an index page.  Genuine
+                    # cross-reference index pages never contain "FIG." section markers.
                     page_header = " ".join(
                         " ".join(w["text"] for w in ws) for _, ws in word_rows[:8]
                     )
+                    _has_fig = bool(_FIG_PAT.search(page_header))
                     if (
                         _KITS_PAGE_PAT.search(page_header)
-                        or _XREF_PAGE_PAT.search(page_header)
+                        or (_XREF_PAGE_PAT.search(page_header) and not _has_fig)
                         or _INDEX_PAGE_PAT.search(page_header)
                     ):
                         continue
@@ -456,8 +473,12 @@ class YamahaCatalogueExtractor:
                                 new_bounds.qty_col_xs = last_bounds.qty_col_xs
                             if new_bounds.nine_digit_start >= 9000:
                                 new_bounds.nine_digit_start = last_bounds.nine_digit_start
+                            if new_bounds.escort_start >= 9000:
+                                new_bounds.escort_start = last_bounds.escort_start
                             if new_bounds.superseded_start >= 9000:
                                 new_bounds.superseded_start = last_bounds.superseded_start
+                            if not new_bounds.col_labels:
+                                new_bounds.col_labels = last_bounds.col_labels
                         bounds = new_bounds
 
                     page_rows, new_section, new_fig, page_sects = self._parse_word_rows(
@@ -531,12 +552,35 @@ class YamahaCatalogueExtractor:
                 _detected.append((b.qty_start, "Q'ty"))
             if b.nine_digit_start < 9000:
                 _detected.append((b.nine_digit_start, "9 Digit Part No."))
+            if b.escort_start < 9000:
+                escort_label = b.col_labels.get("escort_part_no", "Escort Part No.")
+                _detected.append((b.escort_start, escort_label))
             if b.superseded_start < 9000:
                 _detected.append((b.superseded_start, "Superseded Part No."))
             if b.rem_start < 9000:
                 label = "Remarks (9 Digit)" if b.remarks_is_nine_digit else "Remarks"
                 _detected.append((b.rem_start, label))
+
+            # Override display names with PDF-native labels for part_no / description
+            _label_overrides = b.col_labels
+            _display_map: dict[str, str] = {}
+            for _x, _name in _detected:
+                _display_map[_x] = _name
+            if "part_no" in _label_overrides:
+                for i, (_x, _n) in enumerate(_detected):
+                    if _n == "Part No.":
+                        _detected[i] = (_x, _label_overrides["part_no"])
+                        break
+            if "description" in _label_overrides:
+                for i, (_x, _n) in enumerate(_detected):
+                    if _n == "Description":
+                        _detected[i] = (_x, _label_overrides["description"])
+                        break
+
             column_layout = [name for _, name in sorted(_detected, key=lambda t: t[0])]
+            column_display_labels = dict(b.col_labels)
+        else:
+            column_display_labels = {}
 
         return ExtractionResult(
             pdf_path=pdf_path,
@@ -551,6 +595,7 @@ class YamahaCatalogueExtractor:
             manufacture_year=manufacture_year,
             warnings=warnings,
             column_layout=column_layout,
+            column_display_labels=column_display_labels,
         )
 
     def extract_all(
@@ -727,9 +772,12 @@ class YamahaCatalogueExtractor:
         """
         # ── Pass 1: full header row scan ──────────────────────────────────────
         header = YamahaCatalogueExtractor._detect_header_row(word_rows)
+        # Unpack col_labels injected under the "_labels" sentinel key.
+        col_labels: dict[str, str] = header.pop("_labels", {})  # type: ignore[arg-type]
         pn_start = header.get("part_no", 9999.0)
         desc_start = header.get("description", 9999.0)
         qty_start = header.get("qty", 9999.0)
+        escort_start = header.get("escort", 9999.0)
         # Seed from header; Pass 2 may refine these three below.
         rem_start = header.get("remarks", 9999.0)
         nine_digit_start = header.get("nine_digit", 9999.0)
@@ -747,22 +795,28 @@ class YamahaCatalogueExtractor:
             if rem_idx is not None:
                 rem_start = ws[rem_idx]["x0"]
 
-            # CRUX-style "12 DIGIT" + "9 DIGIT" double-header — both show "DIGIT";
-            # when two DIGIT tokens appear, the second marks where REMARKS begins.
+            # CRUX-style "12 DIGIT" + "9 DIGIT" double-header — both show "DIGIT".
             # Strip parentheses so "(9 DIGIT)" also counts (India-market catalogues).
-            digit_indices = [i for i, t in enumerate(texts) if t.strip("()") == "DIGIT"]
-            if len(digit_indices) >= 2:
-                rem_start = ws[digit_indices[-1] - 1]["x0"]
-
+            # NOTE: do NOT set rem_start here.  CRUX has no REMARKS column; the 9 DIGIT
+            # column is correctly detected via the flat-scan nine_digit_start path below.
+            # Setting rem_start from the "9" token caused remarks_is_nine_digit=True, which
+            # cleared nine_digit_start and routed 9-digit values into the remarks field.
             # Skip data rows (contain part numbers) — only collect codes from
             # column-header rows.  Remark qualifiers (DBNM8, MBL2, etc.) appear
             # on data rows and would otherwise pollute qty_col_xs.
             if _PN_PAT.search(joined_up):
                 continue
 
-            # Accumulate variant-code column headers from every header row
-            for w in ws:
-                if YamahaCatalogueExtractor._is_variant_code(w["text"].upper()):
+            # Accumulate variant-code column headers from every header row.
+            # Require ≥2 variant codes on the same row: a model stamp (e.g. "1SU5")
+            # satisfies _is_variant_code on its own and would create a spurious
+            # single-entry qty_col_xs, forcing multi-variant positional mode
+            # with the wrong column positions (root cause for ENTICER 5US1).
+            row_vcs = [
+                w for w in ws if YamahaCatalogueExtractor._is_variant_code(w["text"].upper())
+            ]
+            if len(row_vcs) >= 2:
+                for w in row_vcs:
                     raw_vc_xs.append((w["x0"] + w["x1"]) / 2)
 
         # Sort and deduplicate near-identical x-centres (within 8 px)
@@ -775,12 +829,22 @@ class YamahaCatalogueExtractor:
         # "9 DIGIT PART NO." and "SUPERSEDED PART NO." headers may be split
         # across different Y-rows (pdfplumber groups words by Y-band, so "9" at
         # y=40 and "DIGIT" at y=44 land in separate word-rows).  A flat x-proximity
-        # scan across all header rows handles this reliably: we pair each "DIGIT"
+        # scan across header-only rows handles this reliably: we pair each "DIGIT"
         # token with any "9" token whose x0 is within 50 pts to its left.
-        flat_words = [w for _, ws in word_rows[:25] for w in ws]
+        #
+        # IMPORTANT: exclude data rows.  A part-list row with ref_no=9 (e.g.
+        # "9@441") would pair with the "DIGIT@470" from the "12 DIGIT" column
+        # header (gap=29 px < 50 threshold), falsely setting nine_digit_start to
+        # the ref-no column (~441 px) and routing ALL content into nine_digit.
+        flat_words: list[dict] = []
+        for _, ws in word_rows[:25]:
+            if not _PN_PAT.search(" ".join(w["text"] for w in ws)):
+                flat_words.extend(ws)
         # Strip parentheses so "(9" matches "9" and "DIGIT)" matches "DIGIT".
         # Handles "REMARKS (9 DIGIT)" column headers in India-market catalogues.
-        digit_x_list = [w["x0"] for w in flat_words if w["text"].upper().strip("()") == "DIGIT"]
+        digit_x_list = [
+            w["x0"] for w in flat_words if w["text"].upper().strip("()") in ("DIGIT", "DIGITS")
+        ]
         nine_x_list = [w["x0"] for w in flat_words if w["text"].strip("()") == "9"]
         sup_words = [w for w in flat_words if w["text"].upper() == "SUPERSEDED"]
 
@@ -793,6 +857,14 @@ class YamahaCatalogueExtractor:
         if sup_words and superseded_start >= 9000:
             superseded_start = min(w["x0"] for w in sup_words)
 
+        # Right-aligned column data sits to the left of the header word's left edge.
+        # Shift nine_digit_start inward so data values that start just left of the
+        # detected header x-position are routed correctly.
+        # Observed offsets: 6 px in ENTICER 5US1, ~9 px in CRUX-S PC5KA5.
+        # Use 15 px to cover both catalogues with margin.
+        if nine_digit_start < 9000:
+            nine_digit_start = max(0.0, nine_digit_start - 15.0)
+
         # Detect "REMARKS (9 DIGIT)" layout: rem_start and nine_digit_start land at
         # the same physical column (within 40 pts).  In this layout the REMARKS
         # column IS the 9-digit part number column — content routes to rem_start
@@ -804,6 +876,29 @@ class YamahaCatalogueExtractor:
             # so data values aligned with either token are captured.
             rem_start = min(rem_start, nine_digit_start)
             nine_digit_start = 9999.0  # content routes via rem_start → remarks field
+
+        # ── Single-variant-code qty_start detection (CRUX-style catalogues) ──
+        # CRUX pages have ONE variant code header (e.g. "IAK5", "5AK5") on a row
+        # ABOVE the anchor row, so _detect_header_row misses it entirely.  The flat
+        # scan may also set nine_digit_start AFTER Pass 1 runs, so this block must
+        # run AFTER the flat scan + offset + remarks_is_nine_digit so that
+        # nine_digit_start reflects the final computed value.
+        # Guard: remarks_is_nine_digit=True means nine_digit_start was cleared to
+        # 9999 — India-market layout; skip to avoid spurious qty detection.
+        if not qty_col_xs and qty_start >= 9000 and desc_start < 9000 and nine_digit_start < 9000:
+            for _y2, ws2 in word_rows[:25]:
+                if _PN_PAT.search(" ".join(w["text"] for w in ws2)):
+                    continue  # data row — skip
+                sv_vcs = [
+                    w
+                    for w in ws2
+                    if YamahaCatalogueExtractor._is_variant_code(w["text"].upper())
+                    and w["x0"] > desc_start + 15.0  # clearly past description zone
+                    and w["x0"] < nine_digit_start + 30.0  # before 9-digit zone
+                ]
+                if len(sv_vcs) == 1:
+                    qty_start = sv_vcs[0]["x0"]
+                    break
 
         if nine_digit_start < 9000 or superseded_start < 9000:
             logger.debug(
@@ -832,9 +927,11 @@ class YamahaCatalogueExtractor:
                 rem_start=rem_start,
                 qty_col_xs=qty_col_xs,
                 nine_digit_start=nine_digit_start,
+                escort_start=escort_start,
                 superseded_start=superseded_start,
                 header_detected=bool(header),
                 remarks_is_nine_digit=remarks_is_nine_digit,
+                col_labels=col_labels,
             )
         return None
 
@@ -865,8 +962,17 @@ class YamahaCatalogueExtractor:
           "nine_digit", "superseded"
         """
 
-        def _classify(norms: list[str], ws_: list[dict], col_starts: dict[str, float]) -> None:
-            """Classify words on one row into col_starts (in-place)."""
+        def _classify(
+            norms: list[str],
+            ws_: list[dict],
+            col_starts: dict[str, float],
+            col_labels: dict[str, str],
+        ) -> None:
+            """Classify words on one row into col_starts (in-place).
+
+            Also records the PDF's actual header text in col_labels so the UI
+            can show "Existing Part No." instead of the generic "Part No." label.
+            """
             bare = [n.replace("'", "") for n in norms]
             # Strip parentheses so "(9" matches "9" and "DIGIT)" matches "DIGIT".
             # This handles "REMARKS (9 DIGIT)" headers in India-market catalogues.
@@ -874,11 +980,38 @@ class YamahaCatalogueExtractor:
             for i, (norm, br, w) in enumerate(zip(norms, bare, ws_, strict=False)):
                 if norm == "REF" and "ref_no" not in col_starts:
                     col_starts["ref_no"] = w["x0"]
+                elif norm == "EXISTING" and "part_no" not in col_starts:
+                    # "EXISTING PART NO." — the 12-digit column in ENTICER catalogues.
+                    # Mark the label so the UI shows "Existing Part No." not "Part No."
+                    col_starts["part_no"] = w["x0"]
+                    col_labels["part_no"] = "Existing Part No."
+                elif norm == "ESCORT" and "escort" not in col_starts:
+                    # "ESCORT 12 DIGIT PART NO." — alternate part number column in ENTICER.
+                    col_starts["escort"] = w["x0"]
+                    col_labels["escort_part_no"] = "Escort 12 Digit Part No."
                 elif norm == "PART" and "part_no" not in col_starts:
                     col_starts["part_no"] = w["x0"]
-                elif norm in ("DESCRIPTION", "DESC", "NAME") and "description" not in col_starts:
+                elif norm in ("DESCRIPTION", "DESC") and "description" not in col_starts:
                     col_starts["description"] = w["x0"]
+                elif norm == "NAME" and "description" not in col_starts:
+                    # "PART NAME" header (ENTICER, SZ-old-format): map to description field.
+                    # Guard: only accept "NAME" if the previous token was "PART" or it
+                    # follows immediately after "EXISTING", to avoid misclassifying lone
+                    # "NAME" tokens in foreword sentences.
+                    prev_norm = norms[i - 1] if i > 0 else ""
+                    if prev_norm in ("PART", "EXISTING"):
+                        col_starts["description"] = w["x0"]
+                        col_labels["description"] = "Part Name"
                 elif br in ("QTY", "QUANTITY") and "qty" not in col_starts:
+                    col_starts["qty"] = w["x0"]
+                elif (
+                    YamahaCatalogueExtractor._is_variant_code(norm)
+                    and "qty" not in col_starts
+                    and "description" in col_starts
+                    and w["x0"] > col_starts.get("description", 0.0)
+                ):
+                    # Variant-code column header (e.g. "5US1" in ENTICER catalogues)
+                    # used in place of "QTY" — record its x-position as qty_start.
                     col_starts["qty"] = w["x0"]
                 elif norm == "REMARKS" and "remarks" not in col_starts:
                     col_starts["remarks"] = w["x0"]
@@ -886,7 +1019,7 @@ class YamahaCatalogueExtractor:
                     col_starts["superseded"] = w["x0"]
                 elif stripped[i] == "9" and "nine_digit" not in col_starts:
                     for look in range(i + 1, min(i + 3, len(norms))):
-                        if stripped[look] == "DIGIT":
+                        if stripped[look] in ("DIGIT", "DIGITS"):  # handle both singular and plural
                             col_starts["nine_digit"] = w["x0"]
                             break
 
@@ -900,8 +1033,15 @@ class YamahaCatalogueExtractor:
             nset = {w["text"].upper().strip().rstrip(".") for w in ws}
             bare_set = {n.replace("'", "") for n in nset}
 
-            has_part_label = "PART" in nset or "DESCRIPTION" in nset
-            has_col_anchor = "DESCRIPTION" in nset or "REMARKS" in nset or "QTY" in bare_set
+            # Standard anchor: row has a part-label AND a column anchor
+            has_part_label = "PART" in nset or "DESCRIPTION" in nset or "EXISTING" in nset
+            has_col_anchor = (
+                "DESCRIPTION" in nset
+                or "REMARKS" in nset
+                or "QTY" in bare_set
+                or "ESCORT" in nset  # ENTICER-family: ESCORT column is a reliable anchor
+                or "SUPERSEDED" in nset  # ENTICER-family: SUPERSEDED appears in header
+            )
 
             if has_part_label and has_col_anchor:
                 header_start = idx
@@ -912,13 +1052,14 @@ class YamahaCatalogueExtractor:
 
         # ── Step 2: collect from the full header block ────────────────────────
         col_starts: dict[str, float] = {}
+        col_labels: dict[str, str] = {}
         for _y, ws in word_rows[header_start : min(header_start + 6, 30)]:
             joined_raw = " ".join(w["text"] for w in ws)
             if _PN_PAT.search(joined_raw):
                 break  # data row — header block ended
 
             norms = [w["text"].upper().strip().rstrip(".") for w in ws]
-            _classify(norms, ws, col_starts)
+            _classify(norms, ws, col_starts, col_labels)
 
         if col_starts:
             logger.debug(
@@ -926,6 +1067,10 @@ class YamahaCatalogueExtractor:
                 header_start,
                 ", ".join(f"{k}={v:.1f}" for k, v in sorted(col_starts.items())),
             )
+        # Return col_starts merged with col_labels under a special "_labels" key.
+        # The caller (_detect_col_bounds) unpacks them separately.
+        if col_labels:
+            col_starts["_labels"] = col_labels  # type: ignore[assignment]
         return col_starts
 
     @staticmethod
@@ -1499,11 +1644,14 @@ class YamahaCatalogueExtractor:
 
             # ── Positional filtering ────────────────────────────────────────
             # Find the part number word's x0 to anchor the column layout.
-            # Remove any words that are >50 pts to the left of it — these are
-            # figure-illustration numbers printed in the margin (e.g. CRUX PDFs).
+            # Remove any words that are >80 pts to the left of it — these are
+            # figure-illustration numbers printed in the margin (e.g. CRUX PDFs,
+            # where illustration numbers sit 200+ pts left of the part number).
+            # 80 pts (vs the old 50) lets us capture ref-number columns that sit
+            # 60-70 pts left of the part number (e.g. ENTICER 5US2 at 67 pts).
             pn_word = next((w for w in ws if _PN_PAT.match(w["text"])), None)
             if pn_word:
-                x_cutoff = pn_word["x0"] - 50
+                x_cutoff = pn_word["x0"] - 80
                 ws_filtered = [w for w in ws if w["x0"] >= x_cutoff]
                 joined = " ".join(w["text"] for w in ws_filtered).strip()
             else:
@@ -1537,6 +1685,7 @@ class YamahaCatalogueExtractor:
             # Initialise extra-column accumulators here so they are always defined
             # regardless of which extraction mode runs below.
             nine_digit_parts: list[str] = []
+            escort_parts: list[str] = []
             superseded_parts: list[str] = []
 
             if bounds and bounds.qty_col_xs and pn_word:
@@ -1552,6 +1701,8 @@ class YamahaCatalogueExtractor:
                 # Only use the gap-zone when the REMARKS boundary is known;
                 # without rem_start we cannot define the gap reliably.
                 use_gap_zone = bounds.rem_start < 9000
+                # Track right edge of last description word to detect footnote markers.
+                last_desc_x1 = 0.0
 
                 for w in ws_filtered:
                     if w["x0"] < pn_word["x1"]:  # ref-no / part-number
@@ -1563,6 +1714,9 @@ class YamahaCatalogueExtractor:
                     if bounds.superseded_start < 9000 and w["x0"] >= bounds.superseded_start:
                         superseded_parts.append(w["text"])
                         continue
+                    if bounds.escort_start < 9000 and w["x0"] >= bounds.escort_start:
+                        escort_parts.append(w["text"])
+                        continue
                     if bounds.nine_digit_start < 9000 and w["x0"] >= bounds.nine_digit_start:
                         nine_digit_parts.append(w["text"])
                         continue
@@ -1571,17 +1725,29 @@ class YamahaCatalogueExtractor:
                     # have 9-char all-digit nine_digit values (e.g. "344010109") to
                     # the right of qty columns; those must NOT contaminate qty slots.
                     if w_cx >= qty_zone_x and re.match(r"^\d{1,5}$", w["text"]):
-                        nearest = min(
-                            range(n_cols),
-                            key=lambda i: abs(bounds.qty_col_xs[i] - w_cx),
-                        )
-                        slots[nearest] = w["text"]
+                        # Guard: Yamaha catalogues suffix descriptions with small
+                        # footnote markers (e.g. "COVER, CYLINDER HEAD SIDE 3",
+                        # "HEAD, CYLINDER 1") that physically sit within the qty zone
+                        # but are immediately adjacent to description text (gap < 15 px).
+                        # Distinguish by the x-gap from the last description word's
+                        # right edge: < 15 px → footnote → route to description.
+                        gap_from_desc = w["x0"] - last_desc_x1
+                        if last_desc_x1 > 0 and gap_from_desc < 15.0 and len(w["text"]) <= 2:
+                            desc_parts.append(w["text"])
+                            last_desc_x1 = max(last_desc_x1, w["x1"])
+                        else:
+                            nearest = min(
+                                range(n_cols),
+                                key=lambda i: abs(bounds.qty_col_xs[i] - w_cx),
+                            )
+                            slots[nearest] = w["text"]
                     elif use_gap_zone and w_cx > max_qty_cx:
                         # Non-digit word past the last qty column: colour/market
                         # qualifier that belongs in remarks, not description.
                         pre_rem_parts.append(w["text"])
                     else:
                         desc_parts.append(w["text"])
+                        last_desc_x1 = max(last_desc_x1, w["x1"])
 
                 # Lookahead: pn and description on different Y-rows.
                 # Only needed when the current row has no description AND no
@@ -1653,6 +1819,9 @@ class YamahaCatalogueExtractor:
                     if bounds.superseded_start < 9000 and w["x0"] >= bounds.superseded_start:
                         superseded_parts.append(w["text"])
                         continue
+                    if bounds.escort_start < 9000 and w["x0"] >= bounds.escort_start:
+                        escort_parts.append(w["text"])
+                        continue
                     if bounds.nine_digit_start < 9000 and w["x0"] >= bounds.nine_digit_start:
                         nine_digit_parts.append(w["text"])
                         continue
@@ -1673,6 +1842,18 @@ class YamahaCatalogueExtractor:
                     ):
                         desc_sv = [_COPYRIGHT_PAT.sub("", next_joined).strip()]
                         idx += 1
+
+                # Recover a qty digit that pdfplumber merged into the last
+                # description token (PDF text runs where the gap between ")"
+                # and the adjacent qty digit is < x_tolerance, e.g. "HEAD)2"
+                # stored as a single glyph sequence).  Guard: only apply when
+                # the qty zone was detected but came back empty.
+                if bounds.qty_start < 9000 and not qty_sv and desc_sv:
+                    _last = desc_sv[-1]
+                    _mm = re.match(r"^(.+[^\d])(\d{1,2})$", _last)
+                    if _mm:
+                        desc_sv[-1] = _mm.group(1)
+                        qty_sv.append(_mm.group(2))
 
                 desc_raw_sv = " ".join(desc_sv)
                 _pn_in_desc_sv = _PN_PAT.search(desc_raw_sv)
@@ -1747,6 +1928,7 @@ class YamahaCatalogueExtractor:
                     "description": desc.strip(),
                     "qty": qty,
                     "nine_digit_part_no": " ".join(nine_digit_parts),
+                    "escort_part_no": " ".join(escort_parts),
                     "superseded_part_no": " ".join(superseded_parts),
                     "remarks": remarks,
                 }
@@ -1772,11 +1954,14 @@ class YamahaCatalogueExtractor:
                 for page in pdf.pages[: self.max_pages]:
                     text = page.extract_text() or ""
 
-                    # Skip KITS pages, cross-reference index pages, and named index pages
+                    # Skip KITS pages, cross-reference index pages, and named index pages.
+                    # Same FIG-header guard as the positional pass: genuine index pages
+                    # never contain "FIG." section markers.
                     page_head = text[:400]
+                    _has_fig_text = bool(_FIG_PAT.search(page_head))
                     if (
                         _KITS_PAGE_PAT.search(page_head)
-                        or _XREF_PAGE_PAT.search(page_head)
+                        or (_XREF_PAGE_PAT.search(page_head) and not _has_fig_text)
                         or _INDEX_PAGE_PAT.search(page_head)
                     ):
                         continue
@@ -1820,6 +2005,7 @@ class YamahaCatalogueExtractor:
                                 "description": desc,
                                 "qty": qty,
                                 "nine_digit_part_no": "",
+                                "escort_part_no": "",
                                 "superseded_part_no": "",
                                 "remarks": remarks,
                             }

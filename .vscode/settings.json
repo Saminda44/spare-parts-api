@@ -23,5 +23,17 @@
         "**/.ruff_cache": true,
         "**/htmlcov": true
     },
-    "sqltools.connections": []
+    "sqltools.connections": [
+        {
+            "ssh": "Disabled",
+            "previewLimit": 50,
+            "server": "localhost",
+            "port": 5432,
+            "driver": "PostgreSQL",
+            "name": "yamaha sys",
+            "database": "yamaha",
+            "username": "saminda",
+            "password": "saminda"
+        }
+    ]
 }

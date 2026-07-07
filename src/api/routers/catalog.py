@@ -149,28 +149,35 @@ def extract_pdf_tables(
     if result.error:
         raise HTTPException(status_code=500, detail=result.error)
 
-    rows = [
-        [
-            r[c]
-            for c in [
-                "section",
-                "ref_no",
-                "part_no",
-                "description",
-                "qty",
-                "nine_digit_part_no",
-                "superseded_part_no",
-                "remarks",
-            ]
-        ]
-        for r in result.rows
+    # Column order must match DISPLAY_HEADERS index-for-index:
+    # 0=section 1=ref_no 2=part_no 3=description 4=qty
+    # 5=nine_digit_part_no 6=escort_part_no 7=superseded_part_no 8=remarks
+    _col_keys = [
+        "section",
+        "ref_no",
+        "part_no",
+        "description",
+        "qty",
+        "nine_digit_part_no",
+        "escort_part_no",
+        "superseded_part_no",
+        "remarks",
     ]
+    rows = [[r.get(c, "") for c in _col_keys] for r in result.rows]
     sections = sorted({r[0] for r in rows if r[0]})
 
-    # Drop optional columns (indices 5, 6) when this PDF has no data in them.
-    # nine_digit_part_no=5, superseded_part_no=6 are India-market only.
+    # Drop optional columns (indices 5, 6, 7) when this PDF has no data in them.
+    # nine_digit_part_no=5, escort_part_no=6, superseded_part_no=7 are market-specific.
     headers: list[str] = list(DISPLAY_HEADERS)
-    optional_cols = [5, 6]
+    # Apply PDF-native labels from extractor (e.g. "Existing Part No." for ENTICER family)
+    _labels = result.column_display_labels or {}
+    if "part_no" in _labels:
+        headers[2] = _labels["part_no"]
+    if "description" in _labels:
+        headers[3] = _labels["description"]
+    if "escort_part_no" in _labels:
+        headers[6] = _labels["escort_part_no"]
+    optional_cols = [5, 6, 7]
     drop = [c for c in optional_cols if not any(row[c].strip() for row in rows)]
     if drop:
         keep = [i for i in range(len(headers)) if i not in drop]
@@ -191,6 +198,7 @@ def extract_pdf_tables(
         "ocr_flagged": result.ocr_flagged,
         "warnings": result.warnings,
         "column_layout": result.column_layout,
+        "column_display_labels": result.column_display_labels,
         # NEW: Colour matching metadata for debugging
         "colour_extraction_metadata": {
             "source": "pdf_cover" if result.available_colours else "agent_web",

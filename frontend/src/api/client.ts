@@ -839,6 +839,7 @@ export interface PdfTableResult {
   manufacture_year?: string;
   pages_scanned: number; sections_found: number; ocr_flagged: number; warnings: string[];
   column_layout?: string[];  // detected column names in left-to-right order
+  column_display_labels?: Record<string, string>; // logical key → PDF's actual header text
 }
 export const fetchPdfTables = (rel_path: string) =>
   api.get<PdfTableResult>(
