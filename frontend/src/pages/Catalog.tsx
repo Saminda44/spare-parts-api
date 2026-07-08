@@ -34,7 +34,16 @@ function variantQty(qty: string, varIdx: number, numVariants: number): string {
   const parts = qty.split("/");
   if (parts.length === 1) return qty;
   const offset = Math.max(0, parts.length - numVariants);
-  return parts[offset + varIdx] ?? qty;
+  const raw = parts[offset + varIdx];
+  // If right-alignment lands on an empty trailing slot, fall back to the last
+  // non-empty part.  This handles residual "1/" cases where a single-variant
+  // PDF had a phantom second qty column in the source extractor.
+  if ((raw === "" || raw === undefined) && offset > 0) {
+    for (let i = offset - 1; i >= 0; i--) {
+      if (parts[i]) return parts[i];
+    }
+  }
+  return raw ?? qty;
 }
 
 function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, manufactureYear, columnLayout }: {

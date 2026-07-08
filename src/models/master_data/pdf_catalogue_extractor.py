@@ -100,7 +100,7 @@ _PN_PAT = re.compile(
     # 2-segment with 5-char alphanumeric first segment, 3-8 char alphanumeric second
     # covers: NNNNN-NNNNN, NNNNN-NNNYX, XNNNN-NNNNN, etc.
     r"|[A-Z0-9]{5}" + _DASH + r"[A-Z0-9]{3,8}"
-    r"|[A-Z0-9]{12}"
+    r"|(?=[A-Z0-9]*\d)[A-Z0-9]{12}"
     r")\b"
 )
 # FIG. section header — "FIG. 1 (1D0) CYLINDER HEAD" or "FIG.1 CYLINDER" (no space after dot)
@@ -146,6 +146,10 @@ _STAMP_PREFIX_PAT = re.compile(r"^[A-Z0-9]{2,6}\s+", re.IGNORECASE)
 
 # Partial FIG line — just the number, section name absent or on the next row.
 _FIG_PARTIAL_PAT = re.compile(r"(?:^|.*\s)(FIG\.?\s*(\d+[A-Z]?))\s*$", re.IGNORECASE)
+
+# Option-section page header: "PARTS OPTION (KICK STARTER)" — no FIG. prefix.
+# Captures the label inside the parentheses as the section name.
+_PARTS_OPTION_PAT = re.compile(r"^PARTS?\s+OPTION\s*\(([^)]+)\)", re.IGNORECASE)
 
 # "AVAILABLE COLOUR" page header — these pages list bike colour variants as image captions,
 # e.g. "Yamaha Alpha Cygnus Black" / "Yamaha Alpha Cygnus Cyan".
@@ -469,7 +473,12 @@ class YamahaCatalogueExtractor:
                                 new_bounds.remarks_is_nine_digit = last_bounds.remarks_is_nine_digit
                             if new_bounds.rem_start >= 9000:
                                 new_bounds.rem_start = last_bounds.rem_start
-                            if not new_bounds.qty_col_xs:
+                            # Only inherit qty_col_xs when this page has no column layout
+                            # of its own.  A detected desc_start (<9000) means the page
+                            # is a real data page; don't let a spurious qty_col_xs from a
+                            # foreword page (e.g. "21C 1CK" example text passing
+                            # _is_variant_code) corrupt the single-variant positional mode.
+                            if not new_bounds.qty_col_xs and new_bounds.desc_start >= 9000:
                                 new_bounds.qty_col_xs = last_bounds.qty_col_xs
                             if new_bounds.nine_digit_start >= 9000:
                                 new_bounds.nine_digit_start = last_bounds.nine_digit_start
@@ -816,8 +825,17 @@ class YamahaCatalogueExtractor:
                 w for w in ws if YamahaCatalogueExtractor._is_variant_code(w["text"].upper())
             ]
             if len(row_vcs) >= 2:
+                # Deduplicate by code text within a single row.  Some PDFs (e.g.
+                # FASINO foreword) print the same variant code in BOTH a "Q'ty
+                # Column" cell and a "Model Code" cell on the same row, giving two
+                # x-positions for one variant.  Keep only the leftmost occurrence
+                # so we don't create a phantom second qty-column slot.
+                seen_in_row: set[str] = set()
                 for w in row_vcs:
-                    raw_vc_xs.append((w["x0"] + w["x1"]) / 2)
+                    code = w["text"].upper()
+                    if code not in seen_in_row:
+                        seen_in_row.add(code)
+                        raw_vc_xs.append((w["x0"] + w["x1"]) / 2)
 
         # Sort and deduplicate near-identical x-centres (within 8 px)
         qty_col_xs: list[float] = []
@@ -877,15 +895,41 @@ class YamahaCatalogueExtractor:
             rem_start = min(rem_start, nine_digit_start)
             nine_digit_start = 9999.0  # content routes via rem_start → remarks field
 
-        # ── Single-variant-code qty_start detection (CRUX-style catalogues) ──
-        # CRUX pages have ONE variant code header (e.g. "IAK5", "5AK5") on a row
-        # ABOVE the anchor row, so _detect_header_row misses it entirely.  The flat
-        # scan may also set nine_digit_start AFTER Pass 1 runs, so this block must
-        # run AFTER the flat scan + offset + remarks_is_nine_digit so that
-        # nine_digit_start reflects the final computed value.
-        # Guard: remarks_is_nine_digit=True means nine_digit_start was cleared to
-        # 9999 — India-market layout; skip to avoid spurious qty detection.
-        if not qty_col_xs and qty_start >= 9000 and desc_start < 9000 and nine_digit_start < 9000:
+        # ── India-market single-variant qty column (e.g. GLADIATOR 5 SPEED) ──
+        # India-market PDFs (remarks_is_nine_digit=True) have one variant-code
+        # column header (e.g. "5YY8") between description and REMARKS columns.
+        # The ≥2-variant guard skips single-code rows, leaving qty_col_xs empty.
+        # Without a qty zone, _split_after in greedy mode pops description-suffix
+        # digits ("COVER, CYLINDER HEAD SIDE 3 1" → qty="3/1") instead of the
+        # actual qty "1".  Re-scan header rows for a single variant code in the
+        # desc–rem gap; enabling multi-variant positional mode then lets the
+        # existing footnote-marker guard route the trailing "3" back to desc.
+        if remarks_is_nine_digit and not qty_col_xs and desc_start < 9000 and rem_start < 9000:
+            for _, _ws_india in word_rows[:25]:
+                if _PN_PAT.search(" ".join(w["text"] for w in _ws_india)):
+                    continue  # data row — skip
+                _india_vcs = [
+                    w for w in _ws_india
+                    if YamahaCatalogueExtractor._is_variant_code(w["text"].upper())
+                    and w["x0"] > desc_start   # must be past description column
+                    and w["x0"] < rem_start    # must be before REMARKS column
+                ]
+                if _india_vcs:
+                    qty_col_xs = [(w["x0"] + w["x1"]) / 2 for w in _india_vcs]
+                    break
+
+        # ── Single-variant-code qty_start detection (CRUX-style and 45SB-style) ──
+        # When a PDF has exactly ONE variant-code token as a column header (e.g.
+        # "IAK5" for CRUX, "BS54" for 45SB Final), that token sits on a row above
+        # the main anchor row so _detect_header_row misses it.  Scan the first 25
+        # word-rows here to find it and record its x-position as qty_start.
+        # Guard: skip India-market layouts (remarks_is_nine_digit=True) because
+        # their nine_digit_start was intentionally cleared to 9999 and a leftover
+        # variant-like token could create a spurious qty_start.
+        # Upper bound: use the smaller of nine_digit_start and rem_start so we
+        # don't accidentally absorb a 9-digit or remarks column as the qty column.
+        if not qty_col_xs and qty_start >= 9000 and desc_start < 9000 and not remarks_is_nine_digit:
+            _qty_upper = min(nine_digit_start, rem_start) + 30.0
             for _y2, ws2 in word_rows[:25]:
                 if _PN_PAT.search(" ".join(w["text"] for w in ws2)):
                     continue  # data row — skip
@@ -894,10 +938,13 @@ class YamahaCatalogueExtractor:
                     for w in ws2
                     if YamahaCatalogueExtractor._is_variant_code(w["text"].upper())
                     and w["x0"] > desc_start + 15.0  # clearly past description zone
-                    and w["x0"] < nine_digit_start + 30.0  # before 9-digit zone
+                    and w["x0"] < _qty_upper
                 ]
                 if len(sv_vcs) == 1:
-                    qty_start = sv_vcs[0]["x0"]
+                    # Subtract a margin for right-aligned data: qty digit x0 can
+                    # sit a few px left of the column-header word's x0 (same
+                    # right-alignment offset seen in nine_digit_start, fixed with -15).
+                    qty_start = max(0.0, sv_vcs[0]["x0"] - 10.0)
                     break
 
         if nine_digit_start < 9000 or superseded_start < 9000:
@@ -1591,6 +1638,10 @@ class YamahaCatalogueExtractor:
                 new_section = raw if raw else f"FIG. {fig_m.group(1)}"
                 new_fig = f"FIG. {fig_m.group(1)}"
                 break
+            opt_m = _PARTS_OPTION_PAT.match(joined_pre)
+            if opt_m:
+                new_section = opt_m.group(1).strip()
+                break
 
         # last_ref_no carries the most recent non-blank ref number forward.
         # Yamaha PDFs print the ref number only on the FIRST part of a shared-ref
@@ -1633,6 +1684,13 @@ class YamahaCatalogueExtractor:
                 new_section = raw if raw else new_fig  # fallback for CID-corrupt names
                 sections_seen.add(new_section)
                 last_ref_no = ""  # reset ref carry at every new figure
+                continue
+
+            opt_m = _PARTS_OPTION_PAT.match(joined)
+            if opt_m:
+                new_section = opt_m.group(1).strip()
+                sections_seen.add(new_section)
+                last_ref_no = ""
                 continue
 
             if _SKIP_PAT.match(joined):
@@ -1776,6 +1834,9 @@ class YamahaCatalogueExtractor:
                 # Collapse "1/1/1/1" → "1" only when EVERY slot is filled identically
                 if filled and len(set(filled)) == 1 and len(filled) == n_cols:
                     qty = filled[0]
+                # Strip trailing empty slots: "1/" → "1" (defence-in-depth; the
+                # primary fix is in _detect_col_bounds de-duplication above).
+                qty = qty.rstrip("/")
                 # Pattern-based fallback for India-market PDFs where header
                 # detection failed to set nine_digit_start / superseded_start.
                 # Nine-digit part numbers are exactly 9 alphanumeric chars.
@@ -1862,15 +1923,24 @@ class YamahaCatalogueExtractor:
                 )
 
                 if bounds.qty_start < 9000:
-                    # Qty zone was detected — use positional result directly
+                    # Qty zone was detected — use positional result directly.
+                    # Non-digit tokens in the qty zone (e.g. applicability codes
+                    # like "UR", "S3" that sit between the qty column and the
+                    # REMARKS header) are routed to remarks rather than discarded.
                     qty_raw = " ".join(qty_sv)
                     qty_m = re.search(r"\d+", qty_raw)
                     desc = desc_sv_clean
                     qty = qty_m.group() if qty_m else ""
+                    non_digit_qty = [t for t in qty_sv if not re.match(r"^\d+$", t)]
+                    if non_digit_qty:
+                        rem_sv = non_digit_qty + rem_sv
                 else:
-                    # Qty column not detected — apply _split_after heuristics
-                    # to the collected desc_sv words so qty isn't mis-filed.
-                    desc, qty, _ = self._split_after(desc_sv_clean, num_variants)
+                    # Qty column not detected — apply _split_after heuristics.
+                    # _split_after returns (desc, qty, trailing_remarks); capture
+                    # the third value so non-digit trailing tokens reach remarks.
+                    desc, qty, _sa_rem = self._split_after(desc_sv_clean, num_variants)
+                    if _sa_rem:
+                        rem_sv = [_sa_rem] + rem_sv
 
                 remarks = " ".join(rem_sv)
 
@@ -1979,6 +2049,12 @@ class YamahaCatalogueExtractor:
                         if fig_m:
                             current_fig = f"FIG. {fig_m.group(1)}"
                             current_section = _CID_PAT.sub("", fig_m.group(2)).strip()
+                            sections_seen.add(current_section)
+                            continue
+
+                        opt_m = _PARTS_OPTION_PAT.match(line)
+                        if opt_m:
+                            current_section = opt_m.group(1).strip()
                             sections_seen.add(current_section)
                             continue
 
