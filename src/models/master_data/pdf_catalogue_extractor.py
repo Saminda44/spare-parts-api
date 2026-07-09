@@ -244,6 +244,26 @@ _STANDALONE_COLOUR_NOUNS: frozenset[str] = frozenset(
 _VARIANT_CODE_PREFIX_PAT = re.compile(r"^([A-Z0-9]{2,6})-(.*)", re.IGNORECASE)
 
 
+def _bilingual_fig_section(
+    ws: list[dict],
+    fallback: str,
+    bounds: ColBounds,
+) -> str:
+    """Return the English-only section name from a bilingual FIG header row.
+
+    In Spanish/English catalogues the FIG line is "FIG. N SpanishName EnglishName".
+    The English words always start at x ≈ desc_start + 79 (consistently x ≥ 613
+    for the SZ series), while Spanish section words cluster at x ≤ desc_start + 36.
+    A fixed offset of +70 from desc_start gives a reliable split threshold that
+    keeps all English words and discards all Spanish words.
+    """
+    thresh = (bounds.desc_start + 70.0) if bounds.desc_start < 9000 else 460.0
+    eng_ws = sorted([w for w in ws if w["x0"] >= thresh], key=lambda w: w["x0"])
+    if not eng_ws:
+        return fallback
+    return _CID_PAT.sub("", " ".join(w["text"] for w in eng_ws)).strip() or fallback
+
+
 def _try_fig_match(
     joined: str,
     word_rows: list[tuple[float, list[dict]]],
@@ -1665,6 +1685,8 @@ class YamahaCatalogueExtractor:
             fig_m = _try_fig_match(joined_pre, word_rows, _pi)
             if fig_m:
                 raw = _CID_PAT.sub("", fig_m.group(2)).strip()
+                if bounds and bounds.is_bilingual:
+                    raw = _bilingual_fig_section(ws, raw, bounds)
                 new_section = raw if raw else f"FIG. {fig_m.group(1)}"
                 new_fig = f"FIG. {fig_m.group(1)}"
                 break
@@ -1710,6 +1732,8 @@ class YamahaCatalogueExtractor:
                 ):
                     idx += 1
                 raw = _CID_PAT.sub("", fig_m.group(2)).strip()
+                if bounds and bounds.is_bilingual:
+                    raw = _bilingual_fig_section(ws, raw, bounds)
                 new_fig = f"FIG. {fig_m.group(1)}"
                 new_section = raw if raw else new_fig  # fallback for CID-corrupt names
                 sections_seen.add(new_section)
@@ -1866,8 +1890,14 @@ class YamahaCatalogueExtractor:
                     ):
                         # Only consume words in the description column zone
                         # (allow 30 pt left-margin tolerance for data alignment).
+                        # Stop at the first qty column so gap-zone qualifiers
+                        # like applicability codes ("UR") are not captured.
                         _d_lo = max(0.0, bounds.desc_start - 30.0)
-                        _d_hi = bounds.rem_start if bounds.rem_start < 9000 else 9999.0
+                        _d_hi = (
+                            (min(bounds.qty_col_xs) - 15.0)
+                            if bounds.qty_col_xs
+                            else (bounds.rem_start if bounds.rem_start < 9000 else 9999.0)
+                        )
                         eng_words = [
                             w["text"] for w in next_ws if w["x0"] >= _d_lo and w["x0"] < _d_hi
                         ]
@@ -1969,7 +1999,13 @@ class YamahaCatalogueExtractor:
                         and not _SKIP_PAT.match(next_joined)
                     ):
                         _d_lo = max(0.0, bounds.desc_start - 30.0)
-                        _d_hi = bounds.rem_start if bounds.rem_start < 9000 else 9999.0
+                        # Upper bound: stop at qty_start so gap-zone qualifiers
+                        # like applicability codes ("UR") are not captured.
+                        _d_hi = (
+                            bounds.qty_start
+                            if bounds.qty_start < 9000
+                            else (bounds.rem_start if bounds.rem_start < 9000 else 9999.0)
+                        )
                         eng_words = [
                             w["text"] for w in next_ws if w["x0"] >= _d_lo and w["x0"] < _d_hi
                         ]
