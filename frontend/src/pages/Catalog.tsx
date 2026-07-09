@@ -107,53 +107,63 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
     }
   }, [selVariantCode, agentResult, selColour]);
 
-  // Colour list for the selected variant.
-  // Priority: agent's variant_colour_map (roster-derived, foreword order)
-  //           → foreword colourCodes fallback (while agent loads OR roster is empty)
-  //           → empty (no colour info at all)
+  // Colour chips for the selected variant.
+  // Shows only colours that appear in FOR/EXCEPT remarks in the PDF — the
+  // current variant's roster entry is the authoritative source.
+  // Foreword colours absent from all remarks are NOT shown as chips.
   const variantColours: VariantColourEntry[] = (() => {
-    const agentMap = agentResult?.variant_colour_map?.[selVariantCode];
-    const legend   = agentResult?.colour_legend;
-
-    if (agentMap && agentMap.length > 0) {
-      // Supplement with any foreword colours absent from remarks
-      // (e.g. the base/default colour whose parts carry no colour-specific remark)
-      if (legend) {
-        const seen = new Set(agentMap.map(c => c.abbreviation));
-        const extras: VariantColourEntry[] = Object.entries(legend)
-          .filter(([abbr]) => !seen.has(abbr))
-          .map(([abbr, e]) => ({
-            abbreviation: abbr,
-            name: e.name,
-            code: e.code,
-            is_model_colour: e.is_model_colour,
-          }));
-        if (extras.length > 0) return [...agentMap, ...extras];
+    // Agent not yet loaded → show foreword model-colours (★) as placeholders.
+    if (!agentResult) {
+      if (colourCodes && colourCodes.length > 0) {
+        const mc = colourCodes.filter(c => c.is_model_colour);
+        return (mc.length ? mc : colourCodes).map(c => ({
+          abbreviation: c.abbreviation,
+          name: c.name,
+          code: c.code,
+          is_model_colour: c.is_model_colour ?? false,
+        }));
       }
-      return agentMap;
+      return [];
     }
-    // Fallback to foreword colour list regardless of whether agent has loaded —
-    // covers both "still loading" and "agent found no colour-specific parts in remarks".
-    if (colourCodes && colourCodes.length > 0) {
-      const mc = colourCodes.filter(c => c.is_model_colour);
-      return (mc.length ? mc : colourCodes).map(c => ({
-        abbreviation: c.abbreviation,
-        name: c.name,
-        code: c.code,
-        is_model_colour: c.is_model_colour ?? false,
-      }));
-    }
-    return [];
+
+    // Agent loaded: derive chips from THIS variant's roster only.
+    // roster = colours that actually appear in FOR/EXCEPT remarks (not standalone).
+    const roster = agentResult.rosters?.[selVariantCode] ?? [];
+    if (roster.length === 0) return [];
+
+    const rosterSet = new Set(roster.map(a => a.toUpperCase()));
+
+    // Prefer variant_colour_map entries (carries foreword-table order + name/code).
+    const agentMap = agentResult.variant_colour_map?.[selVariantCode] ?? [];
+    const fromMap = agentMap.filter(c => rosterSet.has(c.abbreviation.toUpperCase()));
+    if (fromMap.length > 0) return fromMap;
+
+    // Fallback: build entries directly from roster using colour_legend.
+    const legend = agentResult.colour_legend ?? {};
+    return roster.map(abbr => {
+      const entry = (legend[abbr.toUpperCase()] ?? {}) as Record<string, unknown>;
+      return {
+        abbreviation: abbr,
+        name: (entry.name as string) ?? abbr,
+        code: (entry.code as string) ?? "",
+        is_model_colour: (entry.is_model_colour as boolean) ?? false,
+      };
+    });
   })();
 
   const selColourEntry = variantColours.find(c => c.abbreviation === selColour);
 
   // ── Colour-abbreviation set for client-side Kind annotation ──────────────
-  // Built from agent colour_legend (preferred) or foreword colourCodes (fallback).
+  // Colours that actually appear in FOR/EXCEPT remarks for this variant.
+  // Only these colours have colour-specific row restrictions; any colour absent
+  // from this set gets "shared" treatment in getRowKind (no rows hidden).
   const colourAbbrSet: ReadonlySet<string> = (() => {
-    if (agentResult?.colour_legend) {
-      return new Set(Object.keys(agentResult.colour_legend).map(k => k.toUpperCase()));
+    // Use the current variant's roster — the same set that determines chips.
+    const roster = agentResult?.rosters?.[selVariantCode];
+    if (roster && roster.length > 0) {
+      return new Set(roster.map(a => a.toUpperCase()));
     }
+    // Agent not yet loaded: fall back to foreword colour abbreviations.
     if (colourCodes && colourCodes.length > 0) {
       return new Set(colourCodes.map(c => c.abbreviation.toUpperCase()));
     }
@@ -161,20 +171,24 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
   })();
 
   // Determine the kind of a row from its remarks.
-  // Ports the grammar from remark_parser.py — three clause types:
+  // Ports the grammar from remark_parser.py — two clause types produce restrictions:
   //   "EXCEPT [ABBREV]"          → applies to all colours EXCEPT listed
   //   "[...] FOR [ABBREV]"       → applies only to listed colours
-  //   "[ABBREV]" standalone      → applies only to that colour
+  //   "FOR [ABBREV]" (no prefix) → same (clause starts with FOR)
+  //   "[ABBREV]" standalone      → part's own paint finish, treated as universal
   //   no restriction found       → universal ("shared")
   // "shared"         — universal part (no colour restriction or excepted from another)
-  // "colour_specific"— remarks name the selected colour (FOR / standalone)
+  // "colour_specific"— remarks name the selected colour via FOR pattern
   // "other"          — remarks target a different colour only
   function getRowKind(remarks: string): "shared" | "colour_specific" | "other" {
     if (!selColour || colourAbbrSet.size === 0) return "shared";
+    const sel = selColour.toUpperCase();
+    // Colour absent from PDF remarks has no remark-based differentiation →
+    // treat every part as universal (show all rows for that colour chip).
+    if (!colourAbbrSet.has(sel)) return "shared";
     if (!remarks || !remarks.trim()) return "shared";
 
     const upper = remarks.toUpperCase().trim();
-    const sel = selColour.toUpperCase();
 
     const applyCodes = new Set<string>();
     const exceptCodes = new Set<string>();
@@ -192,19 +206,19 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
         continue;
       }
 
-      // FOR pattern — take everything after " FOR " as the applicable colour list
+      // FOR pattern: "[PREFIX] FOR [ABBR]" (space before FOR) or "FOR [ABBR]" at clause start
       const forPos = clause.indexOf(" FOR ");
-      if (forPos >= 0) {
-        const codes = clause.slice(forPos + 5).trim().split(/[\s,]+/).filter(t => colourAbbrSet.has(t));
+      const afterFor = forPos >= 0 ? clause.slice(forPos + 5)
+                     : clause.startsWith("FOR ") ? clause.slice(4) : null;
+      if (afterFor !== null) {
+        const codes = afterFor.trim().split(/[\s,]+/).filter(t => colourAbbrSet.has(t));
         if (codes.length > 0) { codes.forEach(t => applyCodes.add(t)); hasRestriction = true; }
         continue;
       }
 
-      // Standalone colour code (no FOR, no EXCEPT) — skip catalogue prefix tokens
-      for (const token of clause.split(/[\s,]+/).filter(Boolean)) {
-        if (REMARK_ABBR_TOKENS.has(token)) continue;
-        if (colourAbbrSet.has(token)) { applyCodes.add(token); hasRestriction = true; }
-      }
+      // Standalone token (no FOR, no EXCEPT):
+      // A bare colour code marks the PART'S OWN paint finish, not which motorcycle
+      // colour variant it belongs to → treat as universal (no restriction recorded).
     }
 
     if (!hasRestriction) return "shared";

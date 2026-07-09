@@ -5,15 +5,20 @@ in the catalogue foreword. Used by the CatalogueAgent assembly engine.
 
 Grammar (formal-ish):
     remark        := clause (";" clause)*
-    clause        := (EXCEPT)? FOR? colourlist | freetext
+    clause        := EXCEPT_clause | FOR_clause | standalone_token*
+    EXCEPT_clause := ("EXCEPT" | "EXCEPT FOR") colourlist
+    FOR_clause    := token* "FOR" colourlist   -- "FOR" may be at clause start
     colourlist    := CODE ("," CODE)*
     CODE          := token present in foreword colour legend
     EXCEPT        := "EXCEPT" | "EXCEPT FOR"
 
-Catalogue abbreviations (UR / UN / AP / LM) are stripped before colour matching.
-A code appearing BEFORE "FOR" is the *part's own paint colour* and is ignored for
-applicability determination — only codes AFTER "FOR" determine which bike colour
-this part belongs to.
+Two patterns produce motorcycle-colour restrictions:
+  - "FOR [ABBR]" (at clause start or after a prefix like "UR FOR [ABBR]")
+  - "EXCEPT [ABBR]" / "EXCEPT FOR [ABBR]"
+
+Standalone colour codes (e.g. "YB" on a cast wheel) indicate the PART'S OWN
+paint finish — they do NOT indicate which motorcycle colour variant the part
+belongs to, and are therefore treated as universal (no restriction).
 """
 
 from __future__ import annotations
@@ -95,10 +100,9 @@ def parse_applicability(remarks: str, colour_abbrs: set[str]) -> ApplicabilityRe
             continue
 
         # --- FOR pattern ---
+        # "[PREFIX] FOR [ABBR]" — space before FOR (e.g. "UR FOR SMX")
         for_pos = clause.find(" FOR ")
         if for_pos >= 0:
-            # Everything after " FOR " is the applicable colour list.
-            # Everything before " FOR " is the part's own paint — discard.
             after_for = clause[for_pos + 5:].strip()
             tokens = [t for t in _SPLIT_PAT.split(after_for) if t]
             codes = [t for t in tokens if t in colour_abbrs]
@@ -107,14 +111,20 @@ def parse_applicability(remarks: str, colour_abbrs: set[str]) -> ApplicabilityRe
                 has_restriction = True
             continue
 
-        # --- Standalone colour code (no FOR, no EXCEPT) ---
-        tokens = [t for t in _SPLIT_PAT.split(clause) if t]
-        for token in tokens:
-            if token in _ABBR_TOKENS:
-                continue
-            if token in colour_abbrs:
-                applies_codes.add(token)
+        # "FOR [ABBR]" — clause starts with FOR (no prefix, e.g. "FOR YB")
+        if clause.startswith("FOR "):
+            after_for = clause[4:].strip()
+            tokens = [t for t in _SPLIT_PAT.split(after_for) if t]
+            codes = [t for t in tokens if t in colour_abbrs]
+            if codes:
+                applies_codes.update(codes)
                 has_restriction = True
+            continue
+
+        # --- Standalone token (no FOR, no EXCEPT) ---
+        # A bare colour code (e.g. "YB" on a cast wheel) marks the PART'S OWN
+        # paint finish, not which motorcycle colour variant it belongs to.
+        # Treat as universal — no restriction recorded.
 
     if not has_restriction:
         return _UNIVERSAL
