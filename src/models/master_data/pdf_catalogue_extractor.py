@@ -83,7 +83,7 @@ DISPLAY_HEADERS: list[str] = [
 #   2-part alphanumeric second seg:  e.g. 93306-302YP, 93306-255X5
 #       (bearing/seal codes where the suffix encodes type+size with letters)
 #   2-part mixed first seg:          e.g. 95E32-06010 (Yamaha fastener series)
-#   12-char: XXXXXXXXXXXX            e.g. 5DGE35860100 (ENTICER/YBX125)
+#   10–12-char nodash: XXXXXXXXXX    e.g. 2LPWE11100 (Saluto 2LP2), 5DGE35860100 (ENTICER/YBX125)
 _DASH = r"[-–]"
 _PN_PAT = re.compile(
     r"\b("
@@ -100,7 +100,7 @@ _PN_PAT = re.compile(
     # 2-segment with 5-char alphanumeric first segment, 3-8 char alphanumeric second
     # covers: NNNNN-NNNNN, NNNNN-NNNYX, XNNNN-NNNNN, etc.
     r"|[A-Z0-9]{5}" + _DASH + r"[A-Z0-9]{3,8}"
-    r"|(?=[A-Z0-9]*\d)[A-Z0-9]{12}"
+    r"|(?=[A-Z0-9]*\d)[A-Z0-9]{10,12}"
     r")\b"
 )
 # FIG. section header — "FIG. 1 (1D0) CYLINDER HEAD" or "FIG.1 CYLINDER" (no space after dot)
@@ -132,6 +132,10 @@ _INDEX_PAGE_PAT = re.compile(
 )
 # CID glyph fallback artifact from pdfplumber font decoding (e.g. "(cid:2)")
 _CID_PAT = re.compile(r"\s*\(cid:\d+\)", re.IGNORECASE)
+# Trailing colour-variant annotation on description text, e.g. " -YB(black)", " -DBNM8(gray)".
+# Yamaha bodywork catalogues append a paint-code abbreviation + lowercase colour name in parens.
+# Lowercase inside parens distinguishes colour names from structural qualifiers like "(STD)".
+_COLOUR_SUFFIX_PAT = re.compile(r"\s*[-.]?\s*[A-Z][A-Z0-9]{0,7}\([a-z][^)]*\)\s*$")
 
 # Cover-page variant code pattern: Yamaha writes each variant as "( B65J )"
 # on the title page listing all models covered by the catalogue.
@@ -909,10 +913,11 @@ class YamahaCatalogueExtractor:
                 if _PN_PAT.search(" ".join(w["text"] for w in _ws_india)):
                     continue  # data row — skip
                 _india_vcs = [
-                    w for w in _ws_india
+                    w
+                    for w in _ws_india
                     if YamahaCatalogueExtractor._is_variant_code(w["text"].upper())
-                    and w["x0"] > desc_start   # must be past description column
-                    and w["x0"] < rem_start    # must be before REMARKS column
+                    and w["x0"] > desc_start  # must be past description column
+                    and w["x0"] < rem_start  # must be before REMARKS column
                 ]
                 if _india_vcs:
                     qty_col_xs = [(w["x0"] + w["x1"]) / 2 for w in _india_vcs]
@@ -1995,7 +2000,7 @@ class YamahaCatalogueExtractor:
                     "fig_no": new_fig,
                     "ref_no": ref_no,
                     "part_no": pn,
-                    "description": desc.strip(),
+                    "description": _COLOUR_SUFFIX_PAT.sub("", desc).strip(),
                     "qty": qty,
                     "nine_digit_part_no": " ".join(nine_digit_parts),
                     "escort_part_no": " ".join(escort_parts),
