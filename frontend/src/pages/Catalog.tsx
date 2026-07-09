@@ -6,7 +6,7 @@ import {
 import {
   fetchCatalog, fetchPdfTables, catalogFileUrl,
   fetchCatalogFolders, uploadCatalogPdf,
-  fetchAgentBuilds,
+  fetchAgentBuilds, clearAllAgentCache,
   type CatalogData, type CatalogModel, type PdfTableResult, type ColourCode,
   type AgentResult, type VariantColourEntry,
 } from "../api/client";
@@ -19,6 +19,9 @@ const MODEL_COLORS: Record<string, string> = {
   "NEW MOTORCYCLE & SCOOTER": "#6366F1",
 };
 function modelColor(name: string) { return MODEL_COLORS[name] ?? "#4361EE"; }
+
+// Catalogue prefix tokens that appear before colour codes in remarks — not colours themselves
+const REMARK_ABBR_TOKENS = new Set(["UR", "UN", "AP", "LM", "OPT", "STD"]);
 
 // ── Shared catalogue table ─────────────────────────────────────────────────────
 
@@ -110,7 +113,25 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
   //           → empty (no colour info at all)
   const variantColours: VariantColourEntry[] = (() => {
     const agentMap = agentResult?.variant_colour_map?.[selVariantCode];
-    if (agentMap && agentMap.length > 0) return agentMap;
+    const legend   = agentResult?.colour_legend;
+
+    if (agentMap && agentMap.length > 0) {
+      // Supplement with any foreword colours absent from remarks
+      // (e.g. the base/default colour whose parts carry no colour-specific remark)
+      if (legend) {
+        const seen = new Set(agentMap.map(c => c.abbreviation));
+        const extras: VariantColourEntry[] = Object.entries(legend)
+          .filter(([abbr]) => !seen.has(abbr))
+          .map(([abbr, e]) => ({
+            abbreviation: abbr,
+            name: e.name,
+            code: e.code,
+            is_model_colour: e.is_model_colour,
+          }));
+        if (extras.length > 0) return [...agentMap, ...extras];
+      }
+      return agentMap;
+    }
     // Fallback to foreword colour list regardless of whether agent has loaded —
     // covers both "still loading" and "agent found no colour-specific parts in remarks".
     if (colourCodes && colourCodes.length > 0) {
@@ -140,23 +161,68 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
   })();
 
   // Determine the kind of a row from its remarks.
-  // "shared"         — no colour code in remarks (part is universal)
-  // "colour_specific"— remarks reference the selected colour
-  // "other"          — remarks reference other colours only
+  // Ports the grammar from remark_parser.py — three clause types:
+  //   "EXCEPT [ABBREV]"          → applies to all colours EXCEPT listed
+  //   "[...] FOR [ABBREV]"       → applies only to listed colours
+  //   "[ABBREV]" standalone      → applies only to that colour
+  //   no restriction found       → universal ("shared")
+  // "shared"         — universal part (no colour restriction or excepted from another)
+  // "colour_specific"— remarks name the selected colour (FOR / standalone)
+  // "other"          — remarks target a different colour only
   function getRowKind(remarks: string): "shared" | "colour_specific" | "other" {
-    if (!selColour || colourAbbrSet.size === 0 || !remarks) return "shared";
-    const upper = remarks.toUpperCase();
-    const hasAnyColour = [...colourAbbrSet].some(a => upper.includes(a));
-    if (!hasAnyColour) return "shared";
-    if (upper.includes(selColour.toUpperCase())) return "colour_specific";
-    return "other";
+    if (!selColour || colourAbbrSet.size === 0) return "shared";
+    if (!remarks || !remarks.trim()) return "shared";
+
+    const upper = remarks.toUpperCase().trim();
+    const sel = selColour.toUpperCase();
+
+    const applyCodes = new Set<string>();
+    const exceptCodes = new Set<string>();
+    let hasRestriction = false;
+
+    for (const rawClause of upper.split(";")) {
+      const clause = rawClause.trim();
+      if (!clause) continue;
+
+      // EXCEPT FOR / EXCEPT pattern
+      const exceptM = /^EXCEPT(?:\s+FOR)?\s+(.+)/.exec(clause);
+      if (exceptM) {
+        const codes = exceptM[1].trim().split(/[\s,]+/).filter(t => colourAbbrSet.has(t));
+        if (codes.length > 0) { codes.forEach(t => exceptCodes.add(t)); hasRestriction = true; }
+        continue;
+      }
+
+      // FOR pattern — take everything after " FOR " as the applicable colour list
+      const forPos = clause.indexOf(" FOR ");
+      if (forPos >= 0) {
+        const codes = clause.slice(forPos + 5).trim().split(/[\s,]+/).filter(t => colourAbbrSet.has(t));
+        if (codes.length > 0) { codes.forEach(t => applyCodes.add(t)); hasRestriction = true; }
+        continue;
+      }
+
+      // Standalone colour code (no FOR, no EXCEPT) — skip catalogue prefix tokens
+      for (const token of clause.split(/[\s,]+/).filter(Boolean)) {
+        if (REMARK_ABBR_TOKENS.has(token)) continue;
+        if (colourAbbrSet.has(token)) { applyCodes.add(token); hasRestriction = true; }
+      }
+    }
+
+    if (!hasRestriction) return "shared";
+
+    // EXCEPT mode: part applies to all colours except the listed set
+    if (exceptCodes.size > 0 && applyCodes.size === 0) {
+      return exceptCodes.has(sel) ? "other" : "shared";
+    }
+
+    // Direct inclusion mode
+    return applyCodes.has(sel) ? "colour_specific" : "other";
   }
 
-  // Column index map (must stay in sync with catalog.py rows column order):
-  // 0=section  1=ref_no  2=part_no  3=description  4=qty
-  // 5=nine_digit_part_no  6=superseded_part_no  7=remarks  [8=kind when colour selected]
-  const COL_REMARKS = 7;
-  const COL_KIND    = 8;
+  // Remarks is always the last column; optional columns (nine_digit_part_no,
+  // escort_part_no, superseded_part_no) are dropped by the API when all-empty,
+  // so the index varies per PDF — derive it from the actual header count.
+  const COL_REMARKS = data.headers.length - 1;
+  const COL_KIND    = COL_REMARKS + 1;
 
   // ── All rows for selected variant (PDF order, variant qty decoded) ────────
   const extractedRows: string[][] = data.rows
@@ -174,21 +240,25 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
       return [[...row.slice(0, 4), vQty, ...row.slice(5)]];
     });
 
-  // Annotate every row with a Kind tag when a colour is selected.
-  // Rows are NEVER hidden — the user always sees the complete motorcycle catalogue.
-  const displayRows: string[][] = selColour
+  // Annotate every row with a Kind tag when a colour is selected, then filter.
+  // "other" rows (parts for a different colour) are hidden from the table.
+  const annotatedRows: string[][] = selColour
     ? extractedRows.map(row => [...row.slice(0, COL_REMARKS + 1), getRowKind(row[COL_REMARKS] ?? "")])
     : extractedRows;
 
+  const displayRows: string[][] = selColour
+    ? annotatedRows.filter(row => row[COL_KIND] !== "other")
+    : annotatedRows;
+
   const sectionOptions: string[] = data.sections;
 
-  // Colour breakdown counts (only meaningful when colour is selected)
+  // Colour breakdown counts from annotated rows (before filtering) for the banner
   const colourSpecificCount = selColour
-    ? displayRows.filter(r => r[COL_KIND] === "colour_specific").length : 0;
+    ? annotatedRows.filter(r => r[COL_KIND] === "colour_specific").length : 0;
   const sharedCount = selColour
-    ? displayRows.filter(r => r[COL_KIND] === "shared").length : 0;
+    ? annotatedRows.filter(r => r[COL_KIND] === "shared").length : 0;
   const otherCount = selColour
-    ? displayRows.filter(r => r[COL_KIND] === "other").length : 0;
+    ? annotatedRows.filter(r => r[COL_KIND] === "other").length : 0;
 
   const hasColourTabs = variantColours.length > 0 || (agentLoading && !agentResult);
 
@@ -323,8 +393,8 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
             <span className="ml-auto flex items-center gap-2 text-[11px]">
               <span className="px-1.5 py-0.5 rounded bg-amber-200 text-amber-800 font-semibold">{colourSpecificCount} colour&#8209;specific</span>
               <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-semibold">{sharedCount} shared</span>
-              {otherCount > 0 && <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">{otherCount} other</span>}
-              <span className="font-bold text-amber-900">{displayRows.length} total</span>
+              {otherCount > 0 && <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">{otherCount} hidden</span>}
+              <span className="font-bold text-amber-900">{displayRows.length} shown</span>
             </span>
           </div>
           {/* Colour-changing parts summary */}
@@ -927,10 +997,25 @@ export function Catalog() {
   const [mainTab,       setMainTab]       = useState<MainTab>("pdf");
   const [selectedModel, setSelectedModel] = useState<CatalogModel | null>(null);
   const [search,        setSearch]        = useState("");
+  const [clearingCache, setClearingCache] = useState(false);
+  const [clearMsg,      setClearMsg]      = useState<string | null>(null);
 
   const loadCatalog = useCallback(() => {
     fetchCatalog().then(setPdfData);
   }, []);
+
+  const handleClearAllCache = async () => {
+    setClearingCache(true);
+    setClearMsg(null);
+    try {
+      const { deleted } = await clearAllAgentCache();
+      setClearMsg(`${deleted} cached result${deleted === 1 ? "" : "s"} cleared — colour filters will regenerate on next open`);
+    } catch {
+      setClearMsg("Failed to clear cache");
+    } finally {
+      setClearingCache(false);
+    }
+  };
 
   useEffect(() => { loadCatalog(); }, [loadCatalog]);
 
@@ -955,7 +1040,7 @@ export function Catalog() {
         </div>
 
         <div className="bg-white rounded-xl shadow-sm p-5 space-y-5">
-          <div className="flex gap-2 border-b border-slate-100 pb-3">
+          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
             <button onClick={() => setMainTab("pdf")}
               className={`flex items-center gap-2 px-4 py-1.5 text-sm rounded-lg font-medium transition-colors ${mainTab === "pdf" ? "bg-brand-blue text-white" : "text-slate-500 hover:bg-slate-50"}`}>
               <FileText size={14} /> PDF Catalogues
@@ -964,6 +1049,19 @@ export function Catalog() {
               className={`flex items-center gap-2 px-4 py-1.5 text-sm rounded-lg font-medium transition-colors ${mainTab === "upload" ? "bg-brand-blue text-white" : "text-slate-500 hover:bg-slate-50"}`}>
               <Upload size={14} /> Upload PDF
             </button>
+            <div className="ml-auto flex flex-col items-end gap-1">
+              <button
+                onClick={handleClearAllCache}
+                disabled={clearingCache}
+                title="Re-run colour variant analysis for all PDFs"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors disabled:opacity-50">
+                {clearingCache ? <Loader2 size={11} className="animate-spin" /> : null}
+                Refresh colour cache
+              </button>
+              {clearMsg && (
+                <span className="text-[10px] text-slate-500">{clearMsg}</span>
+              )}
+            </div>
           </div>
 
           {mainTab === "pdf" && pdfData && (

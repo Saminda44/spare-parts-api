@@ -1269,6 +1269,17 @@ class YamahaCatalogueExtractor:
         def _parse_row(abbr_raw: str, name: str, code_raw: str) -> dict | None:
             abbr_clean = abbr_raw.replace(" ", "").upper()
             code_clean = code_raw.replace(" ", "").upper()
+
+            # Some Yamaha forewords use "Colour Code | Colour Name | Abbreviation"
+            # column order (numeric code on the left, text abbreviation on the right)
+            # instead of the standard "Abbreviation | Name | Code" order.
+            # Detect by: left is purely numeric (paint code), right starts with a
+            # letter (alphabetic abbreviation).  Swap so _parse_row works uniformly.
+            _NUMERIC_CODE = re.compile(r"^\d{3,5}$")
+            _ALPHA_ABBR = re.compile(r"^[A-Z][A-Z0-9]{1,7}$")
+            if _NUMERIC_CODE.match(abbr_clean) and _ALPHA_ABBR.match(code_clean):
+                abbr_clean, code_clean = code_clean, abbr_clean
+
             m = _ABBR_PAT.match(abbr_clean)
             if not m or m.group(1) in _HEADER_WORDS:
                 return None

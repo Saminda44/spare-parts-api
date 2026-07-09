@@ -925,6 +925,9 @@ export const clearAgentCache = (rel_path: string) =>
     `/catalog/agent/${rel_path.split("/").map(encodeURIComponent).join("/")}`,
   );
 
+export const clearAllAgentCache = () =>
+  api.delete<{ deleted: number }>("/catalog/agent-cache/all").then(r => r.data);
+
 export interface ExtractionStatus {
   running: boolean;
   last_result: {

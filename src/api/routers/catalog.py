@@ -524,6 +524,16 @@ def clear_agent_cache(file_path: str) -> dict[str, str]:
     return {"status": "not_cached"}
 
 
+@router.delete("/agent-cache/all")
+def clear_all_agent_cache() -> dict[str, int]:
+    """Delete ALL cached agent builds so every PDF is re-processed on next open."""
+    deleted = 0
+    for f in AGENT_CACHE.glob("*.json"):
+        f.unlink()
+        deleted += 1
+    return {"deleted": deleted}
+
+
 # ---------------------------------------------------------------------------
 # Part-master rebuild from agent builds
 # ---------------------------------------------------------------------------

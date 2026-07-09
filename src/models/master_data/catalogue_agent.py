@@ -594,7 +594,25 @@ class CatalogueAgent:
         variant_colour_map: dict[str, list[dict]] = {}
         variant_colour_source: str = "fallback"
 
-        if rosters_differ:
+        if num_variants == 1:
+            # Single-variant PDF — cyclic distribution is meaningless with one variant.
+            # Use every colour seen in remarks (roster), ordered by foreword table.
+            # Colours absent from remarks but present in colour_legend are still
+            # surfaced via the frontend colour_legend merge (they are universal parts).
+            only_v = variants[0]
+            roster_abbrs = sorted(rosters.get(only_v, set()), key=lambda a: abbr_order.get(a, 999))
+            variant_colour_map[only_v] = [
+                {
+                    "abbreviation": abbr,
+                    "name": colour_legend.get(abbr, {}).get("name", abbr),
+                    "code": colour_legend.get(abbr, {}).get("code", ""),
+                    "is_model_colour": colour_legend.get(abbr, {}).get("is_model_colour", False),
+                }
+                for abbr in roster_abbrs
+                if abbr in colour_legend
+            ]
+            variant_colour_source = "roster"
+        elif rosters_differ:
             # Variants have distinct colour sets in remarks → use roster directly.
             for v, roster_set in rosters.items():
                 ordered = sorted(roster_set, key=lambda a: abbr_order.get(a, 999))
