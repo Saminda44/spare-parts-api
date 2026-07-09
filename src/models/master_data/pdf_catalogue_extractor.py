@@ -1904,6 +1904,21 @@ class YamahaCatalogueExtractor:
                         if eng_words:
                             desc_parts = eng_words
                             idx += 1
+                            # Also replace gap-zone (pre_rem_parts) and remarks
+                            # with English values, discarding Spanish words like "PARA".
+                            _qty_lo = min(bounds.qty_col_xs) if bounds.qty_col_xs else 9999.0
+                            _rem_hi = bounds.rem_start if bounds.rem_start < 9000 else 9999.0
+                            pre_rem_parts = [
+                                w["text"]
+                                for w in next_ws
+                                if w["x0"] >= _qty_lo
+                                and w["x0"] < _rem_hi
+                                and not re.match(r"^\d{1,5}$", w["text"])
+                            ]
+                            if bounds.rem_start < 9000:
+                                rem_parts = [
+                                    w["text"] for w in next_ws if w["x0"] >= bounds.rem_start
+                                ]
 
                 desc_raw = " ".join(desc_parts)
                 # Truncate at any embedded PN: indicates a supersession code or
@@ -2012,6 +2027,23 @@ class YamahaCatalogueExtractor:
                         if eng_words:
                             desc_sv = eng_words
                             idx += 1
+                            # Also replace gap-zone non-digits and remarks with
+                            # English values from the same row. This discards
+                            # Spanish connector words like "PARA" (= "FOR") and
+                            # keeps the English equivalents ("FOR") in the remarks.
+                            # Digit qty values come from the data row (correct);
+                            # only the non-digit applicability codes are swapped.
+                            if bounds.qty_start < 9000:
+                                _rem_hi = bounds.rem_start if bounds.rem_start < 9000 else 9999.0
+                                _eng_gap = [
+                                    w["text"]
+                                    for w in next_ws
+                                    if bounds.qty_start <= w["x0"] < _rem_hi
+                                    and not re.match(r"^\d{1,5}$", w["text"])
+                                ]
+                                qty_sv = [t for t in qty_sv if re.match(r"^\d{1,5}$", t)] + _eng_gap
+                            if bounds.rem_start < 9000:
+                                rem_sv = [w["text"] for w in next_ws if w["x0"] >= bounds.rem_start]
 
                 # Recover a qty digit that pdfplumber merged into the last
                 # description token (PDF text runs where the gap between ")"
