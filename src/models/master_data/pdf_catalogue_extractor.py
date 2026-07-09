@@ -134,6 +134,9 @@ _INDEX_PAGE_PAT = re.compile(
 # These pages may contain a mini "Applicable Serial No. and Color Code" parts table
 # in a side column that leaks into extraction if not skipped.
 _FOREWORD_PAGE_PAT = re.compile(r"\bFOREWORD\b", re.IGNORECASE)
+# Bilingual (Spanish/English) catalogues use "DESCRIPCION" (Spanish, no T) as the
+# first header row for the description column. English "DESCRIPTION" follows below.
+_BILINGUAL_HDR_PAT = re.compile(r"\bDESCRIPCION\b", re.IGNORECASE)
 # CID glyph fallback artifact from pdfplumber font decoding (e.g. "(cid:2)")
 _CID_PAT = re.compile(r"\s*\(cid:\d+\)", re.IGNORECASE)
 # Trailing colour-variant annotation on description text, e.g. " -YB(black)", " -DBNM8(gray)".
@@ -323,6 +326,10 @@ class ColBounds:
     # True when "REMARKS (9 DIGIT)" header means the REMARKS column IS the 9-digit part column.
     # In this layout nine_digit_start is cleared (9999) so content routes via rem_start → remarks.
     remarks_is_nine_digit: bool = False
+    # True when the catalogue is bilingual (Spanish first, English second).
+    # Each data row's Spanish description is immediately followed by an English
+    # description on the next Y row; extraction should take the English row.
+    is_bilingual: bool = False
     # Maps logical column name → the PDF's actual header label for that column.
     # e.g. {"part_no": "Existing Part No.", "description": "Part Name"}
     # Only populated for columns whose PDF label differs from the default.
@@ -497,6 +504,8 @@ class YamahaCatalogueExtractor:
                                 new_bounds.superseded_start = last_bounds.superseded_start
                             if not new_bounds.col_labels:
                                 new_bounds.col_labels = last_bounds.col_labels
+                            if not new_bounds.is_bilingual:
+                                new_bounds.is_bilingual = last_bounds.is_bilingual
                         bounds = new_bounds
 
                     page_rows, new_section, new_fig, page_sects = self._parse_word_rows(
@@ -976,6 +985,16 @@ class YamahaCatalogueExtractor:
             or desc_start < 9000
             or qty_start < 9000
         )
+        # Detect bilingual (Spanish/English) catalogue: "DESCRIPCION" (Spanish, no T)
+        # appears in the header block alongside the standard English "DESCRIPTION".
+        # These catalogues have two header rows per column — Spanish then English —
+        # and two description rows per data row — Spanish then English.
+        is_bilingual = any(
+            _BILINGUAL_HDR_PAT.search(" ".join(w["text"] for w in ws))
+            for _, ws in word_rows[:15]
+            if not _PN_PAT.search(" ".join(w["text"] for w in ws))
+        )
+
         if any_detected:
             return ColBounds(
                 pn_start=pn_start,
@@ -988,6 +1007,7 @@ class YamahaCatalogueExtractor:
                 superseded_start=superseded_start,
                 header_detected=bool(header),
                 remarks_is_nine_digit=remarks_is_nine_digit,
+                is_bilingual=is_bilingual,
                 col_labels=col_labels,
             )
         return None
@@ -1832,6 +1852,29 @@ class YamahaCatalogueExtractor:
                         desc_parts = [_COPYRIGHT_PAT.sub("", next_joined).strip()]
                         idx += 1
 
+                # Bilingual catalogue: Spanish description is on the data row;
+                # English description is on the immediately following Y row.
+                # Replace Spanish with English by consuming that next row.
+                elif bounds.is_bilingual and desc_parts and idx < len(word_rows):
+                    _ny, next_ws = word_rows[idx]
+                    next_joined = " ".join(w["text"] for w in next_ws).strip()
+                    if (
+                        next_joined
+                        and not _PN_PAT.search(next_joined)
+                        and not _FIG_PAT.match(next_joined)
+                        and not _SKIP_PAT.match(next_joined)
+                    ):
+                        # Only consume words in the description column zone
+                        # (allow 30 pt left-margin tolerance for data alignment).
+                        _d_lo = max(0.0, bounds.desc_start - 30.0)
+                        _d_hi = bounds.rem_start if bounds.rem_start < 9000 else 9999.0
+                        eng_words = [
+                            w["text"] for w in next_ws if w["x0"] >= _d_lo and w["x0"] < _d_hi
+                        ]
+                        if eng_words:
+                            desc_parts = eng_words
+                            idx += 1
+
                 desc_raw = " ".join(desc_parts)
                 # Truncate at any embedded PN: indicates a supersession code or
                 # merged Y-row from tight typesetting (e.g. CRUX 5KA1 PDF).
@@ -1913,6 +1956,26 @@ class YamahaCatalogueExtractor:
                     ):
                         desc_sv = [_COPYRIGHT_PAT.sub("", next_joined).strip()]
                         idx += 1
+
+                # Bilingual catalogue: Spanish description captured in desc_sv;
+                # English description is on the immediately following Y row.
+                elif bounds.is_bilingual and desc_sv and idx < len(word_rows):
+                    _ny, next_ws = word_rows[idx]
+                    next_joined = " ".join(w["text"] for w in next_ws).strip()
+                    if (
+                        next_joined
+                        and not _PN_PAT.search(next_joined)
+                        and not _FIG_PAT.match(next_joined)
+                        and not _SKIP_PAT.match(next_joined)
+                    ):
+                        _d_lo = max(0.0, bounds.desc_start - 30.0)
+                        _d_hi = bounds.rem_start if bounds.rem_start < 9000 else 9999.0
+                        eng_words = [
+                            w["text"] for w in next_ws if w["x0"] >= _d_lo and w["x0"] < _d_hi
+                        ]
+                        if eng_words:
+                            desc_sv = eng_words
+                            idx += 1
 
                 # Recover a qty digit that pdfplumber merged into the last
                 # description token (PDF text runs where the gap between ")"
