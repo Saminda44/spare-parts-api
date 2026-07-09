@@ -130,6 +130,10 @@ _INDEX_PAGE_PAT = re.compile(
     r"(?:NUMERICAL|ALPHABETICAL|COLOUR|GENERAL)\s+INDEX",
     re.IGNORECASE,
 )
+# Foreword / intro pages: always front matter, never genuine parts pages.
+# These pages may contain a mini "Applicable Serial No. and Color Code" parts table
+# in a side column that leaks into extraction if not skipped.
+_FOREWORD_PAGE_PAT = re.compile(r"\bFOREWORD\b", re.IGNORECASE)
 # CID glyph fallback artifact from pdfplumber font decoding (e.g. "(cid:2)")
 _CID_PAT = re.compile(r"\s*\(cid:\d+\)", re.IGNORECASE)
 # Trailing colour-variant annotation on description text, e.g. " -YB(black)", " -DBNM8(gray)".
@@ -452,6 +456,7 @@ class YamahaCatalogueExtractor:
                         _KITS_PAGE_PAT.search(page_header)
                         or (_XREF_PAGE_PAT.search(page_header) and not _has_fig)
                         or _INDEX_PAGE_PAT.search(page_header)
+                        or _FOREWORD_PAGE_PAT.search(page_header)
                     ):
                         continue
 
@@ -2038,6 +2043,7 @@ class YamahaCatalogueExtractor:
                         _KITS_PAGE_PAT.search(page_head)
                         or (_XREF_PAGE_PAT.search(page_head) and not _has_fig_text)
                         or _INDEX_PAGE_PAT.search(page_head)
+                        or _FOREWORD_PAGE_PAT.search(page_head)
                     ):
                         continue
 
