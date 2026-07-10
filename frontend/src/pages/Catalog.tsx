@@ -46,7 +46,7 @@ function variantQty(qty: string, varIdx: number, numVariants: number): string {
   return raw ?? qty;
 }
 
-function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, manufactureYear, columnLayout }: {
+function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, manufactureYear, columnLayout, descColourHints }: {
   data: CatalogueData;
   relPath: string;
   pdfUrl?: string;
@@ -55,6 +55,7 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
   colourCodes?: ColourCode[];
   manufactureYear?: string;
   columnLayout?: string[];
+  descColourHints?: Record<string, string>; // part_no → colour_abbr for desc-colour PDFs
 }) {
   const [section,    setSection]    = useState("");
   const [search,     setSearch]     = useState("");
@@ -266,8 +267,20 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
 
   // Annotate every row with a Kind tag when a colour is selected, then filter.
   // "other" rows (parts for a different colour) are hidden from the table.
+  // For desc-colour PDFs the colour membership comes from descColourHints (part_no lookup)
+  // rather than FOR/EXCEPT patterns in remarks — description and remarks stay unchanged.
+  const COL_PART_NO = 2; // part_no is always index 2 (never dropped)
   const annotatedRows: string[][] = selColour
-    ? extractedRows.map(row => [...row.slice(0, COL_REMARKS + 1), getRowKind(row[COL_REMARKS] ?? "")])
+    ? extractedRows.map(row => {
+        const hint = descColourHints?.[row[COL_PART_NO]];
+        let kind: string;
+        if (hint !== undefined && hint !== "") {
+          kind = hint.toUpperCase() === selColour.toUpperCase() ? "colour_specific" : "other";
+        } else {
+          kind = getRowKind(row[COL_REMARKS] ?? "");
+        }
+        return [...row.slice(0, COL_REMARKS + 1), kind];
+      })
     : extractedRows;
 
   const displayRows: string[][] = selColour
@@ -697,7 +710,7 @@ function ExtractionModal({ relPath, filename, pdfUrl, onClose }: {
         <div className="flex-1 overflow-y-auto p-5">
           {loading ? <LoadingState label="Extracting parts from PDF…" /> :
            !result || result.headers.length === 0 ? <EmptyState /> :
-           <CatalogueTable data={result} relPath={relPath} meta={meta} variants={result.variants} colourCodes={result.colour_codes} manufactureYear={result.manufacture_year} columnLayout={result.column_layout} />}
+           <CatalogueTable data={result} relPath={relPath} meta={meta} variants={result.variants} colourCodes={result.colour_codes} manufactureYear={result.manufacture_year} columnLayout={result.column_layout} descColourHints={result.desc_colour_hints} />}
         </div>
       </div>
     </div>

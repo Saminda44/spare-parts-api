@@ -1273,11 +1273,10 @@ class YamahaCatalogueExtractor:
              A lone parenthetical e.g. 'FLAP (COVER)' is never lifted.
 
         Side-effect on each affected row:
-          • description      → base text only (parenthetical colour stripped)
-          • remarks          → 'FOR <ABBR>'  (e.g. 'FOR YB')
-          • nine_digit_part_no → receives the old remarks value when it was
-            empty (fixes cases where the extractor mis-routed the 9-digit
-            part number into the remarks slot).
+          • colour_hint → set to the colour abbreviation (e.g. 'YB').
+            description, remarks, nine_digit_part_no are left UNCHANGED so
+            the user sees the original PDF text in the table display.
+            The agent and API use colour_hint for roster/filter logic.
 
         Returns:
             (updated_rows, synthetic_colour_codes)
@@ -1366,23 +1365,20 @@ class YamahaCatalogueExtractor:
             for cu in seen_colours
         ]
 
-        # Pass 2: rewrite affected rows
+        # Pass 2: tag affected rows with a colour_hint field.
+        # Description, remarks, and nine_digit_part_no are NEVER modified —
+        # the user sees exactly what the PDF shows (e.g. "FRONT FENDER (YAMAHA BLACK)"
+        # and "5A-WF151-70" remain unchanged).  Only the invisible colour_hint key
+        # is added so the agent and frontend can use it for roster/filter logic.
         updated: list[dict] = []
         for idx, row in enumerate(rows):
             if idx not in variant_idxs:
                 updated.append(row)
                 continue
 
-            base, norm_colour = parsed[idx]
+            _, norm_colour = parsed[idx]
             new_row = dict(row)
-            new_row["description"] = base
-
-            # Relocate a mis-routed 9-digit value from remarks → nine_digit_part_no
-            existing_rem = new_row.get("remarks", "")
-            if existing_rem and not new_row.get("nine_digit_part_no"):
-                new_row["nine_digit_part_no"] = existing_rem
-
-            new_row["remarks"] = f"FOR {colour_abbr[norm_colour]}"
+            new_row["colour_hint"] = colour_abbr[norm_colour]
             updated.append(new_row)
 
         return updated, synthetic_colour_codes

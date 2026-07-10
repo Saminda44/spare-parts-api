@@ -166,6 +166,16 @@ def extract_pdf_tables(
     rows = [[r.get(c, "") for c in _col_keys] for r in result.rows]
     sections = sorted({r[0] for r in rows if r[0]})
 
+    # Desc-colour PDFs (e.g. CRUX-S): colours live in description parentheses,
+    # not in FOR/EXCEPT remarks.  Build a {part_no → colour_abbr} lookup so the
+    # frontend can filter rows without parsing descriptions itself.
+    desc_colour_hints: dict[str, str] = {
+        r["part_no"]: r["colour_hint"]
+        for r in result.rows
+        if r.get("colour_hint") and r.get("part_no")
+    }
+    desc_colour_mode: bool = bool(desc_colour_hints)
+
     # Drop optional columns (indices 5, 6, 7) when this PDF has no data in them.
     # nine_digit_part_no=5, escort_part_no=6, superseded_part_no=7 are market-specific.
     headers: list[str] = list(DISPLAY_HEADERS)
@@ -199,6 +209,8 @@ def extract_pdf_tables(
         "warnings": result.warnings,
         "column_layout": result.column_layout,
         "column_display_labels": result.column_display_labels,
+        "desc_colour_mode": desc_colour_mode,
+        "desc_colour_hints": desc_colour_hints,
         # NEW: Colour matching metadata for debugging
         "colour_extraction_metadata": {
             "source": "pdf_cover" if result.available_colours else "agent_web",

@@ -741,12 +741,23 @@ class CatalogueAgent:
         num_v = len(variants)
 
         for row in rows:
+            qty_raw = row.get("qty", "") or ""
+
+            # Desc-colour PDFs: colour membership is stored in colour_hint
+            # (extractor detected colours in description parentheses and left
+            # description/remarks unchanged).
+            hint = (row.get("colour_hint") or "").upper()
+            if hint and hint in colour_abbrs:
+                for idx, variant in enumerate(variants):
+                    v_qty = _variant_qty(qty_raw, idx, num_v) if num_v > 1 else qty_raw
+                    if _has_qty(v_qty):
+                        rosters[variant].add(hint)
+                continue  # skip remarks parsing for this row
+
             remarks = row.get("remarks", "") or ""
             appl = parse_applicability(remarks, colour_abbrs)
             if appl.is_universal:
                 continue  # shared row — no colour info for the roster
-
-            qty_raw = row.get("qty", "") or ""
 
             for idx, variant in enumerate(variants):
                 v_qty = _variant_qty(qty_raw, idx, num_v) if num_v > 1 else qty_raw
@@ -811,15 +822,21 @@ class CatalogueAgent:
                     if not _has_qty(v_qty):
                         continue  # this variant has no qty for this row
 
-                    remarks = row.get("remarks", "") or ""
-                    appl = parse_applicability(remarks, colour_abbrs)
-
-                    if colour == "_ALL" or appl.is_universal:
-                        kind = "shared"
-                        matches = True
-                    else:
+                    # Desc-colour PDFs: membership comes from colour_hint, not remarks
+                    hint = (row.get("colour_hint") or "").upper()
+                    if hint and hint in colour_abbrs:
                         kind = "colour_specific"
-                        matches = appl.matches(colour)
+                        matches = colour == "_ALL" or hint == colour
+                    else:
+                        remarks = row.get("remarks", "") or ""
+                        appl = parse_applicability(remarks, colour_abbrs)
+
+                        if colour == "_ALL" or appl.is_universal:
+                            kind = "shared"
+                            matches = True
+                        else:
+                            kind = "colour_specific"
+                            matches = appl.matches(colour)
 
                     if not matches:
                         continue
@@ -1314,6 +1331,10 @@ class CatalogueAgent:
             ref = (row.get("ref_no", "") or "").strip()
             if not ref:
                 continue
+            hint = (row.get("colour_hint") or "").upper()
+            if hint and hint in colour_abbrs:
+                by_ref.setdefault(ref, []).append(row)
+                continue
             remarks = row.get("remarks", "") or ""
             appl = parse_applicability(remarks, colour_abbrs)
             if not appl.is_universal and appl.applies_to:
@@ -1323,6 +1344,10 @@ class CatalogueAgent:
         for ref, ref_rows in by_ref.items():
             per_colour: dict[str, str] = {}
             for row in ref_rows:
+                hint = (row.get("colour_hint") or "").upper()
+                if hint and hint in colour_abbrs:
+                    per_colour[hint] = row.get("part_no", "")
+                    continue
                 remarks = row.get("remarks", "") or ""
                 appl = parse_applicability(remarks, colour_abbrs)
                 part_no = (row.get("part_no", "") or "").strip()
@@ -1378,8 +1403,8 @@ class CatalogueAgent:
 # Yamaha part-number patterns (mirrors pdf_catalogue_extractor.py constants)
 _PART_NO_PAT = re.compile(
     r"\b([A-Z0-9]{2,4}-[A-Z0-9]{4,6}-\d{2}(?:-[A-Z0-9]{2})?|"  # 3- or 4-part
-    r"\d{5}-\d{5}|"                                               # 2-part numeric
-    r"[A-Z0-9]{10,12})\b"                                         # no-dash long
+    r"\d{5}-\d{5}|"  # 2-part numeric
+    r"[A-Z0-9]{10,12})\b"  # no-dash long
 )
 
 
@@ -1390,8 +1415,8 @@ class ModelCompatibilityResult:
     part_no: str
     description: str
     compatible_models: list[str]
-    model_years: dict[str, str]    # model → manufacture_year (may be empty string)
-    source_catalogs: list[str]     # PDF filenames
+    model_years: dict[str, str]  # model → manufacture_year (may be empty string)
+    source_catalogs: list[str]  # PDF filenames
 
 
 class LLMFallbackExtractor:
@@ -1425,11 +1450,10 @@ class LLMFallbackExtractor:
             return self._client
         try:
             import anthropic  # noqa: PLC0415
+
             self._client = anthropic.Anthropic()
         except ImportError:
-            raise RuntimeError(
-                "anthropic package not installed — run: uv add anthropic"
-            ) from None
+            raise RuntimeError("anthropic package not installed — run: uv add anthropic") from None
         return self._client
 
     def extract(self, pdf_path: Path, model_name: str) -> list[dict[str, str]]:
@@ -1448,14 +1472,11 @@ class LLMFallbackExtractor:
         except Exception as exc:  # noqa: BLE001
             logger.error(f"LLMFallbackExtractor: failed to open {pdf_path.name}: {exc}")
         logger.info(
-            f"LLMFallbackExtractor [{model_name}] {pdf_path.name}: "
-            f"{len(rows)} rows via Claude"
+            f"LLMFallbackExtractor [{model_name}] {pdf_path.name}: " f"{len(rows)} rows via Claude"
         )
         return rows
 
-    def _extract_page(
-        self, text: str, page_num: int, filename: str
-    ) -> list[dict[str, str]]:
+    def _extract_page(self, text: str, page_num: int, filename: str) -> list[dict[str, str]]:
         client = self._get_client()
         # Truncate very long pages to avoid token overflow
         page_text = text[:4000]
@@ -1481,9 +1502,7 @@ class LLMFallbackExtractor:
                     result.append({"part_no": pn, "description": desc})
             return result
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                f"LLMFallbackExtractor: page {page_num} of {filename} failed: {exc}"
-            )
+            logger.warning(f"LLMFallbackExtractor: page {page_num} of {filename} failed: {exc}")
             return []
 
 
@@ -1554,9 +1573,7 @@ class CrossModelCompatibilityAgent:
                         f"{pdf_file.name}: {exc}"
                     )
 
-        logger.info(
-            f"CrossModelCompatibilityAgent: {len(records)} total rows — rolling up"
-        )
+        logger.info(f"CrossModelCompatibilityAgent: {len(records)} total rows — rolling up")
         return self._rollup(records)
 
     def save(self, df: pd.DataFrame, out_path: Path) -> None:
@@ -1573,19 +1590,21 @@ class CrossModelCompatibilityAgent:
             lambda x: ", ".join(x) if isinstance(x, list) else str(x)
         )
         excel_df["model_years"] = excel_df["model_years"].apply(
-            lambda x: "; ".join(f"{m}: {y}" for m, y in x.items()) if isinstance(x, dict) else str(x)
+            lambda x: "; ".join(f"{m}: {y}" for m, y in x.items())
+            if isinstance(x, dict)
+            else str(x)
         )
         excel_df["source_catalogs"] = excel_df["source_catalogs"].apply(
             lambda x: ", ".join(x) if isinstance(x, list) else str(x)
         )
         with pd.ExcelWriter(str(out_path), engine="xlsxwriter") as writer:
-            excel_df.to_excel(writer, sheet_name="Model Compatibility", index=False)
+            excel_df.to_excel(writer, sheet_name="Model Compatibility", index=False)  # noqa: E501
             ws = writer.sheets["Model Compatibility"]
-            ws.set_column(0, 0, 20)   # part_no
-            ws.set_column(1, 1, 40)   # description
-            ws.set_column(2, 2, 50)   # compatible_models
-            ws.set_column(3, 3, 40)   # model_years
-            ws.set_column(4, 4, 60)   # source_catalogs
+            ws.set_column(0, 0, 20)  # part_no
+            ws.set_column(1, 1, 40)  # description
+            ws.set_column(2, 2, 50)  # compatible_models
+            ws.set_column(3, 3, 40)  # model_years
+            ws.set_column(4, 4, 60)  # source_catalogs
 
         # Parquet: serialize model_years dict → JSON string (pyarrow can't write
         # a struct type with no child fields when all dicts are empty).
@@ -1595,9 +1614,7 @@ class CrossModelCompatibilityAgent:
         )
         parquet_path = out_path.with_suffix(".parquet")
         parquet_df.to_parquet(parquet_path, index=False)
-        logger.info(
-            f"Saved: {out_path} ({len(df):,} unique parts) + {parquet_path.name}"
-        )
+        logger.info(f"Saved: {out_path} ({len(df):,} unique parts) + {parquet_path.name}")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1612,11 +1629,7 @@ class CrossModelCompatibilityAgent:
             logger.error(f"{pdf_file.name}: extraction error — {result.error}")
             return []
 
-        yield_score = (
-            len(result.rows) / result.pages_scanned
-            if result.pages_scanned > 0
-            else 0.0
-        )
+        yield_score = len(result.rows) / result.pages_scanned if result.pages_scanned > 0 else 0.0
 
         if result.pages_scanned > 0 and yield_score < self._threshold:
             logger.warning(
@@ -1698,4 +1711,3 @@ class CrossModelCompatibilityAgent:
                 "source_catalogs",
             ]
         )
-

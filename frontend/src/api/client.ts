@@ -840,6 +840,8 @@ export interface PdfTableResult {
   pages_scanned: number; sections_found: number; ocr_flagged: number; warnings: string[];
   column_layout?: string[];  // detected column names in left-to-right order
   column_display_labels?: Record<string, string>; // logical key → PDF's actual header text
+  desc_colour_mode?: boolean;  // true when colours come from description parentheses
+  desc_colour_hints?: Record<string, string>; // part_no → colour_abbr for desc-colour PDFs
 }
 export const fetchPdfTables = (rel_path: string) =>
   api.get<PdfTableResult>(
