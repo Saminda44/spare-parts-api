@@ -328,7 +328,9 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
       )}
 
       {/* ── Model variant pill row ─────────────────────────────────────── */}
-      {numVariants >= 1 && (
+      {/* Only show when there are named variants — suppress the synthesised "" variant
+          that the agent uses for single-model PDFs (e.g. desc-colour PDFs like CRUX-S). */}
+      {numVariants >= 1 && variants!.some(v => v !== "") && (
         <div className="flex items-center gap-2 px-4 py-2.5 bg-slate-50 border-b border-slate-200 overflow-x-auto">
           <span className="text-xs font-semibold text-slate-500 shrink-0 mr-1">Model variant:</span>
           {variants!.map((v, i) => (
