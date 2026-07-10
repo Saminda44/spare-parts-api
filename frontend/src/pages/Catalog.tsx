@@ -657,6 +657,7 @@ function PdfCatalogueViewer({ relPath, filename, pdfUrl, onBack }: {
          variants={result.variants} colourCodes={result.colour_codes}
          manufactureYear={result.manufacture_year}
          columnLayout={result.column_layout}
+         descColourHints={result.desc_colour_hints}
        />}
     </div>
   );
