@@ -17,11 +17,13 @@ import json
 import re
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 from loguru import logger
 
 from src.models.master_data.pdf_catalogue_extractor import YamahaCatalogueExtractor
@@ -1367,3 +1369,333 @@ class CatalogueAgent:
             if ratio >= 0.40:
                 return True
         return False
+
+
+# ---------------------------------------------------------------------------
+# Cross-model compatibility — new classes
+# ---------------------------------------------------------------------------
+
+# Yamaha part-number patterns (mirrors pdf_catalogue_extractor.py constants)
+_PART_NO_PAT = re.compile(
+    r"\b([A-Z0-9]{2,4}-[A-Z0-9]{4,6}-\d{2}(?:-[A-Z0-9]{2})?|"  # 3- or 4-part
+    r"\d{5}-\d{5}|"                                               # 2-part numeric
+    r"[A-Z0-9]{10,12})\b"                                         # no-dash long
+)
+
+
+@dataclass
+class ModelCompatibilityResult:
+    """One deduped part with every model it appears in."""
+
+    part_no: str
+    description: str
+    compatible_models: list[str]
+    model_years: dict[str, str]    # model → manufacture_year (may be empty string)
+    source_catalogs: list[str]     # PDF filenames
+
+
+class LLMFallbackExtractor:
+    """Claude-powered extractor for PDFs below the word-position yield threshold.
+
+    Business meaning: some Yamaha PDFs (image-based or unusual layouts) produce
+    very few rows via the word-position clusterer.  This class sends the raw page
+    text to Claude and asks it to parse part_no + description directly, using the
+    same Yamaha part-number grammar the extractor knows.
+    """
+
+    # Rows-per-page ratio below which LLM fallback is triggered
+    YIELD_THRESHOLD: float = 0.70
+
+    _SYSTEM = (
+        "You are a Yamaha spare-parts catalogue parser. "
+        "Extract every spare part row from the catalogue page text provided. "
+        "Return ONLY a JSON array — no prose, no markdown fences. "
+        "Each element must have exactly two string fields: "
+        '{"part_no": "...", "description": "..."}. '
+        "Skip rows with no recognisable Yamaha part number. "
+        "Part numbers look like: 5HK-14147-00, 2FS-E1111-10, 93210-29800, 2LPWE11100."
+    )
+
+    def __init__(self, llm_model: str = "claude-sonnet-4-6") -> None:
+        self._llm_model = llm_model
+        self._client: Any = None  # lazy-init on first use
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        try:
+            import anthropic  # noqa: PLC0415
+            self._client = anthropic.Anthropic()
+        except ImportError:
+            raise RuntimeError(
+                "anthropic package not installed — run: uv add anthropic"
+            ) from None
+        return self._client
+
+    def extract(self, pdf_path: Path, model_name: str) -> list[dict[str, str]]:
+        """Return [{part_no, description}] extracted by Claude from all PDF pages."""
+        import pdfplumber  # noqa: PLC0415
+
+        rows: list[dict[str, str]] = []
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page_num, page in enumerate(pdf.pages):
+                    text = page.extract_text() or ""
+                    if len(text.strip()) < 30:
+                        continue
+                    page_rows = self._extract_page(text, page_num + 1, pdf_path.name)
+                    rows.extend(page_rows)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"LLMFallbackExtractor: failed to open {pdf_path.name}: {exc}")
+        logger.info(
+            f"LLMFallbackExtractor [{model_name}] {pdf_path.name}: "
+            f"{len(rows)} rows via Claude"
+        )
+        return rows
+
+    def _extract_page(
+        self, text: str, page_num: int, filename: str
+    ) -> list[dict[str, str]]:
+        client = self._get_client()
+        # Truncate very long pages to avoid token overflow
+        page_text = text[:4000]
+        try:
+            msg = client.messages.create(
+                model=self._llm_model,
+                max_tokens=2048,
+                system=self._SYSTEM,
+                messages=[{"role": "user", "content": page_text}],
+            )
+            raw = msg.content[0].text.strip()
+            # Strip accidental markdown fences
+            raw = re.sub(r"^```\w*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+            data = json.loads(raw)
+            if not isinstance(data, list):
+                return []
+            result = []
+            for item in data:
+                pn = str(item.get("part_no", "")).strip()
+                desc = str(item.get("description", "")).strip()
+                if pn and _PART_NO_PAT.match(pn):
+                    result.append({"part_no": pn, "description": desc})
+            return result
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"LLMFallbackExtractor: page {page_num} of {filename} failed: {exc}"
+            )
+            return []
+
+
+class CrossModelCompatibilityAgent:
+    """Batch agent: extract every PDF, roll up part_no → compatible models + years.
+
+    Business meaning: a spare part may appear in multiple Yamaha models.  This
+    agent processes every PDF catalogue under a root folder, merges the results
+    by part_no, and produces a single lookup table so procurement can identify
+    which models share a part.
+
+    Usage::
+
+        agent = CrossModelCompatibilityAgent()
+        df = agent.run_all(Path("data/raw/pdf_catalogues"))
+        agent.save(df, Path("data/outputs/model_compatibility.xlsx"))
+    """
+
+    def __init__(
+        self,
+        max_pages: int = 500,
+        llm_model: str = "claude-sonnet-4-6",
+        yield_threshold: float = LLMFallbackExtractor.YIELD_THRESHOLD,
+    ) -> None:
+        self._extractor = YamahaCatalogueExtractor(max_pages=max_pages)
+        self._llm = LLMFallbackExtractor(llm_model=llm_model)
+        self._threshold = yield_threshold
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def run_all(
+        self,
+        pdf_root: Path,
+        max_workers: int = 4,
+    ) -> pd.DataFrame:
+        """Process every PDF under pdf_root and return the compatibility table.
+
+        Returns:
+            DataFrame with columns:
+                part_no, description, compatible_models (list),
+                model_years (dict[model→year]), source_catalogs (list)
+        """
+        pdf_files = sorted(
+            {f for f in pdf_root.rglob("*") if f.suffix.lower() == ".pdf"},
+            key=lambda p: (p.parent.name.upper(), p.name.upper()),
+        )
+        if not pdf_files:
+            logger.warning(f"CrossModelCompatibilityAgent: no PDFs found under {pdf_root}")
+            return self._empty_df()
+
+        logger.info(
+            f"CrossModelCompatibilityAgent: {len(pdf_files)} PDFs, "
+            f"{max_workers} workers, threshold={self._threshold:.0%}"
+        )
+
+        records: list[dict[str, str]] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(self._process_one, f): f for f in pdf_files}
+            for future in as_completed(futures):
+                pdf_file = futures[future]
+                try:
+                    records.extend(future.result())
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        f"CrossModelCompatibilityAgent: unhandled error for "
+                        f"{pdf_file.name}: {exc}"
+                    )
+
+        logger.info(
+            f"CrossModelCompatibilityAgent: {len(records)} total rows — rolling up"
+        )
+        return self._rollup(records)
+
+    def save(self, df: pd.DataFrame, out_path: Path) -> None:
+        """Write compatibility table to Excel (+ sibling .parquet).
+
+        The Excel sheet has list/dict columns flattened to comma-separated strings
+        for readability.  The parquet retains native Python types for downstream use.
+        """
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Excel — flatten collections to strings
+        excel_df = df.copy()
+        excel_df["compatible_models"] = excel_df["compatible_models"].apply(
+            lambda x: ", ".join(x) if isinstance(x, list) else str(x)
+        )
+        excel_df["model_years"] = excel_df["model_years"].apply(
+            lambda x: "; ".join(f"{m}: {y}" for m, y in x.items()) if isinstance(x, dict) else str(x)
+        )
+        excel_df["source_catalogs"] = excel_df["source_catalogs"].apply(
+            lambda x: ", ".join(x) if isinstance(x, list) else str(x)
+        )
+        with pd.ExcelWriter(str(out_path), engine="xlsxwriter") as writer:
+            excel_df.to_excel(writer, sheet_name="Model Compatibility", index=False)
+            ws = writer.sheets["Model Compatibility"]
+            ws.set_column(0, 0, 20)   # part_no
+            ws.set_column(1, 1, 40)   # description
+            ws.set_column(2, 2, 50)   # compatible_models
+            ws.set_column(3, 3, 40)   # model_years
+            ws.set_column(4, 4, 60)   # source_catalogs
+
+        # Parquet: serialize model_years dict → JSON string (pyarrow can't write
+        # a struct type with no child fields when all dicts are empty).
+        parquet_df = df.copy()
+        parquet_df["model_years"] = parquet_df["model_years"].apply(
+            lambda x: json.dumps(x) if isinstance(x, dict) else str(x)
+        )
+        parquet_path = out_path.with_suffix(".parquet")
+        parquet_df.to_parquet(parquet_path, index=False)
+        logger.info(
+            f"Saved: {out_path} ({len(df):,} unique parts) + {parquet_path.name}"
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _process_one(self, pdf_file: Path) -> list[dict[str, str]]:
+        """Extract one PDF; fall back to LLM when word-position yield is low."""
+        model_name = pdf_file.parent.name
+        result = self._extractor.extract(pdf_file, model=model_name)
+
+        if result.error:
+            logger.error(f"{pdf_file.name}: extraction error — {result.error}")
+            return []
+
+        yield_score = (
+            len(result.rows) / result.pages_scanned
+            if result.pages_scanned > 0
+            else 0.0
+        )
+
+        if result.pages_scanned > 0 and yield_score < self._threshold:
+            logger.warning(
+                f"{pdf_file.name}: yield={yield_score:.2f} < {self._threshold:.2f} "
+                f"({len(result.rows)} rows / {result.pages_scanned} pages) "
+                f"— using LLM fallback"
+            )
+            rows = self._llm.extract(pdf_file, model_name)
+        else:
+            rows = result.rows
+            logger.debug(
+                f"{pdf_file.name}: yield={yield_score:.2f} "
+                f"({len(rows)} rows / {result.pages_scanned} pages)"
+            )
+
+        year = result.manufacture_year or ""
+        return [
+            {
+                "part_no": r.get("part_no", "").strip(),
+                "description": r.get("description", "").strip(),
+                "model": model_name,
+                "manufacture_year": year,
+                "source_file": pdf_file.name,
+            }
+            for r in rows
+            if r.get("part_no", "").strip()
+        ]
+
+    @staticmethod
+    def _rollup(records: list[dict[str, str]]) -> pd.DataFrame:
+        """Aggregate per-PDF rows into one row per unique part_no."""
+        if not records:
+            return CrossModelCompatibilityAgent._empty_df()
+
+        df = pd.DataFrame(records)
+        df = df[df["part_no"].str.len() > 0].copy()
+
+        def agg(grp: pd.DataFrame) -> pd.Series:
+            # Best description: longest non-empty string
+            descs = grp["description"].dropna()
+            descs = descs[descs.str.len() > 0]
+            best_desc = (
+                descs.sort_values(key=lambda s: s.str.len(), ascending=False).iloc[0]
+                if not descs.empty
+                else ""
+            )
+            models = sorted(grp["model"].dropna().unique().tolist())
+            year_map: dict[str, str] = (
+                grp[grp["manufacture_year"].str.len() > 0]
+                .groupby("model")["manufacture_year"]
+                .first()
+                .to_dict()
+            )
+            sources = sorted(grp["source_file"].dropna().unique().tolist())
+            return pd.Series(
+                {
+                    "description": best_desc,
+                    "compatible_models": models,
+                    "model_years": year_map,
+                    "source_catalogs": sources,
+                }
+            )
+
+        result = df.groupby("part_no", sort=True).apply(agg).reset_index()
+        logger.info(
+            f"Rollup complete: {len(result):,} unique parts "
+            f"from {df['model'].nunique()} models / {df['source_file'].nunique()} PDFs"
+        )
+        return result
+
+    @staticmethod
+    def _empty_df() -> pd.DataFrame:
+        return pd.DataFrame(
+            columns=[
+                "part_no",
+                "description",
+                "compatible_models",
+                "model_years",
+                "source_catalogs",
+            ]
+        )
+
