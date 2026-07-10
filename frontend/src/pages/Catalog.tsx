@@ -20,9 +20,6 @@ const MODEL_COLORS: Record<string, string> = {
 };
 function modelColor(name: string) { return MODEL_COLORS[name] ?? "#4361EE"; }
 
-// Catalogue prefix tokens that appear before colour codes in remarks — not colours themselves
-const REMARK_ABBR_TOKENS = new Set(["UR", "UN", "AP", "LM", "OPT", "STD"]);
-
 // ── Shared catalogue table ─────────────────────────────────────────────────────
 
 interface CatalogueData {
@@ -112,7 +109,7 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
   // current variant's roster entry is the authoritative source.
   // Foreword colours absent from all remarks are NOT shown as chips.
   const variantColours: VariantColourEntry[] = (() => {
-    // Agent not yet loaded → show foreword model-colours (★) as placeholders.
+    // Agent not yet loaded → show foreword colours as placeholders.
     if (!agentResult) {
       if (colourCodes && colourCodes.length > 0) {
         const mc = colourCodes.filter(c => c.is_model_colour);
@@ -127,9 +124,22 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
     }
 
     // Agent loaded: derive chips from THIS variant's roster only.
-    // roster = colours that actually appear in FOR/EXCEPT remarks (not standalone).
+    // roster = colours that actually appear in FOR/EXCEPT remarks.
     const roster = agentResult.rosters?.[selVariantCode] ?? [];
-    if (roster.length === 0) return [];
+    if (roster.length === 0) {
+      // Single-colour PDFs have no colour-specific remarks (no need to
+      // differentiate — only one option exists). Still show the one chip
+      // so the colour is identifiable; selecting it shows everything as shared.
+      if (colourCodes && colourCodes.length === 1) {
+        return colourCodes.map(c => ({
+          abbreviation: c.abbreviation,
+          name: c.name,
+          code: c.code,
+          is_model_colour: c.is_model_colour ?? false,
+        }));
+      }
+      return [];
+    }
 
     const rosterSet = new Set(roster.map(a => a.toUpperCase()));
 
@@ -141,7 +151,7 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
     // Fallback: build entries directly from roster using colour_legend.
     const legend = agentResult.colour_legend ?? {};
     return roster.map(abbr => {
-      const entry = (legend[abbr.toUpperCase()] ?? {}) as Record<string, unknown>;
+      const entry = (legend[abbr.toUpperCase()] ?? {}) as unknown as Record<string, unknown>;
       return {
         abbreviation: abbr,
         name: (entry.name as string) ?? abbr,

@@ -1250,8 +1250,10 @@ class YamahaCatalogueExtractor:
 
         # Abbreviation: 2-8 alphanumeric chars, optionally followed by (*) or *
         _ABBR_PAT = re.compile(r"^([A-Z0-9]{2,8})(\(\s*\*\s*\)|\*)?$")
-        # Paint code: 3-5 alphanumeric chars (e.g. "1344", "00V9", "0098", "SMX")
-        _CODE_PAT = re.compile(r"^[A-Z0-9]{3,5}$")
+        # Paint code: Yamaha codes always start with 2+ digits and are 4-5 chars
+        # (e.g. "1344", "0390", "0033", "00AL", "00V9").  Rejects pure-letter
+        # strings ("THE", "PART") and short page-numbers ("01", "12").
+        _CODE_PAT = re.compile(r"^\d{2}[A-Z0-9]{2,3}$")
         # Words that indicate a header row — skip these
         _HEADER_WORDS = frozenset(
             {
@@ -1265,45 +1267,188 @@ class YamahaCatalogueExtractor:
                 "COLOURCODE",
             }
         )
+        # Column-swap detectors (compiled once, not per-row)
+        _NUMERIC_CODE_RE = re.compile(r"^\d{3,5}$")
+        _ALPHA_ABBR_RE = re.compile(r"^[A-Z][A-Z0-9]{1,7}$")
+        # Vocabulary check: real colour names always contain at least one of these.
+        # Prevents TOC/section-name rows ("CYLINDER HEAD", "FIG 1") being accepted.
+        _COLOUR_WORDS = frozenset(
+            {
+                "BLACK",
+                "WHITE",
+                "BLUE",
+                "RED",
+                "GREEN",
+                "YELLOW",
+                "ORANGE",
+                "PURPLE",
+                "PINK",
+                "BROWN",
+                "GREY",
+                "GRAY",
+                "SILVER",
+                "GOLD",
+                "CYAN",
+                "MAGENTA",
+                "TEAL",
+                "NAVY",
+                "MAROON",
+                "BEIGE",
+                "CREAM",
+                "BRONZE",
+                "COPPER",
+                "TURQUOISE",
+                "METALLIC",
+                "MATTE",
+                "MAT",
+                "GLOSSY",
+                "PEARL",
+                "LUMINOUS",
+                "VIVID",
+                "DARK",
+                "DEEP",
+                "LIGHT",
+                "BRIGHT",
+                "REDDISH",
+                "BLUISH",
+                "GRAYISH",
+                "GREYISH",
+                "PURPLISH",
+                "YELLOWISH",
+                "GREENISH",
+                "BLACKISH",
+                "WHITISH",
+                "COCKTAIL",  # "BLUISH WHITE COCKTAIL 1"
+                "YAMAHA",  # "YAMAHA BLACK"
+            }
+        )
+        # Common English words that can never be Yamaha colour abbreviations.
+        # Rejects prose false-positives like "BOTH | METALLIC SILVER | 0390".
+        _STOP_WORDS = frozenset(
+            {
+                "TO",
+                "AT",
+                "BE",
+                "OF",
+                "IN",
+                "ON",
+                "BY",
+                "OR",
+                "SO",
+                "AS",
+                "IF",
+                "DO",
+                "GO",
+                "IS",
+                "AN",
+                "IT",
+                "NO",
+                "UP",
+                "FOR",
+                "AND",
+                "THE",
+                "BUT",
+                "NOT",
+                "YET",
+                "NOR",
+                "ANY",
+                "ALL",
+                "BOTH",
+                "FROM",
+                "WITH",
+                "INTO",
+                "THAN",
+                "THIS",
+                "THAT",
+                "WILL",
+                "HAVE",
+                "BEEN",
+                "WERE",
+                "MORE",
+                "ALSO",
+                "SUCH",
+                "SOME",
+                "NOTE",
+                "FORE",
+                "PART",
+                "ONLY",
+                "WHEN",
+                "THEN",
+                "EACH",
+                "USED",
+            }
+        )
 
         def _parse_row(abbr_raw: str, name: str, code_raw: str) -> dict | None:
             abbr_clean = abbr_raw.replace(" ", "").upper()
             code_clean = code_raw.replace(" ", "").upper()
 
             # Some Yamaha forewords use "Colour Code | Colour Name | Abbreviation"
-            # column order (numeric code on the left, text abbreviation on the right)
-            # instead of the standard "Abbreviation | Name | Code" order.
-            # Detect by: left is purely numeric (paint code), right starts with a
-            # letter (alphabetic abbreviation).  Swap so _parse_row works uniformly.
-            _NUMERIC_CODE = re.compile(r"^\d{3,5}$")
-            _ALPHA_ABBR = re.compile(r"^[A-Z][A-Z0-9]{1,7}$")
-            if _NUMERIC_CODE.match(abbr_clean) and _ALPHA_ABBR.match(code_clean):
+            # column order (numeric code on the left, text abbreviation on the right).
+            # Detect by: left is purely numeric, right starts with a letter.
+            if _NUMERIC_CODE_RE.match(abbr_clean) and _ALPHA_ABBR_RE.match(code_clean):
                 abbr_clean, code_clean = code_clean, abbr_clean
 
             m = _ABBR_PAT.match(abbr_clean)
             if not m or m.group(1) in _HEADER_WORDS:
                 return None
+
+            abbr = m.group(1)
+            # Reject purely-numeric abbreviations (section/page numbers, quantities)
+            if abbr.isdigit():
+                return None
+            # Yamaha colour abbreviations always start with a letter (YB, CM6, SMX …)
+            if not abbr[0].isalpha():
+                return None
+            # Reject common English function words that can never be colour codes
+            if abbr in _STOP_WORDS:
+                return None
+
             if not _CODE_PAT.match(code_clean):
                 return None
+
             name = name.strip()
             if len(name) < 3:
                 return None
-            # Reject rows where "name" looks like a header or column label
             if name.upper() in _HEADER_WORDS:
                 return None
+
+            # Colour name must contain a recognisable colour word.
+            # Eliminates TOC/section rows: "CYLINDER HEAD", "FIG 1 ASSEMBLY" etc.
+            name_words = set(name.upper().split())
+            if not name_words.intersection(_COLOUR_WORDS):
+                return None
+
             return {
-                "abbreviation": m.group(1),
+                "abbreviation": abbr,
                 "name": name,
                 "code": code_clean,
                 "is_model_colour": bool(m.group(2)),
             }
 
+        def _dedup(entries: list[dict]) -> list[dict]:
+            seen: set[str] = set()
+            out: list[dict] = []
+            for e in entries:
+                key = e["abbreviation"].upper()
+                if key not in seen:
+                    seen.add(key)
+                    out.append(e)
+            return out
+
+        # Best partial result seen across all pages/strategies (handles single-colour PDFs
+        # where only 1 entry exists and ">= 3" would never trigger).
+        best_partial: list[dict] = []
+
         try:
             with _plumber.open(str(pdf_path)) as pdf:
                 for page in pdf.pages[:15]:
                     # --- Strategy 1: pdfplumber ruled-table extraction ---
+                    # Scan ALL tables on the page; keep the one with the most valid
+                    # colour entries (avoids premature return on a mixed/fake table).
+                    best_page: list[dict] = []
                     for table in page.extract_tables() or []:
-                        if not table or len(table) < 3:
+                        if not table or len(table) < 2:
                             continue
                         entries: list[dict] = []
                         for row in table:
@@ -1316,8 +1461,13 @@ class YamahaCatalogueExtractor:
                             )
                             if e:
                                 entries.append(e)
-                        if len(entries) >= 3:
-                            return entries
+                        if len(entries) > len(best_page):
+                            best_page = entries
+
+                    if len(best_page) >= 3:
+                        return _dedup(best_page)  # Confident multi-colour result
+                    if len(best_page) > len(best_partial):
+                        best_partial = best_page  # Remember for single-colour fallback
 
                     # --- Strategy 2: word-position row clustering ---
                     words = page.extract_words() or []
@@ -1358,12 +1508,16 @@ class YamahaCatalogueExtractor:
                             entries2.append(e)
 
                     if len(entries2) >= 3:
-                        return entries2
+                        return _dedup(entries2)  # Confident multi-colour result
+                    if len(entries2) > len(best_partial):
+                        best_partial = entries2
 
         except Exception:  # noqa: BLE001
             pass
 
-        return []
+        # No page produced >= 3 valid entries (single-colour PDF or non-standard layout).
+        # Return best partial so single-colour PDFs still show their one chip.
+        return _dedup(best_partial)
 
     @staticmethod
     def _extract_available_colours(pdf_path: Path) -> list[str]:
