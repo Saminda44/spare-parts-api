@@ -176,8 +176,12 @@ def extract_pdf_tables(
     }
     desc_colour_mode: bool = bool(desc_colour_hints)
 
-    # Drop optional columns (indices 5, 6, 7) when this PDF has no data in them.
+    # Drop optional columns when this PDF has no data in them.
     # nine_digit_part_no=5, escort_part_no=6, superseded_part_no=7 are market-specific.
+    # remarks=8 is dropped when the extractor's column recognition did NOT detect a
+    # Remarks column in the PDF (e.g. CRUX-S PDFs whose last column is 9 Digit Part No.).
+    # The column_layout list is the authoritative signal — it only includes "Remarks"
+    # when the extractor saw rem_start < 9000 in the column-bounds scan.
     headers: list[str] = list(DISPLAY_HEADERS)
     # Apply PDF-native labels from extractor (e.g. "Existing Part No." for ENTICER family)
     _labels = result.column_display_labels or {}
@@ -187,7 +191,8 @@ def extract_pdf_tables(
         headers[3] = _labels["description"]
     if "escort_part_no" in _labels:
         headers[6] = _labels["escort_part_no"]
-    optional_cols = [5, 6, 7]
+    _has_remarks_col = any("Remarks" in col for col in (result.column_layout or []))
+    optional_cols = [5, 6, 7] if _has_remarks_col else [5, 6, 7, 8]
     drop = [c for c in optional_cols if not any(row[c].strip() for row in rows)]
     if drop:
         keep = [i for i in range(len(headers)) if i not in drop]
