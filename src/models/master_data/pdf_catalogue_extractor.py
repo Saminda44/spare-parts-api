@@ -570,6 +570,18 @@ class YamahaCatalogueExtractor:
         if colour_codes:
             logger.info(f"{pdf_path.name}: found {len(colour_codes)} colour codes")
 
+        # Lift colour names from description parentheses (older-format PDFs that
+        # encode variants as 'DESCRIPTION (COLOUR NAME)' instead of a foreword
+        # colour table + FOR/EXCEPT remarks).  Only activates when colour_codes
+        # is empty — never overwrites a proper foreword-extracted colour table.
+        if not colour_codes:
+            rows, colour_codes = self._lift_desc_colours(rows)
+            if colour_codes:
+                logger.info(
+                    f"{pdf_path.name}: lifted {len(colour_codes)} desc-colour(s): "
+                    f"{[c['abbreviation'] for c in colour_codes]}"
+                )
+
         # Extract available colour captions from the "AVAILABLE COLOUR" page
         available_colours = self._extract_available_colours(pdf_path)
         if available_colours:
@@ -1199,6 +1211,181 @@ class YamahaCatalogueExtractor:
             vc = [t for t in texts if YamahaCatalogueExtractor._is_variant_code(t)]
             if len(vc) >= 3:
                 counter[tuple(vc)] += 1
+
+    # Colour words that MUST appear in a parenthetical description suffix for
+    # it to be treated as a colour name (not a size, spec, or functional label).
+    # Deliberately excludes "LIGHT", "DARK", "DEEP" etc. which appear in
+    # non-colour contexts ("LIGHT ON/OFF", "DEEP BORE").
+    _DESC_COLOUR_WORDS: frozenset[str] = frozenset(
+        {
+            "BLACK",
+            "WHITE",
+            "BLUE",
+            "RED",
+            "GREEN",
+            "YELLOW",
+            "ORANGE",
+            "PURPLE",
+            "PINK",
+            "BROWN",
+            "GREY",
+            "GRAY",
+            "SILVER",
+            "GOLD",
+            "CYAN",
+            "MAGENTA",
+            "TEAL",
+            "NAVY",
+            "MAROON",
+            "BEIGE",
+            "CREAM",
+            "BRONZE",
+            "COPPER",
+            "TURQUOISE",
+            "CANDY",
+            "METALLIC",
+            "MATTE",
+            "MAT",
+            "GLOSSY",
+            "PEARL",
+            "LUMINOUS",
+            "VIVID",
+        }
+    )
+
+    @classmethod
+    def _lift_desc_colours(cls: type, rows: list[dict]) -> tuple[list[dict], list[dict]]:
+        """Lift colour names from description parentheses into remarks.
+
+        Business meaning: some older Yamaha catalogues (e.g. CRUX-S PC5KA5)
+        encode colour variants as 'DESCRIPTION (COLOUR NAME)' in the
+        Description column rather than via a foreword colour table plus
+        FOR/EXCEPT remarks.  This method normalises those rows so the rest of
+        the pipeline (roster-builder, frontend filter) can treat them
+        identically to the standard FOR/EXCEPT format.
+
+        Detection rules (BOTH must hold):
+          1. The parenthetical content contains at least one word from
+             _DESC_COLOUR_WORDS (guards against size specs like "STD" /
+             "0.50MM O/S" and functional labels like "COVER").
+          2. ≥2 rows share the same (section, ref_no, base_description)
+             with *different* part numbers — the colour-variant signal.
+             A lone parenthetical e.g. 'FLAP (COVER)' is never lifted.
+
+        Side-effect on each affected row:
+          • description      → base text only (parenthetical colour stripped)
+          • remarks          → 'FOR <ABBR>'  (e.g. 'FOR YB')
+          • nine_digit_part_no → receives the old remarks value when it was
+            empty (fixes cases where the extractor mis-routed the 9-digit
+            part number into the remarks slot).
+
+        Returns:
+            (updated_rows, synthetic_colour_codes)
+            synthetic_colour_codes: [{abbreviation, name, code='',
+                                       is_model_colour=False}, ...]
+        """
+        import re
+        from collections import defaultdict
+
+        # Matches 'BASE(COLOUR)' or 'BASE (COLOUR)' with an optional trailing
+        # ' -MODEL' suffix.  Space before '(' is optional to handle cases like
+        # 'COVER TAIL ASSY.(SILVER-3)' where PDF extraction omits the space.
+        # Group 1 = base description, group 2 = parenthetical content.
+        _PAT = re.compile(r"^(.+?)\s*\(([^)]+)\)(?:\s*[-–]\s*\S+)?$")
+
+        def _is_colour_content(content: str) -> bool:
+            # Normalise hyphens/digits around colour words before checking
+            words = set(re.sub(r"[-/]", " ", content).upper().split())
+            return bool(words & cls._DESC_COLOUR_WORDS)
+
+        def _normalise_colour(content: str) -> str:
+            """Canonical form: hyphens → spaces, collapse whitespace, uppercase."""
+            return re.sub(r"\s+", " ", re.sub(r"-", " ", content).strip()).upper()
+
+        # Pass 1: parse descriptions; only keep colour-word-containing content
+        groups: dict[tuple, list[int]] = defaultdict(list)
+        parsed: dict[int, tuple[str, str]] = {}  # idx → (base_desc, normalised_colour)
+
+        for idx, row in enumerate(rows):
+            desc = row.get("description", "")
+            m = _PAT.match(desc)
+            if not m:
+                continue
+            # Strip trailing periods/spaces from base for stable group key
+            # (e.g. "COVER TAIL 1." and "COVER TAIL 1" group together).
+            base = m.group(1).strip().rstrip(". ")
+            content = m.group(2).strip()
+            if not _is_colour_content(content):
+                continue  # size spec / functional label — skip
+            norm = _normalise_colour(content)
+            key = (row.get("section", ""), row.get("ref_no", ""), base)
+            groups[key].append(idx)
+            parsed[idx] = (base, norm)
+
+        # Only groups with 2+ different part_nos are confirmed colour variants
+        variant_idxs: set[int] = set()
+        for _key, idxs in groups.items():
+            pns = {rows[i].get("part_no", "") for i in idxs}
+            if len(pns) >= 2:
+                variant_idxs.update(idxs)
+
+        if not variant_idxs:
+            return rows, []
+
+        # Collect unique normalised colour names in first-encounter order
+        seen_colours: dict[str, None] = {}
+        for idx in sorted(variant_idxs):
+            seen_colours.setdefault(parsed[idx][1], None)
+
+        # Generate short, unique abbreviations (initials of colour name words)
+        def _make_abbr(name: str, used: set[str]) -> str:
+            words = re.sub(r"[^A-Z0-9 ]", "", name).split()
+            base = "".join(w[0] if w.isalpha() else w for w in words)[:6]
+            if not base or not base[0].isalpha():
+                base = "C" + base
+            abbr = base
+            n = 2
+            while abbr in used:
+                abbr = base[:5] + str(n)
+                n += 1
+            used.add(abbr)
+            return abbr
+
+        used_abbrs: set[str] = set()
+        colour_abbr: dict[str, str] = {}
+        for cu in seen_colours:
+            colour_abbr[cu] = _make_abbr(cu, used_abbrs)
+
+        synthetic_colour_codes = [
+            {
+                "abbreviation": colour_abbr[cu],
+                "name": cu.title(),
+                "code": "",
+                "is_model_colour": False,
+            }
+            for cu in seen_colours
+        ]
+
+        # Pass 2: rewrite affected rows
+        updated: list[dict] = []
+        for idx, row in enumerate(rows):
+            if idx not in variant_idxs:
+                updated.append(row)
+                continue
+
+            base, norm_colour = parsed[idx]
+            new_row = dict(row)
+            new_row["description"] = base
+
+            # Relocate a mis-routed 9-digit value from remarks → nine_digit_part_no
+            existing_rem = new_row.get("remarks", "")
+            if existing_rem and not new_row.get("nine_digit_part_no"):
+                new_row["nine_digit_part_no"] = existing_rem
+
+            new_row["remarks"] = f"FOR {colour_abbr[norm_colour]}"
+            updated.append(new_row)
+
+        return updated, synthetic_colour_codes
 
     @staticmethod
     def _extract_manufacture_year(pdf_path: Path) -> str | None:
