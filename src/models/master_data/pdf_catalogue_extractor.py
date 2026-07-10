@@ -2097,9 +2097,13 @@ class YamahaCatalogueExtractor:
                 # Collapse "1/1/1/1" → "1" only when EVERY slot is filled identically
                 if filled and len(set(filled)) == 1 and len(filled) == n_cols:
                     qty = filled[0]
-                # Strip trailing empty slots: "1/" → "1" (defence-in-depth; the
-                # primary fix is in _detect_col_bounds de-duplication above).
-                qty = qty.rstrip("/")
+                # NOTE: do NOT rstrip("/") here.  Trailing slashes like "1/" are
+                # semantically meaningful: they signal that this part has no qty
+                # for the LAST variant(s), allowing the frontend variantQty filter
+                # to hide the row when that variant is selected.  The collapse step
+                # above already converts fully-filled identical slots ("1/1") to
+                # plain "1", so spurious trailing slashes from genuine duplicates
+                # are handled by _detect_col_bounds de-duplication instead.
                 # Pattern-based fallback for India-market PDFs where header
                 # detection failed to set nine_digit_start / superseded_start.
                 # Nine-digit part numbers are exactly 9 alphanumeric chars.
