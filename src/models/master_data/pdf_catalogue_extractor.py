@@ -1317,7 +1317,12 @@ class YamahaCatalogueExtractor:
             if not _is_colour_content(content):
                 continue  # size spec / functional label — skip
             norm = _normalise_colour(content)
-            key = (row.get("section", ""), row.get("ref_no", ""), base)
+            # Group by (section, ref_no) only — NOT by base description.
+            # Yamaha sometimes writes descriptions inconsistently between
+            # colour variants (e.g. "COVER, SIDE ASSY 1 (CANDY MAROON)"
+            # vs "COVER SIDE ASSY 1 (SILVER-3)" — comma differs).
+            # Same ref_no in the same section always means the same part.
+            key = (row.get("section", ""), row.get("ref_no", ""))
             groups[key].append(idx)
             parsed[idx] = (base, norm)
 
