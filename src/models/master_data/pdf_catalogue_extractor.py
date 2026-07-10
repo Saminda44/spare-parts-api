@@ -560,6 +560,28 @@ class YamahaCatalogueExtractor:
             warnings.append("positional extraction empty; used text fallback")
             rows, sections_seen = self._text_fallback(pdf_path)
 
+        # Post-extraction reroute: when the PDF has NO Remarks column
+        # (rem_start stays at the 9999 sentinel), any value that landed in
+        # 'remarks' was misrouted — either by the text-line fallback inside
+        # _split_after (which puts trailing tokens into remarks) or by
+        # positional ambiguity when a page's column layout differed slightly
+        # from last_bounds.  Move those values to nine_digit_part_no instead.
+        if last_bounds is not None and last_bounds.rem_start >= 9000:
+            rerouted = 0
+            for row in rows:
+                rem = (row.get("remarks") or "").strip()
+                if not rem:
+                    continue
+                if not (row.get("nine_digit_part_no") or "").strip():
+                    row["nine_digit_part_no"] = rem
+                row["remarks"] = ""
+                rerouted += 1
+            if rerouted:
+                logger.debug(
+                    f"{pdf_path.name}: rerouted {rerouted} misplaced"
+                    f" remarks→nine_digit (no remarks column in PDF)"
+                )
+
         # Resolve model variants: prefer cover-page pattern, fall back to column headers
         variants = self._resolve_variants(pdf_path, variant_counter)
         if variants:
