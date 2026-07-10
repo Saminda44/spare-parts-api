@@ -592,6 +592,24 @@ class YamahaCatalogueExtractor:
         if colour_codes:
             logger.info(f"{pdf_path.name}: found {len(colour_codes)} colour codes")
 
+        # For PDFs whose colour table uses 2-digit numeric codes (e.g. CRUX-S
+        # where 70=YAMAHA BLACK, 80=CANDY MAROON, 90=SILVER 3), identify
+        # colour-specific rows by the third segment of the part number instead
+        # of description brackets.  This is more reliable than bracket parsing
+        # and avoids false-positive colours like "BLACK GOLD" / "SILVER" that
+        # appear in model-variant description brackets but not in the paint table.
+        _suffix_map: dict[str, str] = {
+            c["code"]: c["abbreviation"].upper()
+            for c in colour_codes
+            if re.match(r"^\d{2}$", c.get("code", ""))
+        }
+        if _suffix_map:
+            rows = self._lift_suffix_colours(rows, _suffix_map)
+            _tagged = sum(1 for r in rows if r.get("colour_hint"))
+            logger.debug(
+                f"{pdf_path.name}: suffix-tagged {_tagged} rows" f" via codes {list(_suffix_map)}"
+            )
+
         # Lift colour names from description parentheses (older-format PDFs that
         # encode variants as 'DESCRIPTION (COLOUR NAME)' instead of a foreword
         # colour table + FOR/EXCEPT remarks).  Only activates when colour_codes
@@ -1275,6 +1293,37 @@ class YamahaCatalogueExtractor:
         }
     )
 
+    @staticmethod
+    def _lift_suffix_colours(
+        rows: list[dict],
+        code_suffix_map: dict[str, str],
+    ) -> list[dict]:
+        """Tag rows with colour_hint using part-number third-segment colour codes.
+
+        Business meaning: Yamaha catalogues that carry a colour code table with
+        2-digit numeric codes (e.g. CRUX-S PC5KA5: 70=YAMAHA BLACK, 80=CANDY
+        MAROON, 90=SILVER 3) encode the colour in the *third segment* of the
+        12-digit part number — e.g. '5KA-F4100-**70**-00'.  This method maps
+        that segment to the official colour abbreviation so the agent and
+        frontend can treat these rows identically to FOR/EXCEPT-remarks rows.
+
+        Only the invisible ``colour_hint`` key is added; description, remarks,
+        and nine_digit_part_no are left unchanged.
+        """
+        updated: list[dict] = []
+        for row in rows:
+            pn = (row.get("part_no") or "").strip()
+            segments = pn.split("-")
+            code = segments[2] if len(segments) >= 3 else ""
+            abbr = code_suffix_map.get(code, "")
+            if abbr:
+                new_row = dict(row)
+                new_row["colour_hint"] = abbr
+                updated.append(new_row)
+            else:
+                updated.append(row)
+        return updated
+
     @classmethod
     def _lift_desc_colours(cls: type, rows: list[dict]) -> tuple[list[dict], list[dict]]:
         """Lift colour names from description parentheses into remarks.
@@ -1463,6 +1512,8 @@ class YamahaCatalogueExtractor:
         # Paint code: Yamaha codes always start with 2+ digits and are 4-5 chars
         # (e.g. "1344", "0390", "0033", "00AL", "00V9").  Rejects pure-letter
         # strings ("THE", "PART") and short page-numbers ("01", "12").
+        # Only used for non-column-swapped rows; 2-digit codes from swapped rows
+        # (e.g. CRUX-S: "70", "80", "90") bypass this check entirely.
         _CODE_PAT = re.compile(r"^\d{2}[A-Z0-9]{2,3}$")
         # Words that indicate a header row — skip these
         _HEADER_WORDS = frozenset(
@@ -1477,8 +1528,11 @@ class YamahaCatalogueExtractor:
                 "COLOURCODE",
             }
         )
-        # Column-swap detectors (compiled once, not per-row)
-        _NUMERIC_CODE_RE = re.compile(r"^\d{3,5}$")
+        # Column-swap detectors (compiled once, not per-row).
+        # Some PDFs (e.g. CRUX-S) use 2-digit numeric codes ("70", "80") in
+        # column 0 with the abbreviation in column 2 — the standard layout is
+        # the reverse. Allowing 2-digit in _NUMERIC_CODE_RE triggers the swap.
+        _NUMERIC_CODE_RE = re.compile(r"^\d{2,5}$")
         _ALPHA_ABBR_RE = re.compile(r"^[A-Z][A-Z0-9]{1,7}$")
         # Vocabulary check: real colour names always contain at least one of these.
         # Prevents TOC/section-name rows ("CYLINDER HEAD", "FIG 1") being accepted.
@@ -1596,8 +1650,11 @@ class YamahaCatalogueExtractor:
             # Some Yamaha forewords use "Colour Code | Colour Name | Abbreviation"
             # column order (numeric code on the left, text abbreviation on the right).
             # Detect by: left is purely numeric, right starts with a letter.
+            # For 2-digit codes (e.g. CRUX-S: 70, 80, 90) the swap also applies.
+            swapped = False
             if _NUMERIC_CODE_RE.match(abbr_clean) and _ALPHA_ABBR_RE.match(code_clean):
                 abbr_clean, code_clean = code_clean, abbr_clean
+                swapped = True
 
             m = _ABBR_PAT.match(abbr_clean)
             if not m or m.group(1) in _HEADER_WORDS:
@@ -1614,7 +1671,10 @@ class YamahaCatalogueExtractor:
             if abbr in _STOP_WORDS:
                 return None
 
-            if not _CODE_PAT.match(code_clean):
+            # When the columns were swapped, code_clean is the original left numeric
+            # (e.g. "70", "1344") — always valid as-is.  Without a swap, apply the
+            # 4-5 char standard pattern so 2-digit page numbers ("46") are rejected.
+            if not swapped and not _CODE_PAT.match(code_clean):
                 return None
 
             name = name.strip()
@@ -1631,7 +1691,7 @@ class YamahaCatalogueExtractor:
 
             return {
                 "abbreviation": abbr,
-                "name": name,
+                "name": name.title(),  # "YAMAHA BLACK" → "Yamaha Black"
                 "code": code_clean,
                 "is_model_colour": bool(m.group(2)),
             }

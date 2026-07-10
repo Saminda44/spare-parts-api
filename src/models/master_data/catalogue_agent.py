@@ -851,7 +851,10 @@ class CatalogueAgent:
                         kind=kind,
                     )
 
-                    ref = pr.ref_no or pr.part_no
+                    # Key by (section, ref_no) so colour-specific parts from
+                    # different sections with the same ref number (FENDER ref=1,
+                    # FUEL TANK ref=1 etc.) are never collapsed together.
+                    ref = (pr.figure, pr.ref_no) if pr.ref_no else pr.part_no
                     by_ref.setdefault(ref, []).append(pr)
 
                 # Dedup: for rows that share a ref_no, prefer colour_specific
