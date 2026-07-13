@@ -38,6 +38,7 @@ _DEMAND_PARQUET = DATA_INTERIM / "monthly_demand.parquet"
 _ABC_XYZ_PARQUET = DATA_INTERIM / "abc_xyz_fsn.parquet"
 _FORECAST_PARQUET = DATA_INTERIM / "demand_forecast.parquet"
 _TRACKER_PARQUET = DATA_INTERIM / "stock_tracker.parquet"
+_LOCATION_PARQUET = DATA_INTERIM / "stock_location_analysis.parquet"
 _OUTPUT_XLSX = DATA_OUTPUTS / "stage11_stock_tracker.xlsx"
 _CURRENT_STOCK_RAW = DATA_RAW / "current stock.xlsx"
 _PART_MASTER_PATH = DATA_INTERIM / "part_master.parquet"
@@ -70,87 +71,121 @@ _EXCLUDED_LOCATIONS: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 
 
-def load_current_stock_snapshot() -> pd.DataFrame:
-    """Load the SAP current-stock snapshot and derive stock_on_hand per part-master SKU.
+def _parse_snapshot_raw() -> pd.DataFrame | None:
+    """Read current stock.xlsx and add normalised helper columns.
 
-    Business meaning: the SAP snapshot is the authoritative source of physical
-    inventory. Movement-based reconstruction can drift over time if the data
-    window is incomplete. This function replaces the movement-computed
-    stock_on_hand whenever the snapshot file is available.
-
-    Exclusions applied to the Description (storage location) column:
-      - "Damage"          : physically damaged stock, not available for sale
-      - "GR Unavailiable" : goods-receipt blocked stock
-      - "0020" / "0030"  : location codes with no valid label (treated as above)
-      - "Description"     : stray header row from the SAP export
-
-    Part master filter — exact part-number match only:
-      Material column must match part_master.part_number exactly.
-      Rows with no part-number match are excluded regardless of description.
-      When matched, the part master's description (not the stock file's Material
-      Description) is used as the canonical description in Inventory Status.
-
-    Returns:
-        DataFrame with columns [material_9, description, stock_on_hand, stock_value_lkr].
-        Empty DataFrame if the snapshot file or part master is missing.
+    Returns None when the file is absent so callers can skip cleanly.
+    Adds columns: _desc (location label), _mat (material code),
+    _unrestricted (qty as float), _value (LKR as float).
     """
     if not _CURRENT_STOCK_RAW.exists():
         logger.info("current stock.xlsx not found — snapshot skipped")
-        return pd.DataFrame()
+        return None
+    logger.info(f"Loading current stock snapshot from {_CURRENT_STOCK_RAW}")
+    raw = pd.read_excel(_CURRENT_STOCK_RAW, engine="openpyxl")
+    logger.info(f"Snapshot: {len(raw):,} rows (all locations)")
+
+    raw["_desc"] = raw["Description"].astype(str).str.strip()
+    raw["_mat"] = raw["Material"].astype(str).str.strip()
+    raw["_unrestricted"] = (
+        raw["Unrestricted"]
+        .astype(str)
+        .str.replace(",", ".", regex=False)
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+    )
+    # European format "1.234,56" → 1234.56
+    raw["_value"] = (
+        raw["Value Unrestricted"]
+        .astype(str)
+        .str.replace(".", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+    )
+    return raw
+
+
+def compute_location_analysis(raw: pd.DataFrame) -> pd.DataFrame:
+    """Build a stock-by-location summary from the full unfiltered snapshot.
+
+    Business meaning: shows how total SAP stock is distributed across storage
+    location types — including Damage, GR-unavailable, and other excluded
+    locations — so analysts can see the complete picture alongside the active
+    (policy-eligible) stock. The is_excluded flag marks which location types
+    are removed from the active inventory calculation.
+
+    Args:
+        raw: output of _parse_snapshot_raw() (must have _desc, _mat,
+             _unrestricted, _value columns).
+
+    Returns:
+        DataFrame with columns [description, qty, value_lkr, sku_count,
+        is_excluded], sorted by qty descending.
+    """
+    agg = (
+        raw.groupby("_desc", sort=False)
+        .agg(
+            qty=("_unrestricted", "sum"),
+            value_lkr=("_value", "sum"),
+            sku_count=("_mat", "nunique"),
+        )
+        .reset_index()
+        .rename(columns={"_desc": "description"})
+    )
+    agg["is_excluded"] = agg["description"].isin(_EXCLUDED_LOCATIONS)
+    return agg.sort_values("qty", ascending=False).reset_index(drop=True)
+
+
+def load_current_stock_snapshot(raw: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Derive active stock_on_hand per part-master SKU from the SAP snapshot.
+
+    Business meaning: the SAP snapshot is the authoritative source of physical
+    inventory. Excludes non-usable locations (Damage, GR-unavailable, etc.) and
+    restricts to parts whose material code appears in the part master. The part
+    master's description is used as the canonical description in Inventory Status.
+
+    Args:
+        raw: pre-parsed snapshot from _parse_snapshot_raw(). When None the
+             function reads and parses the file itself (used for standalone calls).
+
+    Returns:
+        DataFrame with columns [material_9, description, stock_on_hand,
+        stock_value_lkr]. Empty DataFrame if file or part master is absent.
+    """
+    if raw is None:
+        raw = _parse_snapshot_raw()
+        if raw is None:
+            return pd.DataFrame()
+
     if not _PART_MASTER_PATH.exists():
         logger.warning(
-            "part_master.parquet not found — cannot apply part master filter; snapshot skipped"
+            "part_master.parquet not found — cannot apply part master filter; " "snapshot skipped"
         )
         return pd.DataFrame()
 
-    logger.info(f"Loading current stock snapshot from {_CURRENT_STOCK_RAW}")
-    raw = pd.read_excel(_CURRENT_STOCK_RAW, engine="openpyxl")
     n_raw = len(raw)
-    logger.info(f"Snapshot: {n_raw:,} rows (all locations)")
 
     # 1. Exclude non-usable storage locations
-    raw["_desc"] = raw["Description"].astype(str).str.strip()
     filtered = raw[~raw["_desc"].isin(_EXCLUDED_LOCATIONS)].copy()
     n_dropped_loc = n_raw - len(filtered)
     logger.info(
         f"Location filter: dropped {n_dropped_loc:,} rows "
         f"(Damage / GR-unavailable / internal) → {len(filtered):,} remaining"
     )
-
     if filtered.empty:
         logger.warning("Snapshot empty after location filter")
         return pd.DataFrame()
 
-    # 2. Normalise material code and parse quantities / values
-    filtered["mat_clean"] = filtered["Material"].astype(str).str.strip()
-
-    # Unrestricted qty: typically integer but guard against European decimal
-    filtered["_unrestricted"] = (
-        filtered["Unrestricted"]
-        .astype(str)
-        .str.replace(",", ".", regex=False)
-        .pipe(pd.to_numeric, errors="coerce")
-        .fillna(0.0)
-    )
-
-    # Value Unrestricted: European format "1.234,56" → 1234.56
-    filtered["_value"] = (
-        filtered["Value Unrestricted"]
-        .astype(str)
-        .str.replace(".", "", regex=False)  # strip thousands separator
-        .str.replace(",", ".", regex=False)  # decimal comma → period
-        .pipe(pd.to_numeric, errors="coerce")
-        .fillna(0.0)
-    )
-
-    # 3. Load part master — part_number and description only
+    # 2. Load part master
     pm = pd.read_parquet(_PART_MASTER_PATH)[["part_number", "description"]].copy()
     pm["part_number"] = pm["part_number"].astype(str).str.strip()
     pm["description"] = pm["description"].astype(str).str.strip()
 
-    # 4. Exact part-number match only — no description fallback
+    # 3. Exact part-number match only — no description fallback
     pm_part_set: set[str] = set(pm["part_number"])
-    filtered["matched_part"] = filtered["mat_clean"].where(filtered["mat_clean"].isin(pm_part_set))
+    filtered = filtered.copy()
+    filtered["matched_part"] = filtered["_mat"].where(filtered["_mat"].isin(pm_part_set))
 
     n_matched = int(filtered["matched_part"].notna().sum())
     n_no_match = int(filtered["matched_part"].isna().sum())
@@ -159,13 +194,12 @@ def load_current_stock_snapshot() -> pd.DataFrame:
         f"| {n_no_match:,} excluded (not in master)"
     )
 
-    # 5. Inner join — drop rows with no part-number match
     matched = filtered[filtered["matched_part"].notna()].copy()
     if matched.empty:
         logger.warning("No rows survived part master filter — check material codes")
         return pd.DataFrame()
 
-    # 6. Aggregate per part_number; bring in part master description
+    # 4. Aggregate per part_number; attach canonical part master description
     snap = (
         matched.groupby("matched_part", sort=False)
         .agg(
@@ -178,7 +212,6 @@ def load_current_stock_snapshot() -> pd.DataFrame:
     snap["stock_on_hand"] = snap["stock_on_hand"].clip(lower=0.0)
     snap["stock_value_lkr"] = snap["stock_value_lkr"].clip(lower=0.0)
 
-    # Attach part master description so it is used as-is in Inventory Status
     pm_desc_map = pm.set_index("part_number")["description"].to_dict()
     snap["description"] = snap["material_9"].map(pm_desc_map)
 
@@ -576,8 +609,18 @@ def run(refresh: bool = False) -> None:
     ]
     audit = movement_pos[[c for c in _audit_cols if c in movement_pos.columns]].copy()
 
+    # Read the snapshot once; use it for both location analysis and stock positions
+    _raw_snap = _parse_snapshot_raw() if _CURRENT_STOCK_RAW.exists() else None
+    if _raw_snap is not None:
+        loc_analysis = compute_location_analysis(_raw_snap)
+        loc_analysis.to_parquet(_LOCATION_PARQUET, index=False)
+        logger.info(
+            f"Location analysis saved → {_LOCATION_PARQUET} "
+            f"({len(loc_analysis):,} location types)"
+        )
+
     # Use SAP snapshot as the authoritative source for stock_on_hand / stock_value_lkr
-    snap = load_current_stock_snapshot()
+    snap = load_current_stock_snapshot(_raw_snap)
     if not snap.empty:
         # Snapshot is the leading frame; movement audit columns are merged in
         stock_pos = snap.merge(audit, on="material_9", how="left")

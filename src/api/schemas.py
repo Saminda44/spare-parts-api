@@ -150,6 +150,14 @@ class MonthlyDemandPoint(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class LocationRow(BaseModel):
+    description: str
+    qty: float
+    value_lkr: float
+    sku_count: int
+    is_excluded: bool
+
+
 class InventoryRow(BaseModel):
     material_9: str
     description: str
