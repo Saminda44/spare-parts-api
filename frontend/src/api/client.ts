@@ -131,6 +131,14 @@ export interface InventoryRow {
   last_movement_date: string | null;
 }
 
+export interface LocationRow {
+  description: string;
+  qty: number;
+  value_lkr: number;
+  sku_count: number;
+  is_excluded: boolean;
+}
+
 export interface AtRiskRow {
   material_9: string;
   description: string;
@@ -258,6 +266,9 @@ export const fetchAtRisk = (limit = 50) =>
 
 export const fetchExcess = (limit = 100) =>
   api.get<ExcessRow[]>("/inventory/excess", { params: { limit } }).then(r => r.data);
+
+export const fetchStockByLocation = () =>
+  api.get<LocationRow[]>("/inventory/stock-by-location").then(r => r.data);
 
 export const fetchPolicy = (params?: Record<string, unknown>) =>
   api.get<{ total: number; rows: PolicyRow[]; urgency_counts: Record<string, number>; tier_counts: Record<string, number>; ss_method_counts: Record<string, number> }>("/policy", { params }).then(r => r.data);

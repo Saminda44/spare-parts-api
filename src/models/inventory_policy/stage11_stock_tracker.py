@@ -1,21 +1,27 @@
 """Stage 11 — Stock Tracker: current stock position per SKU.
 
 Inputs:
-  data/interim/stock_movements.parquet  — full movement history (Stage 7)
-  data/interim/monthly_demand.parquet   — per-SKU monthly demand (Stage 7)
-  data/interim/abc_xyz_fsn.parquet      — per-SKU classification (Stage 9)
-  data/interim/demand_forecast.parquet  — per-SKU 3-month forecasts (Stage 10)
+  data/raw/current stock.xlsx            — SAP stock snapshot (primary source)
+  data/interim/stock_movements.parquet   — full movement history (Stage 7, audit cols)
+  data/interim/monthly_demand.parquet    — per-SKU monthly demand (Stage 7)
+  data/interim/abc_xyz_fsn.parquet       — per-SKU classification (Stage 9)
+  data/interim/demand_forecast.parquet   — per-SKU 3-month forecasts (Stage 10)
 
 Outputs:
   data/interim/stock_tracker.parquet        — per-SKU stock position (→ Stage 12)
   data/outputs/stage11_stock_tracker.xlsx   — 6-sheet Excel report
 
-Stock position is derived from the cumulative net of all non-transfer movements:
-  +qty: receipts, customer returns, positive adjustments, issue reversals
-  -qty: issues, return-to-vendor, scrap, negative adjustments
+When data/raw/current stock.xlsx is present it is used as the authoritative
+source of stock_on_hand and stock_value_lkr (SAP snapshot is more accurate than
+cumulative-movement reconstruction). Damage, GR-unavailable, and internal
+transfer locations are excluded from the snapshot. Only parts that appear in the
+part master (by material number first, description fallback) are included.
 
-Coverage is stock_on_hand / avg_monthly_demand (months of supply on hand).
-At-risk SKUs have coverage < lead time (3 months); excess SKUs have coverage > 6 months.
+Movement history (total_receipts, total_issues, last_movement_date) is always
+sourced from stock_movements.parquet and merged in on top of the snapshot.
+
+When the snapshot file is absent the pipeline falls back to the original
+cumulative-movement approach.
 """
 
 from __future__ import annotations
@@ -25,29 +31,201 @@ import pandas as pd
 from loguru import logger
 
 from src.config.constants import LEAD_TIME_DAYS
-from src.config.paths import DATA_INTERIM, DATA_OUTPUTS
+from src.config.paths import DATA_INTERIM, DATA_OUTPUTS, DATA_RAW
 
-_MOVEMENTS_PARQUET  = DATA_INTERIM / "stock_movements.parquet"
-_DEMAND_PARQUET     = DATA_INTERIM / "monthly_demand.parquet"
-_ABC_XYZ_PARQUET    = DATA_INTERIM / "abc_xyz_fsn.parquet"
-_FORECAST_PARQUET   = DATA_INTERIM / "demand_forecast.parquet"
-_TRACKER_PARQUET    = DATA_INTERIM / "stock_tracker.parquet"
-_OUTPUT_XLSX        = DATA_OUTPUTS / "stage11_stock_tracker.xlsx"
+_MOVEMENTS_PARQUET = DATA_INTERIM / "stock_movements.parquet"
+_DEMAND_PARQUET = DATA_INTERIM / "monthly_demand.parquet"
+_ABC_XYZ_PARQUET = DATA_INTERIM / "abc_xyz_fsn.parquet"
+_FORECAST_PARQUET = DATA_INTERIM / "demand_forecast.parquet"
+_TRACKER_PARQUET = DATA_INTERIM / "stock_tracker.parquet"
+_LOCATION_PARQUET = DATA_INTERIM / "stock_location_analysis.parquet"
+_OUTPUT_XLSX = DATA_OUTPUTS / "stage11_stock_tracker.xlsx"
+_CURRENT_STOCK_RAW = DATA_RAW / "current stock.xlsx"
+_PART_MASTER_PATH = DATA_INTERIM / "part_master.parquet"
 
 # Business thresholds
-_LEAD_TIME_MONTHS: int = LEAD_TIME_DAYS // 30          # 3 months
-_EXCESS_MONTHS: int = 6                                 # coverage above this = excess
-_CRITICAL_MONTHS: float = 1.0                           # coverage below this = critical
+_LEAD_TIME_MONTHS: int = LEAD_TIME_DAYS // 30  # 3 months
+_EXCESS_MONTHS: int = 6  # coverage above this = excess
+_CRITICAL_MONTHS: float = 1.0  # coverage below this = critical
 
 # Movement classes that represent internal plant-to-plant transfers — excluded
 # from stock position because they net to zero across the whole distribution centre
 # and double-counting them would distort on-hand balances.
 _TRANSFER_CLASSES: frozenset[str] = frozenset({"transfer"})
 
+# Storage location descriptions in current stock.xlsx that represent non-usable
+# or in-transit stock and must be excluded from on-hand balances.
+_EXCLUDED_LOCATIONS: frozenset[str] = frozenset(
+    {
+        "Description",  # stray header row
+        "Damage",
+        "GR Unavailiable",  # intentional: matches the typo present in the SAP export
+        "0020",
+        "0030",
+    }
+)
+
+
+# ---------------------------------------------------------------------------
+# SAP snapshot ingestion (current stock.xlsx)
+# ---------------------------------------------------------------------------
+
+
+def _parse_snapshot_raw() -> pd.DataFrame | None:
+    """Read current stock.xlsx and add normalised helper columns.
+
+    Returns None when the file is absent so callers can skip cleanly.
+    Adds columns: _desc (location label), _mat (material code),
+    _unrestricted (qty as float), _value (LKR as float).
+    """
+    if not _CURRENT_STOCK_RAW.exists():
+        logger.info("current stock.xlsx not found — snapshot skipped")
+        return None
+    logger.info(f"Loading current stock snapshot from {_CURRENT_STOCK_RAW}")
+    raw = pd.read_excel(_CURRENT_STOCK_RAW, engine="openpyxl")
+    logger.info(f"Snapshot: {len(raw):,} rows (all locations)")
+
+    raw["_desc"] = raw["Description"].astype(str).str.strip()
+    raw["_mat"] = raw["Material"].astype(str).str.strip()
+    raw["_unrestricted"] = (
+        raw["Unrestricted"]
+        .astype(str)
+        .str.replace(",", ".", regex=False)
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+    )
+    # European format "1.234,56" → 1234.56
+    raw["_value"] = (
+        raw["Value Unrestricted"]
+        .astype(str)
+        .str.replace(".", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+    )
+    return raw
+
+
+def compute_location_analysis(raw: pd.DataFrame) -> pd.DataFrame:
+    """Build a stock-by-location summary from the full unfiltered snapshot.
+
+    Business meaning: shows how total SAP stock is distributed across storage
+    location types — including Damage, GR-unavailable, and other excluded
+    locations — so analysts can see the complete picture alongside the active
+    (policy-eligible) stock. The is_excluded flag marks which location types
+    are removed from the active inventory calculation.
+
+    Args:
+        raw: output of _parse_snapshot_raw() (must have _desc, _mat,
+             _unrestricted, _value columns).
+
+    Returns:
+        DataFrame with columns [description, qty, value_lkr, sku_count,
+        is_excluded], sorted by qty descending.
+    """
+    agg = (
+        raw.groupby("_desc", sort=False)
+        .agg(
+            qty=("_unrestricted", "sum"),
+            value_lkr=("_value", "sum"),
+            sku_count=("_mat", "nunique"),
+        )
+        .reset_index()
+        .rename(columns={"_desc": "description"})
+    )
+    agg["is_excluded"] = agg["description"].isin(_EXCLUDED_LOCATIONS)
+    return agg.sort_values("qty", ascending=False).reset_index(drop=True)
+
+
+def load_current_stock_snapshot(raw: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Derive active stock_on_hand per part-master SKU from the SAP snapshot.
+
+    Business meaning: the SAP snapshot is the authoritative source of physical
+    inventory. Excludes non-usable locations (Damage, GR-unavailable, etc.) and
+    restricts to parts whose material code appears in the part master. The part
+    master's description is used as the canonical description in Inventory Status.
+
+    Args:
+        raw: pre-parsed snapshot from _parse_snapshot_raw(). When None the
+             function reads and parses the file itself (used for standalone calls).
+
+    Returns:
+        DataFrame with columns [material_9, description, stock_on_hand,
+        stock_value_lkr]. Empty DataFrame if file or part master is absent.
+    """
+    if raw is None:
+        raw = _parse_snapshot_raw()
+        if raw is None:
+            return pd.DataFrame()
+
+    if not _PART_MASTER_PATH.exists():
+        logger.warning(
+            "part_master.parquet not found — cannot apply part master filter; " "snapshot skipped"
+        )
+        return pd.DataFrame()
+
+    n_raw = len(raw)
+
+    # 1. Exclude non-usable storage locations
+    filtered = raw[~raw["_desc"].isin(_EXCLUDED_LOCATIONS)].copy()
+    n_dropped_loc = n_raw - len(filtered)
+    logger.info(
+        f"Location filter: dropped {n_dropped_loc:,} rows "
+        f"(Damage / GR-unavailable / internal) → {len(filtered):,} remaining"
+    )
+    if filtered.empty:
+        logger.warning("Snapshot empty after location filter")
+        return pd.DataFrame()
+
+    # 2. Load part master
+    pm = pd.read_parquet(_PART_MASTER_PATH)[["part_number", "description"]].copy()
+    pm["part_number"] = pm["part_number"].astype(str).str.strip()
+    pm["description"] = pm["description"].astype(str).str.strip()
+
+    # 3. Exact part-number match only — no description fallback
+    pm_part_set: set[str] = set(pm["part_number"])
+    filtered = filtered.copy()
+    filtered["matched_part"] = filtered["_mat"].where(filtered["_mat"].isin(pm_part_set))
+
+    n_matched = int(filtered["matched_part"].notna().sum())
+    n_no_match = int(filtered["matched_part"].isna().sum())
+    logger.info(
+        f"Part master join (exact part-number): {n_matched:,} rows matched "
+        f"| {n_no_match:,} excluded (not in master)"
+    )
+
+    matched = filtered[filtered["matched_part"].notna()].copy()
+    if matched.empty:
+        logger.warning("No rows survived part master filter — check material codes")
+        return pd.DataFrame()
+
+    # 4. Aggregate per part_number; attach canonical part master description
+    snap = (
+        matched.groupby("matched_part", sort=False)
+        .agg(
+            stock_on_hand=("_unrestricted", "sum"),
+            stock_value_lkr=("_value", "sum"),
+        )
+        .reset_index()
+        .rename(columns={"matched_part": "material_9"})
+    )
+    snap["stock_on_hand"] = snap["stock_on_hand"].clip(lower=0.0)
+    snap["stock_value_lkr"] = snap["stock_value_lkr"].clip(lower=0.0)
+
+    pm_desc_map = pm.set_index("part_number")["description"].to_dict()
+    snap["description"] = snap["material_9"].map(pm_desc_map)
+
+    logger.info(
+        f"Snapshot aggregated: {len(snap):,} unique SKUs "
+        f"| with stock: {(snap['stock_on_hand'] > 0).sum():,}"
+    )
+    return snap
+
 
 # ---------------------------------------------------------------------------
 # Stock position
 # ---------------------------------------------------------------------------
+
 
 def compute_stock_position(movements: pd.DataFrame) -> pd.DataFrame:
     """Derive current stock on hand per SKU from cumulative net movements.
@@ -75,15 +253,15 @@ def compute_stock_position(movements: pd.DataFrame) -> pd.DataFrame:
 
     # Tag individual movement types for audit columns
     receipts = movements[movements["movement_class"].isin({"receipt", "issue_rev"})].copy()
-    issues   = movements[movements["movement_class"].isin({"issue"})].copy()
-    returns  = movements[movements["movement_class"].isin({"return"})].copy()
+    issues = movements[movements["movement_class"].isin({"issue"})].copy()
+    returns = movements[movements["movement_class"].isin({"return"})].copy()
 
     def _abs_agg(sub: pd.DataFrame, col: str) -> pd.Series:
         return sub.groupby("material_9")["qty"].apply(lambda x: abs(x).sum()).rename(col)
 
-    rec_agg  = _abs_agg(receipts, "total_receipts")
-    iss_agg  = _abs_agg(issues,   "total_issues")
-    ret_agg  = _abs_agg(returns,  "total_returns")
+    rec_agg = _abs_agg(receipts, "total_receipts")
+    iss_agg = _abs_agg(issues, "total_issues")
+    ret_agg = _abs_agg(returns, "total_returns")
 
     # Net stock position: sum of signed qty across all non-transfer movements
     net = (
@@ -100,7 +278,8 @@ def compute_stock_position(movements: pd.DataFrame) -> pd.DataFrame:
     n_negative = (net["stock_on_hand"] < 0).sum()
     if n_negative > 0:
         logger.warning(
-            f"{n_negative:,} SKUs have negative computed stock (opening balance not in data) — clipped to 0"
+            f"{n_negative:,} SKUs have negative computed stock "
+            f"(opening balance not in data) — clipped to 0"
         )
     net["stock_on_hand"] = net["stock_on_hand"].clip(lower=0.0)
     net["stock_value_lkr"] = net["stock_value_lkr"].clip(lower=0.0)
@@ -122,6 +301,7 @@ def compute_stock_position(movements: pd.DataFrame) -> pd.DataFrame:
 # Coverage & risk classification
 # ---------------------------------------------------------------------------
 
+
 def compute_coverage(
     stock_pos: pd.DataFrame,
     classified: pd.DataFrame,
@@ -142,23 +322,42 @@ def compute_coverage(
         stock_pos enriched with classification and coverage columns.
     """
     cls_cols = [
-        "material_9", "description", "abc", "xyz", "fsn", "abc_xyz_fsn",
-        "policy_tier", "avg_monthly_demand", "cv", "active_months",
+        "material_9",
+        "description",
+        "abc",
+        "xyz",
+        "fsn",
+        "abc_xyz_fsn",
+        "policy_tier",
+        "avg_monthly_demand",
+        "cv",
+        "active_months",
         "total_issue_value_lkr",
     ]
     fc_cols = [
-        "material_9", "forecast_lt", "forecast_m1", "forecast_m2", "forecast_m3",
-        "demand_std_monthly", "demand_std_lt", "method",
+        "material_9",
+        "forecast_lt",
+        "forecast_m1",
+        "forecast_m2",
+        "forecast_m3",
+        "demand_std_monthly",
+        "demand_std_lt",
+        "method",
     ]
     cls_sub = classified[[c for c in cls_cols if c in classified.columns]].copy()
-    fc_sub  = forecast[[c for c in fc_cols if c in forecast.columns]].copy()
+    fc_sub = forecast[[c for c in fc_cols if c in forecast.columns]].copy()
+
+    # When the snapshot already supplies the part master description, drop it
+    # from cls_sub so the snapshot value is preserved rather than overwritten.
+    if "description" in stock_pos.columns and stock_pos["description"].notna().any():
+        cls_sub = cls_sub.drop(columns=["description"], errors="ignore")
 
     df = stock_pos.merge(cls_sub, on="material_9", how="left")
     df = df.merge(fc_sub, on="material_9", how="left")
 
     df["avg_monthly_demand"] = df["avg_monthly_demand"].fillna(0.0)
-    df["forecast_lt"]        = df["forecast_lt"].fillna(0.0)
-    df["demand_std_lt"]      = df["demand_std_lt"].fillna(0.0)
+    df["forecast_lt"] = df["forecast_lt"].fillna(0.0)
+    df["demand_std_lt"] = df["demand_std_lt"].fillna(0.0)
 
     # Coverage = months of supply on hand
     demand_for_cov = df["avg_monthly_demand"].clip(lower=1e-9)
@@ -167,7 +366,7 @@ def compute_coverage(
     # SKUs with zero demand and zero stock → 0 coverage; zero demand but some stock → 999
     zero_demand = df["avg_monthly_demand"] == 0.0
     df.loc[zero_demand & (df["stock_on_hand"] == 0.0), "coverage_months"] = 0.0
-    df.loc[zero_demand & (df["stock_on_hand"] > 0.0),  "coverage_months"] = 999.0
+    df.loc[zero_demand & (df["stock_on_hand"] > 0.0), "coverage_months"] = 999.0
 
     df["days_of_stock"] = (df["coverage_months"] * 30.0).round(0).astype(int)
 
@@ -206,6 +405,7 @@ def classify_stock_status(df: pd.DataFrame) -> pd.DataFrame:
 # Report slices
 # ---------------------------------------------------------------------------
 
+
 def risk_report(df: pd.DataFrame) -> pd.DataFrame:
     """SKUs at replenishment risk: coverage below lead time (< 3 months).
 
@@ -230,32 +430,31 @@ def excess_report(df: pd.DataFrame) -> pd.DataFrame:
     Business meaning: slow-moving overstock ties up working capital. These
     items should have order quantity reduced or deferred in the next cycle.
     """
-    excess = df[
-        (df["stock_status"] == "excess")
-        & (df["stock_on_hand"] > 0.0)
-    ].copy()
+    excess = df[(df["stock_status"] == "excess") & (df["stock_on_hand"] > 0.0)].copy()
     excess = excess.sort_values("coverage_months", ascending=False).reset_index(drop=True)
     logger.info(f"Excess-stock SKUs (coverage > {_EXCESS_MONTHS} months): {len(excess):,}")
     return excess
 
 
-def summary_kpis(df: pd.DataFrame) -> dict:
+def summary_kpis(df: pd.DataFrame) -> dict[str, object]:
     """Headline KPIs for the stock tracker dashboard."""
     status_counts = df["stock_status"].value_counts().to_dict()
     active = df[df["avg_monthly_demand"] > 0.0]
     return {
-        "Total SKUs":                   len(df),
-        "SKUs with Stock":              int((df["stock_on_hand"] > 0).sum()),
-        "Stockout SKUs":                int(status_counts.get("stockout", 0)),
-        "Critical SKUs (< 1 month)":    int(status_counts.get("critical", 0)),
-        "Low Stock SKUs (< 3 months)":  int(status_counts.get("low", 0)),
-        "OK SKUs (3–6 months)":         int(status_counts.get("ok", 0)),
-        "Excess SKUs (> 6 months)":     int(status_counts.get("excess", 0)),
-        "Total Stock Value (LKR)":      float(df["stock_value_lkr"].sum()),
-        "Active SKUs":                  int(len(active)),
+        "Total SKUs": len(df),
+        "SKUs with Stock": int((df["stock_on_hand"] > 0).sum()),
+        "Stockout SKUs": int(status_counts.get("stockout", 0)),
+        "Critical SKUs (< 1 month)": int(status_counts.get("critical", 0)),
+        "Low Stock SKUs (< 3 months)": int(status_counts.get("low", 0)),
+        "OK SKUs (3–6 months)": int(status_counts.get("ok", 0)),
+        "Excess SKUs (> 6 months)": int(status_counts.get("excess", 0)),
+        "Total Stock Value (LKR)": float(df["stock_value_lkr"].sum()),
+        "Active SKUs": int(len(active)),
         "Avg Coverage (active, months)": float(
             active["coverage_months"].replace(999.0, np.nan).mean()
-        ) if len(active) > 0 else 0.0,
+        )
+        if len(active) > 0
+        else 0.0,
         "At-risk SKUs (< lead time)": int(
             df["stock_status"].isin({"stockout", "critical", "low"}).sum()
         ),
@@ -269,8 +468,7 @@ def top_stockout_risk(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
         & (df["stock_status"].isin({"stockout", "critical", "low"}))
     ].copy()
     return (
-        active_at_risk
-        .sort_values(["abc", "coverage_months"], ascending=[True, True])
+        active_at_risk.sort_values(["abc", "coverage_months"], ascending=[True, True])
         .head(top_n)
         .reset_index(drop=True)
     )
@@ -280,31 +478,52 @@ def top_stockout_risk(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
 # Excel writer
 # ---------------------------------------------------------------------------
 
+
 def _write_excel(
     df: pd.DataFrame,
-    kpis: dict,
+    kpis: dict[str, object],
     risk: pd.DataFrame,
     excess: pd.DataFrame,
     top_risk: pd.DataFrame,
 ) -> None:
     """Write a 6-sheet Excel report."""
     report_cols = [
-        "material_9", "description", "abc", "xyz", "fsn", "abc_xyz_fsn",
-        "policy_tier", "stock_on_hand", "stock_value_lkr", "coverage_months",
-        "days_of_stock", "stock_status", "avg_monthly_demand",
-        "forecast_lt", "forecast_m1", "forecast_m2", "forecast_m3",
-        "demand_std_monthly", "demand_std_lt", "method",
-        "total_receipts", "total_issues", "total_returns",
-        "last_movement_date", "active_months",
+        "material_9",
+        "description",
+        "abc",
+        "xyz",
+        "fsn",
+        "abc_xyz_fsn",
+        "policy_tier",
+        "stock_on_hand",
+        "stock_value_lkr",
+        "coverage_months",
+        "days_of_stock",
+        "stock_status",
+        "avg_monthly_demand",
+        "forecast_lt",
+        "forecast_m1",
+        "forecast_m2",
+        "forecast_m3",
+        "demand_std_monthly",
+        "demand_std_lt",
+        "method",
+        "total_receipts",
+        "total_issues",
+        "total_returns",
+        "last_movement_date",
+        "active_months",
     ]
     summary_cols = [c for c in report_cols if c in df.columns]
 
     with pd.ExcelWriter(_OUTPUT_XLSX, engine="xlsxwriter") as writer:
         wb = writer.book
-        hdr_fmt  = wb.add_format({"bold": True, "bg_color": "#1F4E79", "font_color": "white", "border": 1})
-        num_fmt  = wb.add_format({"num_format": "#,##0.0"})
-        int_fmt  = wb.add_format({"num_format": "#,##0"})
-        pct_fmt  = wb.add_format({"num_format": "0.0%"})
+        hdr_fmt = wb.add_format(
+            {"bold": True, "bg_color": "#1F4E79", "font_color": "white", "border": 1}
+        )
+        wb.add_format({"num_format": "#,##0.0"})
+        wb.add_format({"num_format": "#,##0"})
+        wb.add_format({"num_format": "0.0%"})
 
         def _write_sheet(data: pd.DataFrame, name: str) -> None:
             data.to_excel(writer, sheet_name=name, index=False)
@@ -313,9 +532,7 @@ def _write_excel(
             ws.set_column(0, len(data.columns) - 1, 18)
 
         # Sheet 1: KPI summary
-        kpi_df = pd.DataFrame(
-            [{"KPI": k, "Value": v} for k, v in kpis.items()]
-        )
+        kpi_df = pd.DataFrame([{"KPI": k, "Value": v} for k, v in kpis.items()])
         kpi_df.to_excel(writer, sheet_name="Summary KPIs", index=False)
         ws = writer.sheets["Summary KPIs"]
         ws.set_row(0, 18, hdr_fmt)
@@ -327,15 +544,23 @@ def _write_excel(
 
         # Sheet 3: At-risk SKUs
         risk_out = [c for c in summary_cols if c in risk.columns]
-        _write_sheet(risk[risk_out] if not risk.empty else pd.DataFrame(columns=risk_out), "At-Risk SKUs")
+        _write_sheet(
+            risk[risk_out] if not risk.empty else pd.DataFrame(columns=risk_out), "At-Risk SKUs"
+        )
 
         # Sheet 4: Excess stock
         excess_out = [c for c in summary_cols if c in excess.columns]
-        _write_sheet(excess[excess_out] if not excess.empty else pd.DataFrame(columns=excess_out), "Excess Stock")
+        _write_sheet(
+            excess[excess_out] if not excess.empty else pd.DataFrame(columns=excess_out),
+            "Excess Stock",
+        )
 
         # Sheet 5: Top stockout risk
         top_out = [c for c in summary_cols if c in top_risk.columns]
-        _write_sheet(top_risk[top_out] if not top_risk.empty else pd.DataFrame(columns=top_out), "Top Stockout Risk")
+        _write_sheet(
+            top_risk[top_out] if not top_risk.empty else pd.DataFrame(columns=top_out),
+            "Top Stockout Risk",
+        )
 
         # Sheet 6: Status distribution
         status_dist = (
@@ -353,6 +578,7 @@ def _write_excel(
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+
 def run(refresh: bool = False) -> None:
     """Stage 11: Stock Tracker — compute and report current stock positions."""
     if not refresh and _TRACKER_PARQUET.exists():
@@ -362,9 +588,9 @@ def run(refresh: bool = False) -> None:
     logger.info("Stage 11: Stock Tracker")
 
     # Load inputs
-    movements  = pd.read_parquet(_MOVEMENTS_PARQUET)
+    movements = pd.read_parquet(_MOVEMENTS_PARQUET)
     classified = pd.read_parquet(_ABC_XYZ_PARQUET)
-    forecast   = pd.read_parquet(_FORECAST_PARQUET)
+    forecast = pd.read_parquet(_FORECAST_PARQUET)
 
     logger.info(
         f"Movements: {len(movements):,} rows | "
@@ -372,15 +598,50 @@ def run(refresh: bool = False) -> None:
         f"Forecasts: {len(forecast):,} SKUs"
     )
 
-    # Core computation
-    stock_pos = compute_stock_position(movements)
-    df        = compute_coverage(stock_pos, classified, forecast)
-    df        = classify_stock_status(df)
+    # Movement-based aggregates — always computed for audit columns
+    movement_pos = compute_stock_position(movements)
+    _audit_cols = [
+        "material_9",
+        "last_movement_date",
+        "total_receipts",
+        "total_issues",
+        "total_returns",
+    ]
+    audit = movement_pos[[c for c in _audit_cols if c in movement_pos.columns]].copy()
+
+    # Read the snapshot once; use it for both location analysis and stock positions
+    _raw_snap = _parse_snapshot_raw() if _CURRENT_STOCK_RAW.exists() else None
+    if _raw_snap is not None:
+        loc_analysis = compute_location_analysis(_raw_snap)
+        loc_analysis.to_parquet(_LOCATION_PARQUET, index=False)
+        logger.info(
+            f"Location analysis saved → {_LOCATION_PARQUET} "
+            f"({len(loc_analysis):,} location types)"
+        )
+
+    # Use SAP snapshot as the authoritative source for stock_on_hand / stock_value_lkr
+    snap = load_current_stock_snapshot(_raw_snap)
+    if not snap.empty:
+        # Snapshot is the leading frame; movement audit columns are merged in
+        stock_pos = snap.merge(audit, on="material_9", how="left")
+        for col in ("total_receipts", "total_issues", "total_returns"):
+            if col in stock_pos.columns:
+                stock_pos[col] = stock_pos[col].fillna(0.0)
+        logger.info(
+            f"Stock source: SAP snapshot ({len(snap):,} SKUs) "
+            f"enriched with movement audit columns"
+        )
+    else:
+        logger.info("Stock source: movement-based cumulative (snapshot unavailable)")
+        stock_pos = movement_pos
+
+    df = compute_coverage(stock_pos, classified, forecast)
+    df = classify_stock_status(df)
 
     # Report slices
-    risk   = risk_report(df)
+    risk = risk_report(df)
     excess = excess_report(df)
-    kpis   = summary_kpis(df)
+    kpis = summary_kpis(df)
     top_risk = top_stockout_risk(df)
 
     # Save parquet
@@ -392,7 +653,7 @@ def run(refresh: bool = False) -> None:
 
     status_dist = df["stock_status"].value_counts().to_dict()
     logger.info(
-        f"Stage 11 complete | "
+        "Stage 11 complete | "
         + " | ".join(f"{s}:{n:,}" for s, n in sorted(status_dist.items()))
         + f" | At-risk: {len(risk):,} | Excess: {len(excess):,}"
     )

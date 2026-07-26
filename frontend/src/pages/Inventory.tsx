@@ -4,8 +4,8 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
 import {
-  fetchInventory, fetchCoverageHistogram, fetchAtRisk, fetchExcess,
-  type InventoryRow, type AtRiskRow, type ExcessRow,
+  fetchInventory, fetchCoverageHistogram, fetchAtRisk, fetchExcess, fetchStockByLocation,
+  type InventoryRow, type AtRiskRow, type ExcessRow, type LocationRow,
 } from "../api/client";
 import { KpiCard } from "../components/KpiCard";
 
@@ -26,19 +26,21 @@ type Tab = "all" | "at-risk" | "excess";
 
 export function Inventory() {
   const [searchParams] = useSearchParams();
-  const [data, setData]     = useState<{ total: number; rows: InventoryRow[]; status_counts: Record<string, number>; total_value_lkr: number; excess_value_lkr: number } | null>(null);
-  const [hist, setHist]     = useState<{ bin_start: number; bin_end: number; count: number }[]>([]);
-  const [atRisk, setAtRisk] = useState<AtRiskRow[]>([]);
-  const [excess, setExcess] = useState<ExcessRow[]>([]);
-  const [status, setStatus] = useState(searchParams.get("status") ?? "");
-  const [search, setSearch] = useState("");
-  const [tab, setTab]       = useState<Tab>(searchParams.get("status") === "excess" ? "excess" : searchParams.get("status") === "stockout" ? "at-risk" : "all");
+  const [data, setData]       = useState<{ total: number; rows: InventoryRow[]; status_counts: Record<string, number>; total_value_lkr: number; excess_value_lkr: number } | null>(null);
+  const [hist, setHist]       = useState<{ bin_start: number; bin_end: number; count: number }[]>([]);
+  const [atRisk, setAtRisk]   = useState<AtRiskRow[]>([]);
+  const [excess, setExcess]   = useState<ExcessRow[]>([]);
+  const [locations, setLocations] = useState<LocationRow[]>([]);
+  const [status, setStatus]   = useState(searchParams.get("status") ?? "");
+  const [search, setSearch]   = useState("");
+  const [tab, setTab]         = useState<Tab>(searchParams.get("status") === "excess" ? "excess" : searchParams.get("status") === "stockout" ? "at-risk" : "all");
 
   useEffect(() => {
     fetchInventory({ limit: 500 }).then(setData);
     fetchCoverageHistogram().then(setHist);
     fetchAtRisk(50).then(setAtRisk);
     fetchExcess(100).then(setExcess);
+    fetchStockByLocation().then(setLocations).catch(() => setLocations([]));
   }, []);
 
   useEffect(() => { fetchInventory({ status: status || undefined, limit: 500 }).then(setData); }, [status]);
@@ -68,6 +70,78 @@ export function Inventory() {
         <KpiCard label="Stockout"       value={fmt(data.status_counts.stockout ?? 0)}   sub="Need immediate order" color="red"/>
         <KpiCard label="Excess Value"   value={`LKR ${fmt(data.excess_value_lkr)}`}     sub=">6 months coverage"   color="amber"/>
       </div>
+
+      {locations.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm p-5">
+          <h3 className="text-sm font-semibold text-slate-700 mb-1">Stock by Storage Location</h3>
+          <p className="text-xs text-slate-400 mb-4">
+            All SAP locations — <span className="text-amber-500 font-medium">amber</span> rows are excluded from active inventory (Damage, GR-unavailable, etc.)
+          </p>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            {/* Horizontal bar chart — qty */}
+            <div>
+              <p className="text-xs text-slate-500 mb-2 font-medium">Unrestricted Qty by Location</p>
+              <ResponsiveContainer width="100%" height={Math.max(160, locations.length * 28)}>
+                <BarChart
+                  data={locations}
+                  layout="vertical"
+                  margin={{ top: 0, right: 16, left: 0, bottom: 0 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false}/>
+                  <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={fmt}/>
+                  <YAxis type="category" dataKey="description" tick={{ fontSize: 10 }} width={120}/>
+                  <Tooltip
+                    formatter={(v: unknown, _name: unknown, p: { payload?: LocationRow }) =>
+                      [`${Number(v).toLocaleString()} units`, p.payload?.is_excluded ? "Excluded" : "Active"]
+                    }
+                  />
+                  <Bar dataKey="qty" radius={[0, 3, 3, 0]}>
+                    {locations.map(loc => (
+                      <Cell key={loc.description} fill={loc.is_excluded ? "#F59E0B" : "#4361EE"}/>
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Table */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-slate-100 text-left text-slate-500 uppercase">
+                    <th className="py-1.5 pr-3">Location</th>
+                    <th className="py-1.5 pr-3 text-right">Qty</th>
+                    <th className="py-1.5 pr-3 text-right">Value (LKR)</th>
+                    <th className="py-1.5 pr-3 text-right">SKUs</th>
+                    <th className="py-1.5">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {locations.map(loc => (
+                    <tr
+                      key={loc.description}
+                      className={`border-b border-slate-50 ${loc.is_excluded ? "bg-amber-50/60" : ""}`}
+                    >
+                      <td className="py-1.5 pr-3 font-mono text-slate-700 max-w-[140px] truncate" title={loc.description}>
+                        {loc.description}
+                      </td>
+                      <td className="py-1.5 pr-3 text-right">{loc.qty.toLocaleString()}</td>
+                      <td className="py-1.5 pr-3 text-right">{fmt(loc.value_lkr)}</td>
+                      <td className="py-1.5 pr-3 text-right">{loc.sku_count.toLocaleString()}</td>
+                      <td className="py-1.5">
+                        {loc.is_excluded
+                          ? <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">excluded</span>
+                          : <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700">active</span>
+                        }
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-white rounded-xl shadow-sm p-5">

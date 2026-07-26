@@ -5,25 +5,33 @@ from __future__ import annotations
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
+<<<<<<< HEAD
 from src.api.deps import get_policy, get_stock_tracker, load_module_parquet
+=======
+from src.api.deps import get_policy, get_stock_location_analysis, get_stock_tracker
+>>>>>>> 2c1106b34ffafce00432cf07958203e060fee530
 from src.api.schemas import (
     AtRiskRow,
     CoverageHistogramBucket,
     ExcessRow,
     InventoryResponse,
     InventoryRow,
+<<<<<<< HEAD
     M3InvPositionResponse,
     M3InvPositionRow,
     M4PlanningResponse,
     M4PlanningRow,
     M4SafetyStockResponse,
     M4SafetyStockRow,
+=======
+    LocationRow,
+>>>>>>> 2c1106b34ffafce00432cf07958203e060fee530
 )
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
 
 
-def _fmt_date(val) -> str | None:
+def _fmt_date(val: object) -> str | None:
     if pd.isna(val):
         return None
     try:
@@ -73,18 +81,22 @@ def list_inventory(
         df = df[df["policy_tier"] == tier]
 
     total = len(df)
-    page  = df.iloc[offset : offset + limit]
+    page = df.iloc[offset : offset + limit]
 
     full = get_stock_tracker()
-    total_val  = float(full["stock_value_lkr"].sum()) if "stock_value_lkr" in full.columns else 0.0
-    excess_val = float(
-        full.loc[full["stock_status"] == "excess", "stock_value_lkr"].sum()
-    ) if "stock_value_lkr" in full.columns and "stock_status" in full.columns else 0.0
+    total_val = float(full["stock_value_lkr"].sum()) if "stock_value_lkr" in full.columns else 0.0
+    excess_val = (
+        float(full.loc[full["stock_status"] == "excess", "stock_value_lkr"].sum())
+        if "stock_value_lkr" in full.columns and "stock_status" in full.columns
+        else 0.0
+    )
 
     return InventoryResponse(
         total=total,
         rows=[_to_row(r) for _, r in page.iterrows()],
-        status_counts={k: int(v) for k, v in full["stock_status"].value_counts().items()} if "stock_status" in full.columns else {},
+        status_counts={k: int(v) for k, v in full["stock_status"].value_counts().items()}
+        if "stock_status" in full.columns
+        else {},
         total_value_lkr=round(total_val, 0),
         excess_value_lkr=round(excess_val, 0),
     )
@@ -305,10 +317,9 @@ def coverage_histogram(bins: int = Query(40, ge=5, le=100)) -> list[CoverageHist
     if df.empty or "coverage_months" not in df.columns:
         return []
 
-    active = df[
-        (df["avg_monthly_demand"] > 0) &
-        (df["coverage_months"] < 24)
-    ]["coverage_months"].dropna()
+    active = df[(df["avg_monthly_demand"] > 0) & (df["coverage_months"] < 24)][
+        "coverage_months"
+    ].dropna()
 
     if active.empty:
         return []
@@ -321,4 +332,27 @@ def coverage_histogram(bins: int = Query(40, ge=5, le=100)) -> list[CoverageHist
             count=int(counts[i]),
         )
         for i in range(len(counts))
+    ]
+
+
+@router.get("/stock-by-location", response_model=list[LocationRow])
+def stock_by_location() -> list[LocationRow]:
+    """Stock qty, value and SKU count by SAP storage location description.
+
+    Covers all location types in current stock.xlsx — including those excluded
+    from the active inventory calculation (Damage, GR-unavailable etc.). The
+    is_excluded field marks which locations are filtered out.
+    """
+    df = get_stock_location_analysis()
+    if df.empty:
+        return []
+    return [
+        LocationRow(
+            description=str(r.get("description", "")),
+            qty=float(r.get("qty", 0.0)),
+            value_lkr=float(r.get("value_lkr", 0.0)),
+            sku_count=int(r.get("sku_count", 0)),
+            is_excluded=bool(r.get("is_excluded", False)),
+        )
+        for _, r in df.iterrows()
     ]

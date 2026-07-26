@@ -13,7 +13,7 @@ import pandas as pd
 from src.config.paths import DATA_INTERIM, DATA_OUTPUTS, DATA_PROCESSED, DATA_RAW
 
 _TARGETS_PATH = DATA_INTERIM / "sales_targets.json"
-_UPLIFT_PATH  = DATA_INTERIM / "uplift_factors.json"
+_UPLIFT_PATH = DATA_INTERIM / "uplift_factors.json"
 
 
 def get_sales_targets() -> dict[str, Any]:
@@ -252,6 +252,10 @@ def get_forecast() -> pd.DataFrame:
 
 def get_stock_tracker() -> pd.DataFrame:
     return _load(DATA_INTERIM / "stock_tracker.parquet")
+
+
+def get_stock_location_analysis() -> pd.DataFrame:
+    return _load(DATA_INTERIM / "stock_location_analysis.parquet")
 
 
 def get_policy() -> pd.DataFrame:
