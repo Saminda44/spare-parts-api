@@ -27,6 +27,7 @@ from src.api.routers import (
     overview,
     parts,
     policy,
+    purchase_recommendation,
     rl,
     sku,
 )
@@ -101,6 +102,7 @@ app.include_router(inventory.router, prefix=_PREFIX)
 app.include_router(policy.router, prefix=_PREFIX)
 app.include_router(rl.router, prefix=_PREFIX)
 app.include_router(sku.router, prefix=_PREFIX)
+app.include_router(purchase_recommendation.router, prefix=_PREFIX)
 
 
 @app.get("/health", tags=["Meta"])

@@ -166,14 +166,44 @@ def extract_pdf_tables(
     rows = [[r.get(c, "") for c in _col_keys] for r in result.rows]
     sections = sorted({r[0] for r in rows if r[0]})
 
-    # Desc-colour PDFs (e.g. CRUX-S): colours live in description parentheses,
-    # not in FOR/EXCEPT remarks.  Build a {part_no → colour_abbr} lookup so the
-    # frontend can filter rows without parsing descriptions itself.
-    desc_colour_hints: dict[str, str] = {
-        r["part_no"]: r["colour_hint"]
-        for r in result.rows
-        if r.get("colour_hint") and r.get("part_no")
-    }
+    # Build desc_colour_hints: a lookup from "part_no::description" → colour_hint
+    # used by the frontend to annotate rows in PDFs where colours come from
+    # description parentheses (e.g. CRUX-S, LIBERO G5) or part-number suffixes.
+    #
+    # IMPORTANT: only include rows whose colour_hint came from description/suffix
+    # patterns, NOT from FOR/EXCEPT remarks.  For remarks-based hints, the frontend's
+    # getRowKind(remarks) already parses them correctly.  Including remarks-derived
+    # hints here causes key-collision bugs: the same part_no (e.g. B65-F2865-00-33,
+    # a Yamaha-Black-painted COVER FRONT) can appear in multiple rows with DIFFERENT
+    # colour hints — e.g. one row "UR FOR YB" (hint=YB) and another "UR YB FOR MS1"
+    # (hint=MS1) — and the last-write-wins dict would overwrite the earlier hints,
+    # causing parts to appear under the wrong colour filter in the UI.
+    #
+    # Detection: if the row's remarks contain the word FOR or EXCEPT, the hint came
+    # from remarks processing and getRowKind(remarks) handles it correctly → skip.
+    # For rows with empty remarks or remarks that lack FOR/EXCEPT (description-based
+    # or suffix-based hints), include them in the dict and merge duplicate keys.
+    import re as _re
+    _FOR_EXCEPT_REM_RE = _re.compile(r"\bFOR\b|\bEXCEPT\b", _re.IGNORECASE)
+
+    desc_colour_hints: dict[str, str] = {}
+    for _r in result.rows:
+        if not _r.get("colour_hint") or not _r.get("part_no"):
+            continue
+        _rem = (_r.get("remarks") or "").strip()
+        # Skip rows whose hint came from FOR/EXCEPT remarks — the frontend
+        # getRowKind(remarks) handles those correctly with no key-collision risk.
+        if _rem and _FOR_EXCEPT_REM_RE.search(_rem):
+            continue
+        _key = f"{_r['part_no']}::{_r.get('description', '')}"
+        _new_hint = _r["colour_hint"]
+        if _key in desc_colour_hints:
+            # Merge: union of comma-separated hint tokens, deduplicated and sorted
+            _existing = {h.strip() for h in desc_colour_hints[_key].split(",") if h.strip()}
+            _incoming = {h.strip() for h in _new_hint.split(",") if h.strip()}
+            desc_colour_hints[_key] = ",".join(sorted(_existing | _incoming))
+        else:
+            desc_colour_hints[_key] = _new_hint
     desc_colour_mode: bool = bool(desc_colour_hints)
 
     # Drop optional columns when this PDF has no data in them.
@@ -199,15 +229,27 @@ def extract_pdf_tables(
         headers = [headers[i] for i in keep]
         rows = [[row[i] for i in keep] for row in rows]
 
+    # When the PDF has no explicit variant codes but has a valid Yamaha type-code,
+    # surface it as a single synthetic variant so the UI shows a meaningful chip.
+    # Validity rules for a Yamaha type code:
+    #   • 3-8 chars, purely alphanumeric, no spaces
+    #   • Does NOT contain 4+ consecutive digits (rejects date strings like "JAN2019")
+    import re as _re
+    _mn = result.model_no or ""
+    _valid_code = bool(_re.match(r"^[A-Z0-9]{3,8}$", _mn)) and not bool(_re.search(r"\d{4}", _mn))
+    _synth_variant = _mn if _valid_code else ""
+    _variants = result.variants or ([_synth_variant] if _synth_variant else [])
+
     return {
         "headers": headers,
         "rows": rows,
         "total": len(rows),
         "sections": sections,
-        "variants": result.variants,
+        "variants": _variants,
         "colour_codes": result.colour_codes,
         "available_colours": result.available_colours,
         "manufacture_year": result.manufacture_year,
+        "model_no": result.model_no,
         "pages_scanned": result.pages_scanned,
         "sections_found": result.sections_found,
         "ocr_flagged": result.ocr_flagged,
@@ -519,7 +561,14 @@ def run_agent(
     cache = _cache_path(file_path)
 
     if not refresh and cache.exists():
-        return json.loads(cache.read_text(encoding="utf-8"))
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        # Backfill model from the relative path when the cache was built without it.
+        if not data.get("model"):
+            data["model"] = file_path.split("/")[0]
+        # Backfill model_no from the PDF cover page when the cache predates this field.
+        if "model_no" not in data:
+            data["model_no"] = YamahaCatalogueExtractor._extract_model_no(target)
+        return data
 
     try:
         result = _AGENT.run(target)

@@ -339,6 +339,7 @@ class AgentResult:
     source_pdf: str
     extracted_at: str
     model: str
+    model_no: str | None  # Yamaha type code from cover page, e.g. "5YY8", "BP16"
     manufacture_year: str | None
     variants: list[str]
     colour_legend: dict[
@@ -431,7 +432,7 @@ class CatalogueAgent:
         logger.info(f"CatalogueAgent: starting {pdf_path.name}")
 
         # ── Stage 1 + 2 ── existing extractor ──────────────────────────
-        result = self._extractor.extract(pdf_path)
+        result = self._extractor.extract(pdf_path, model=pdf_path.parent.name)
         if result.error:
             raise RuntimeError(f"Extraction failed: {result.error}")
 
@@ -446,10 +447,18 @@ class CatalogueAgent:
         # get indexed as shared parts for this model.
         _variant_synthesised = not variants and bool(rows)
         if _variant_synthesised:
-            variants = [""]
+            # Use the Yamaha type code (model_no) as the synthetic variant key so the
+            # frontend can display a meaningful chip (e.g. "5YY8") instead of nothing.
+            # Validity rules for a Yamaha type code:
+            #   • 3-8 chars, purely alphanumeric, no spaces
+            #   • Does NOT contain 4+ consecutive digits (rejects "JAN2019")
+            _raw_mn = result.model_no or ""
+            _valid_code = bool(re.match(r"^[A-Z0-9]{3,8}$", _raw_mn)) and not bool(re.search(r"\d{4}", _raw_mn))
+            _synth_code = _raw_mn if _valid_code else ""
+            variants = [_synth_code]
             logger.info(
                 f"{pdf_path.name}: no variant code detected — "
-                f"synthesising single unnamed variant so {len(rows)} rows can be indexed"
+                f"synthesising variant '{_synth_code}' so {len(rows)} rows can be indexed"
             )
 
         colour_abbrs: set[str] = {c["abbreviation"].upper() for c in colour_codes}
@@ -707,6 +716,7 @@ class CatalogueAgent:
             source_pdf=pdf_path.name,
             extracted_at=datetime.now(tz=UTC).isoformat(),
             model=result.model,
+            model_no=result.model_no,
             manufacture_year=result.manufacture_year,
             variants=variants,
             colour_legend=colour_legend,
@@ -746,12 +756,15 @@ class CatalogueAgent:
             # Desc-colour PDFs: colour membership is stored in colour_hint
             # (extractor detected colours in description parentheses and left
             # description/remarks unchanged).
+            # colour_hint may be comma-separated (e.g. "BWC1,SMX" produced by
+            # the EXCEPT complement logic) — split and add each token.
             hint = (row.get("colour_hint") or "").upper()
-            if hint and hint in colour_abbrs:
+            hint_tokens = [t for t in (t.strip() for t in hint.split(",")) if t in colour_abbrs]
+            if hint_tokens:
                 for idx, variant in enumerate(variants):
                     v_qty = _variant_qty(qty_raw, idx, num_v) if num_v > 1 else qty_raw
                     if _has_qty(v_qty):
-                        rosters[variant].add(hint)
+                        rosters[variant].update(hint_tokens)
                 continue  # skip remarks parsing for this row
 
             remarks = row.get("remarks", "") or ""
@@ -822,11 +835,14 @@ class CatalogueAgent:
                     if not _has_qty(v_qty):
                         continue  # this variant has no qty for this row
 
-                    # Desc-colour PDFs: membership comes from colour_hint, not remarks
+                    # Desc-colour PDFs: membership comes from colour_hint, not remarks.
+                    # colour_hint may be comma-separated (e.g. "BWC1,SMX" from
+                    # EXCEPT complement) — split and check membership.
                     hint = (row.get("colour_hint") or "").upper()
-                    if hint and hint in colour_abbrs:
+                    hint_tokens = {t.strip() for t in hint.split(",") if t.strip() in colour_abbrs} if hint else set()
+                    if hint_tokens:
                         kind = "colour_specific"
-                        matches = colour == "_ALL" or hint == colour
+                        matches = colour == "_ALL" or colour in hint_tokens
                     else:
                         remarks = row.get("remarks", "") or ""
                         appl = parse_applicability(remarks, colour_abbrs)
@@ -1335,7 +1351,8 @@ class CatalogueAgent:
             if not ref:
                 continue
             hint = (row.get("colour_hint") or "").upper()
-            if hint and hint in colour_abbrs:
+            hint_tokens_fc = {t.strip() for t in hint.split(",") if t.strip() in colour_abbrs} if hint else set()
+            if hint_tokens_fc:
                 by_ref.setdefault(ref, []).append(row)
                 continue
             remarks = row.get("remarks", "") or ""
@@ -1348,8 +1365,11 @@ class CatalogueAgent:
             per_colour: dict[str, str] = {}
             for row in ref_rows:
                 hint = (row.get("colour_hint") or "").upper()
-                if hint and hint in colour_abbrs:
-                    per_colour[hint] = row.get("part_no", "")
+                hint_tokens_fc = {t.strip() for t in hint.split(",") if t.strip() in colour_abbrs} if hint else set()
+                if hint_tokens_fc:
+                    pn = row.get("part_no", "")
+                    for tok in hint_tokens_fc:
+                        per_colour[tok] = pn
                     continue
                 remarks = row.get("remarks", "") or ""
                 appl = parse_applicability(remarks, colour_abbrs)

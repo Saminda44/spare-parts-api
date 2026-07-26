@@ -10,6 +10,7 @@ import {
   type InventoryRow, type AtRiskRow, type ExcessRow,
   fetchMovements, type MovementsData,
   fetchSparePartsEda, type SparePartsEdaData,
+  fetchPlanningTable, type M4PlanningResponse,
 } from "../api/client";
 import { KpiCard } from "../components/KpiCard";
 import { TimePicker, filterByRange, type TimeRange, YearPicker, filterByYear, getYears, monthLabel } from "../components/TimePicker";
@@ -31,7 +32,7 @@ function fmt(n: number) {
   return n.toLocaleString();
 }
 
-type MainTab = "classification" | "inventory" | "movements" | "spare";
+type MainTab = "classification" | "inventory" | "movements" | "spare" | "planning";
 type InvTab  = "all" | "at-risk" | "excess";
 
 export function Classification() {
@@ -94,6 +95,22 @@ export function Classification() {
 
   useEffect(() => { fetchSparePartsEda().then(setSpareData); }, []);
 
+  // ── Module 4 Planning Table state ─────────────────────────────────────────
+  const [planData,   setPlanData]   = useState<M4PlanningResponse | null>(null);
+  const [planSearch, setPlanSearch] = useState("");
+  const [planDC,     setPlanDC]     = useState("");
+  const [planSignal, setPlanSignal] = useState<"" | "true" | "false">("");
+
+  useEffect(() => {
+    fetchPlanningTable({
+      demand_class: planDC || undefined,
+      signal_to_reorder: planSignal === "" ? undefined : planSignal === "true",
+      limit: 200,
+    })
+      .then(setPlanData)
+      .catch(() => setPlanData(null));
+  }, [planDC, planSignal]);
+
   // ── Derived ────────────────────────────────────────────────────────────────
   const clsFiltered = clsData?.rows.filter(r =>
     !search ||
@@ -119,10 +136,11 @@ export function Classification() {
       {/* ── Top-level tab bar ── */}
       <div className="flex gap-1 border-b border-slate-200 pb-0">
         {([
-          { key: "classification" as MainTab, label: "SKU Classification"  },
-          { key: "inventory"      as MainTab, label: "Inventory Status"     },
-          { key: "movements"      as MainTab, label: "Stock Movements"      },
-          { key: "spare"          as MainTab, label: "Spare Parts EDA"      },
+          { key: "classification" as MainTab, label: "SKU Classification"   },
+          { key: "inventory"      as MainTab, label: "Inventory Status"      },
+          { key: "movements"      as MainTab, label: "Stock Movements"       },
+          { key: "spare"          as MainTab, label: "Spare Parts EDA"       },
+          { key: "planning"       as MainTab, label: "Planning Table (M4)"   },
         ]).map(t => (
           <button key={t.key} onClick={() => setMainTab(t.key)}
             className={`px-5 py-2 text-sm font-medium rounded-t-lg border-b-2 transition-colors ${
@@ -615,6 +633,154 @@ export function Classification() {
       {/* ══════════════════════════════════════════════════════════
           TAB 4 — Spare Parts EDA (Stage 8)
       ══════════════════════════════════════════════════════════ */}
+      {/* ══════════════════════════════════════════════════════════
+          TAB 5 — Planning Table (Module 4)
+      ══════════════════════════════════════════════════════════ */}
+      {mainTab === "planning" && (() => {
+        const DC_COLORS: Record<string, string> = { AXF:"#EF4444", AYF:"#F97316", AZF:"#FFC107", BXF:"#4361EE", BYF:"#7C3AED", BZF:"#06B6D4", CXF:"#2CC56F", CYF:"#94A3B8", CZF:"#CBD5E1" };
+        // urgency_score is negative-when-urgent: more negative = further below ROL = more critical
+        const urgencyColor = (s: number) => s < -2 ? "#EF4444" : s < -1 ? "#F97316" : s < 0 ? "#FFC107" : "#2CC56F";
+        const urgencyLabel = (s: number) => s < -2 ? "Critical" : s < -1 ? "High" : s < 0 ? "Medium" : "Low";
+
+        if (!planData) {
+          return (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center mt-4">
+              <p className="text-sm font-semibold text-amber-700 mb-1">Module 4 output not found</p>
+              <code className="text-xs text-amber-600 bg-amber-100 px-2 py-1 rounded">
+                python -m scripts.run_module 4 --save
+              </code>
+            </div>
+          );
+        }
+
+        const planFiltered = planData.rows.filter(r =>
+          (!planSearch || r.part_no.toLowerCase().includes(planSearch.toLowerCase())) &&
+          (!planDC || r.demand_class === planDC) &&
+          (planSignal === "" || String(r.signal_to_reorder) === planSignal)
+        );
+
+        return (
+          <div className="space-y-5 mt-1">
+            {/* KPIs */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <KpiCard label="Total SKUs"       value={planData.total.toLocaleString()} color="blue"/>
+              <KpiCard label="Signal to Reorder" value={planData.signal_count.toLocaleString()} sub="net position below ROL" color="red"/>
+              <KpiCard label="Demand Classes"   value={`${Object.keys(planData.demand_class_counts).length}`} color="purple"/>
+              <KpiCard label="Showing"          value={`${Math.min(planFiltered.length, 200)} rows`} sub="use filters to narrow" color="amber"/>
+            </div>
+
+            {/* Demand class distribution */}
+            {Object.keys(planData.demand_class_counts).length > 0 && (
+              <div className="bg-white rounded-xl shadow-sm p-5">
+                <h3 className="text-sm font-semibold text-slate-700 mb-3">SKUs by ABC-XYZ-FSN Demand Class</h3>
+                <ResponsiveContainer width="100%" height={140}>
+                  <BarChart
+                    data={Object.entries(planData.demand_class_counts).map(([k, v]) => ({ name: k, value: v, fill: DC_COLORS[k] ?? "#94A3B8" }))}
+                    margin={{ top: 4, right: 8, left: 0, bottom: 4 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false}/>
+                    <XAxis dataKey="name" tick={{ fontSize: 10 }}/>
+                    <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt} width={36}/>
+                    <Tooltip formatter={(v: unknown) => Number(v).toLocaleString()}/>
+                    <Bar dataKey="value" name="SKUs" radius={[3,3,0,0]}>
+                      {Object.entries(planData.demand_class_counts).map(([k]) => (
+                        <Cell key={k} fill={DC_COLORS[k] ?? "#94A3B8"}/>
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* Filter bar */}
+            <div className="flex gap-3 flex-wrap">
+              <input
+                className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm flex-1 min-w-[160px] focus:outline-none focus:ring-2 focus:ring-brand-blue/30"
+                placeholder="Filter by part no…"
+                value={planSearch} onChange={e => setPlanSearch(e.target.value)}
+              />
+              <select
+                className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none"
+                value={planDC} onChange={e => setPlanDC(e.target.value)}
+              >
+                <option value="">All classes</option>
+                {Object.keys(planData.demand_class_counts).map(dc => <option key={dc} value={dc}>{dc}</option>)}
+              </select>
+              <select
+                className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none"
+                value={planSignal} onChange={e => setPlanSignal(e.target.value as "" | "true" | "false")}
+              >
+                <option value="">All</option>
+                <option value="true">Signal to reorder</option>
+                <option value="false">No signal</option>
+              </select>
+            </div>
+
+            {/* Table */}
+            <div className="bg-white rounded-xl shadow-sm p-5 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
+                    <th className="py-2 pr-3">Part No</th>
+                    <th className="py-2 pr-3">Class</th>
+                    <th className="py-2 pr-3">SS Method</th>
+                    <th className="py-2 pr-3 text-right">Avg Demand</th>
+                    <th className="py-2 pr-3 text-right">Safety Stock</th>
+                    <th className="py-2 pr-3 text-right">ROL</th>
+                    <th className="py-2 pr-3 text-right">Stock</th>
+                    <th className="py-2 pr-3 text-right">Net Pos</th>
+                    <th className="py-2 pr-3 text-center">Reorder?</th>
+                    <th className="py-2 text-center">Urgency</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {planFiltered.slice(0, 200).map((r, i) => (
+                    <tr key={`${r.part_no}-${i}`} className={`border-b border-slate-50 hover:bg-slate-50/50 ${r.signal_to_reorder ? "bg-red-50/20" : ""}`}>
+                      <td className="py-1.5 pr-3 font-mono text-xs text-slate-700">{r.part_no}</td>
+                      <td className="py-1.5 pr-3">
+                        <span className="text-xs px-2 py-0.5 rounded-full font-semibold"
+                          style={{ background: `${DC_COLORS[r.demand_class] ?? "#94A3B8"}22`, color: DC_COLORS[r.demand_class] ?? "#64748B" }}>
+                          {r.demand_class}
+                        </span>
+                      </td>
+                      <td className="py-1.5 pr-3 text-xs text-slate-400">{r.ss_method}</td>
+                      <td className="py-1.5 pr-3 text-right text-xs text-slate-600">{r.mean_monthly_demand.toFixed(1)}</td>
+                      <td className="py-1.5 pr-3 text-right text-xs text-slate-600">{r.safety_stock.toFixed(1)}</td>
+                      <td className="py-1.5 pr-3 text-right font-semibold text-slate-700">{r.rol.toFixed(1)}</td>
+                      <td className="py-1.5 pr-3 text-right text-xs text-slate-500">{r.stock_qty.toFixed(0)}</td>
+                      <td className="py-1.5 pr-3 text-right text-xs font-medium"
+                        style={{ color: r.net_position < 0 ? "#EF4444" : r.net_position < r.safety_stock ? "#F97316" : "#2CC56F" }}>
+                        {r.net_position.toFixed(0)}
+                      </td>
+                      <td className="py-1.5 pr-3 text-center text-base">
+                        {r.signal_to_reorder ? (
+                          <span title="Signal to reorder" className="text-red-500">⚑</span>
+                        ) : (
+                          <span className="text-slate-200">⚑</span>
+                        )}
+                      </td>
+                      <td className="py-1.5 text-center">
+                        <span className="text-xs px-2 py-0.5 rounded-full font-semibold text-white"
+                          style={{ background: urgencyColor(r.urgency_score) }}
+                          title={`Score: ${r.urgency_score.toFixed(2)}`}>
+                          {urgencyLabel(r.urgency_score)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {planFiltered.length > 200 && (
+                <p className="text-xs text-slate-400 mt-2 text-center">Showing 200 of {planFiltered.length} — use filters to narrow</p>
+              )}
+              {planFiltered.length === 0 && (
+                <p className="text-xs text-slate-400 mt-4 text-center">No rows match the current filters</p>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
       {mainTab === "spare" && (
         spareData ? (
           <div className="space-y-5">

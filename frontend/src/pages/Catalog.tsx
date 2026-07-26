@@ -46,7 +46,7 @@ function variantQty(qty: string, varIdx: number, numVariants: number): string {
   return raw ?? qty;
 }
 
-function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, manufactureYear, columnLayout, descColourHints }: {
+function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, manufactureYear, modelNo, columnLayout, descColourHints }: {
   data: CatalogueData;
   relPath: string;
   pdfUrl?: string;
@@ -54,8 +54,9 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
   variants?: string[];
   colourCodes?: ColourCode[];
   manufactureYear?: string;
+  modelNo?: string;
   columnLayout?: string[];
-  descColourHints?: Record<string, string>; // part_no → colour_abbr for desc-colour PDFs
+  descColourHints?: Record<string, string>;
 }) {
   const [section,    setSection]    = useState("");
   const [search,     setSearch]     = useState("");
@@ -270,12 +271,19 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
   // For desc-colour PDFs the colour membership comes from descColourHints (part_no lookup)
   // rather than FOR/EXCEPT patterns in remarks — description and remarks stay unchanged.
   const COL_PART_NO = 2; // part_no is always index 2 (never dropped)
+  const COL_DESC    = 3; // description is always index 3 (never dropped)
   const annotatedRows: string[][] = selColour
     ? extractedRows.map(row => {
-        const hint = descColourHints?.[row[COL_PART_NO]];
+        // Composite key avoids collision when two colour variants share the same
+        // part_no (e.g. YAMAHA BLACK and SL-3 both on 5TS-XF41A-40).
+        const hintKey = `${row[COL_PART_NO]}::${row[COL_DESC] ?? ""}`;
+        const hint = descColourHints?.[hintKey];
         let kind: string;
         if (hint !== undefined && hint !== "") {
-          kind = hint.toUpperCase() === selColour.toUpperCase() ? "colour_specific" : "other";
+          // colour_hint may be comma-separated (e.g. "YB,DRMK" for multi-colour or
+          // EXCEPT logic). Split and check if the selected colour is in the list.
+          const hintColours = hint.toUpperCase().split(",").map(h => h.trim());
+          kind = hintColours.includes(selColour.toUpperCase()) ? "colour_specific" : "other";
         } else {
           kind = getRowKind(row[COL_REMARKS] ?? "");
         }
@@ -310,6 +318,10 @@ function CatalogueTable({ data, relPath, pdfUrl, meta, variants, colourCodes, ma
             <span className="font-medium text-slate-700">{data.total.toLocaleString()} parts extracted</span>
             <span>·</span><span>{meta.sections} sections</span>
             <span>·</span><span>{meta.pages} pages scanned</span>
+            {modelNo && (
+              <><span>·</span>
+              <span className="font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-1.5 py-0.5 font-mono text-[11px]">{modelNo}</span></>
+            )}
             {manufactureYear && (
               <><span>·</span>
               <span className="font-medium text-blue-600">{manufactureYear} model</span></>
@@ -656,6 +668,7 @@ function PdfCatalogueViewer({ relPath, filename, pdfUrl, onBack }: {
          data={result} relPath={relPath} pdfUrl={pdfUrl} meta={meta}
          variants={result.variants} colourCodes={result.colour_codes}
          manufactureYear={result.manufacture_year}
+         modelNo={result.model_no}
          columnLayout={result.column_layout}
          descColourHints={result.desc_colour_hints}
        />}
@@ -711,7 +724,7 @@ function ExtractionModal({ relPath, filename, pdfUrl, onClose }: {
         <div className="flex-1 overflow-y-auto p-5">
           {loading ? <LoadingState label="Extracting parts from PDF…" /> :
            !result || result.headers.length === 0 ? <EmptyState /> :
-           <CatalogueTable data={result} relPath={relPath} meta={meta} variants={result.variants} colourCodes={result.colour_codes} manufactureYear={result.manufacture_year} columnLayout={result.column_layout} descColourHints={result.desc_colour_hints} />}
+           <CatalogueTable data={result} relPath={relPath} meta={meta} variants={result.variants} colourCodes={result.colour_codes} manufactureYear={result.manufacture_year} modelNo={result.model_no} columnLayout={result.column_layout} descColourHints={result.desc_colour_hints} />}
         </div>
       </div>
     </div>

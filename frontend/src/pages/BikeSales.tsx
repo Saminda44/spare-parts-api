@@ -7,8 +7,9 @@ import { Check } from "lucide-react";
 import {
   fetchBikes, fetchModelForecast, fetchTargets, saveTargets, fetchTargetBreakdown,
   fetchUpliftInputs, saveUpliftInputs, fetchDealerUpliftBaseline,
+  fetchM1AgeDist,
   type BikesData, type ModelForecastData, type SalesTargets, type TargetBreakdownRow,
-  type UpliftFactorsRow,
+  type UpliftFactorsRow, type M1AgeDistResponse,
 } from "../api/client";
 import { KpiCard } from "../components/KpiCard";
 import { TimePicker, filterByRange, type TimeRange, YearPicker, filterByYear, getYears, monthLabel } from "../components/TimePicker";
@@ -39,6 +40,7 @@ function fmt(n: number) {
 export function BikeSales() {
   const [data,      setData]      = useState<BikesData | null>(null);
   const [modelFcst, setModelFcst] = useState<ModelForecastData | null>(null);
+  const [ageDist,   setAgeDist]   = useState<M1AgeDistResponse | null>(null);
   const [forecastYear,  setForecastYear]  = useState<number | "All">("All");
   const [forecastRange, setForecastRange] = useState<TimeRange>("YTD");
   const [selectedModel, setSelectedModel] = useState<string>("All Models");
@@ -82,6 +84,7 @@ export function BikeSales() {
       setUpliftInputs(map);
     });
     fetchDealerUpliftBaseline().then(setDealerBaseline);
+    fetchM1AgeDist().then(setAgeDist).catch(() => {/* module not yet run — silently skip */});
   }, []);
 
   const TARGET_YEAR = typeof forecastYear === "number" ? forecastYear : new Date().getFullYear();
@@ -773,6 +776,45 @@ export function BikeSales() {
           </div>
 
       </div>
+
+      {/* ── Age Distribution (Module 1) ─────────────────────────────────── */}
+      {ageDist && ageDist.rows.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm p-5 space-y-4">
+          <div>
+            <h3 className="text-sm font-bold text-slate-800">Fleet Age Distribution (Module 1)</h3>
+            <p className="text-xs text-slate-400 mt-0.5">Age cohort breakdown of the UIO fleet per model — older cohorts drive higher parts replacement demand.</p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
+                  <th className="py-2 pr-4">Model</th>
+                  <th className="py-2 pr-4">Age Cohort</th>
+                  <th className="py-2 pr-4 text-right">Vehicle Count</th>
+                  <th className="py-2 text-right">% of Fleet</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ageDist.rows.map((r, i) => (
+                  <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
+                    <td className="py-2 pr-4 font-medium text-slate-700">{r.model}</td>
+                    <td className="py-2 pr-4 text-slate-600">{r.age_cohort}</td>
+                    <td className="py-2 pr-4 text-right font-semibold text-brand-blue">{r.vehicle_count.toLocaleString()}</td>
+                    <td className="py-2 text-right">
+                      <span className="inline-flex items-center gap-1.5">
+                        <div className="w-16 bg-slate-100 rounded-full h-1.5">
+                          <div className="h-1.5 rounded-full bg-amber-500" style={{ width: `${Math.min(r.pct_of_fleet, 100)}%` }}/>
+                        </div>
+                        <span className="text-xs text-slate-600 font-medium">{r.pct_of_fleet.toFixed(1)}%</span>
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

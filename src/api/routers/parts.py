@@ -83,7 +83,7 @@ def parts_from_catalog(
     search: str = Query("", description="Filter by part number or description"),
     model: str = Query("", description="Filter by model folder name"),
     kind: str = Query("", description="Filter by kind: 'shared' or 'colour_specific'"),
-    limit: int = Query(5000, le=20000),
+    limit: int = Query(50000, le=100000),
 ) -> dict[str, Any]:
     """Return all unique parts from the catalogue part master (agent-derived).
 

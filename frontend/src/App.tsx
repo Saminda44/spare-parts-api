@@ -14,7 +14,8 @@ import { Orders }         from "./pages/Orders";
 import { Classification } from "./pages/Classification";
 import { RL }             from "./pages/RL";
 import { Catalog }        from "./pages/Catalog";
-import { MarketBasket }  from "./pages/MarketBasket";
+import { MarketBasket }        from "./pages/MarketBasket";
+import { PurchaseRecommendation } from "./pages/PurchaseRecommendation";
 
 export default function App() {
   return (
@@ -37,7 +38,8 @@ export default function App() {
             <Route path="/orders"         element={<Orders />} />
             <Route path="/rl"             element={<RL />} />
             <Route path="/catalog"        element={<Catalog />} />
-            <Route path="/market-basket"  element={<MarketBasket />} />
+            <Route path="/market-basket"           element={<MarketBasket />} />
+            <Route path="/purchase-recommendation" element={<PurchaseRecommendation />} />
           </Routes>
         </main>
       </div>

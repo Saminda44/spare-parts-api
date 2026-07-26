@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import pandas as pd
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
-from src.api.deps import get_policy, get_stock_tracker
+from src.api.deps import get_policy, get_stock_tracker, load_module_parquet
 from src.api.schemas import (
-    AtRiskRow, CoverageHistogramBucket, ExcessRow,
-    InventoryResponse, InventoryRow,
+    AtRiskRow,
+    CoverageHistogramBucket,
+    ExcessRow,
+    InventoryResponse,
+    InventoryRow,
+    M3InvPositionResponse,
+    M3InvPositionRow,
+    M4PlanningResponse,
+    M4PlanningRow,
+    M4SafetyStockResponse,
+    M4SafetyStockRow,
 )
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
@@ -135,6 +144,157 @@ def excess_stock(
         )
         for _, r in excess.iterrows()
     ]
+
+
+@router.get("/position", response_model=M3InvPositionResponse)
+def get_inventory_position(
+    part_no: str | None = Query(None, description="Filter by part number"),
+    limit: int = Query(500, le=50000),
+    offset: int = Query(0, ge=0),
+) -> M3InvPositionResponse:
+    """Module 3 — inventory position from m3_inventory_position.parquet.
+
+    Business meaning: net inventory position per SKU = stock_qty + pipeline_qty
+    - backorder_qty. Drives Module 4 reorder calculations.
+    """
+    df = load_module_parquet("m3_inventory_position.parquet")
+    if df is None:
+        raise HTTPException(status_code=503, detail="Run: python -m scripts.run_module 3 --save")
+
+    if part_no:
+        df = df[df["part_no"] == part_no]
+
+    total_stock = float(df["stock_qty"].sum()) if "stock_qty" in df.columns else 0.0
+    total_pipeline = float(df["pipeline_qty"].sum()) if "pipeline_qty" in df.columns else 0.0
+    total_net = float(df["net_position"].sum()) if "net_position" in df.columns else 0.0
+
+    total = len(df)
+    page = df.iloc[offset: offset + limit]
+
+    rows = [
+        M3InvPositionRow(
+            part_no=str(r["part_no"]),
+            stock_qty=float(r.get("stock_qty", 0) or 0),
+            pipeline_qty=float(r.get("pipeline_qty", 0) or 0),
+            backorder_qty=float(r.get("backorder_qty", 0) or 0),
+            net_position=float(r.get("net_position", 0) or 0),
+        )
+        for _, r in page.iterrows()
+    ]
+    return M3InvPositionResponse(
+        total=total, offset=offset, limit=limit, rows=rows,
+        total_stock_qty=round(total_stock, 2),
+        total_pipeline_qty=round(total_pipeline, 2),
+        total_net_position=round(total_net, 2),
+    )
+
+
+@router.get("/planning", response_model=M4PlanningResponse)
+def get_planning_table(
+    part_no: str | None = Query(None, description="Filter by part number"),
+    demand_class: str | None = Query(None, description="Filter by demand class"),
+    signal_to_reorder: bool | None = Query(None, description="Filter by reorder signal"),
+    limit: int = Query(500, le=50000),
+    offset: int = Query(0, ge=0),
+) -> M4PlanningResponse:
+    """Module 4 — planning table from m4_planning_table.parquet.
+
+    Business meaning: complete inventory planning table with ROL, safety stock,
+    reorder signal, and urgency score per SKU (Module 4 output).
+    """
+    df = load_module_parquet("m4_planning_table.parquet")
+    if df is None:
+        raise HTTPException(status_code=503, detail="Run: python -m scripts.run_module 4 --save")
+
+    if part_no:
+        df = df[df["part_no"] == part_no]
+    if demand_class and "demand_class" in df.columns:
+        df = df[df["demand_class"] == demand_class]
+    if signal_to_reorder is not None and "signal_to_reorder" in df.columns:
+        df = df[df["signal_to_reorder"].astype(bool) == signal_to_reorder]
+
+    signal_count = int(df["signal_to_reorder"].astype(bool).sum()) if "signal_to_reorder" in df.columns else 0
+    dc_counts: dict[str, int] = (
+        {k: int(v) for k, v in df["demand_class"].value_counts().items()}
+        if "demand_class" in df.columns else {}
+    )
+
+    total = len(df)
+    page = df.iloc[offset: offset + limit]
+
+    rows = [
+        M4PlanningRow(
+            part_no=str(r["part_no"]),
+            demand_class=str(r.get("demand_class", "")),
+            mean_monthly_demand=float(r.get("mean_monthly_demand", 0) or 0),
+            lead_time_demand=float(r.get("lead_time_demand", 0) or 0),
+            review_demand=float(r.get("review_demand", 0) or 0),
+            horizon_demand=float(r.get("horizon_demand", 0) or 0),
+            sigma_demand=float(r.get("sigma_demand", 0) or 0),
+            service_level=float(r.get("service_level", 0) or 0),
+            z_score=float(r.get("z_score", 0) or 0),
+            ss_method=str(r.get("ss_method", "")),
+            safety_stock=float(r.get("safety_stock", 0) or 0),
+            rol=float(r.get("rol", 0) or 0),
+            stock_qty=float(r.get("stock_qty", 0) or 0),
+            pipeline_qty=float(r.get("pipeline_qty", 0) or 0),
+            backorder_qty=float(r.get("backorder_qty", 0) or 0),
+            net_position=float(r.get("net_position", 0) or 0),
+            signal_to_reorder=bool(r.get("signal_to_reorder", False)),
+            urgency_score=float(r.get("urgency_score", 0) or 0),
+        )
+        for _, r in page.iterrows()
+    ]
+    return M4PlanningResponse(
+        total=total, offset=offset, limit=limit,
+        rows=rows, signal_count=signal_count, demand_class_counts=dc_counts,
+    )
+
+
+@router.get("/safety-stock", response_model=M4SafetyStockResponse)
+def get_safety_stock(
+    part_no: str | None = Query(None, description="Filter by part number"),
+    demand_class: str | None = Query(None, description="Filter by demand class"),
+    limit: int = Query(500, le=50000),
+    offset: int = Query(0, ge=0),
+) -> M4SafetyStockResponse:
+    """Module 4 — safety stock table from m4_safety_stock.parquet.
+
+    Business meaning: per-SKU safety stock requirements derived from demand
+    variability and target service levels set by ABC classification.
+    """
+    df = load_module_parquet("m4_safety_stock.parquet")
+    if df is None:
+        raise HTTPException(status_code=503, detail="Run: python -m scripts.run_module 4 --save")
+
+    if part_no:
+        df = df[df["part_no"] == part_no]
+    if demand_class and "demand_class" in df.columns:
+        df = df[df["demand_class"] == demand_class]
+
+    dc_counts: dict[str, int] = (
+        {k: int(v) for k, v in df["demand_class"].value_counts().items()}
+        if "demand_class" in df.columns else {}
+    )
+
+    total = len(df)
+    page = df.iloc[offset: offset + limit]
+
+    rows = [
+        M4SafetyStockRow(
+            part_no=str(r["part_no"]),
+            safety_stock=float(r.get("safety_stock", 0) or 0),
+            service_level=float(r.get("service_level", 0) or 0),
+            z_score=float(r.get("z_score", 0) or 0),
+            sigma_demand=float(r.get("sigma_demand", 0) or 0),
+            demand_class=str(r.get("demand_class", "")),
+            ss_method=str(r.get("ss_method", "")),
+        )
+        for _, r in page.iterrows()
+    ]
+    return M4SafetyStockResponse(
+        total=total, offset=offset, limit=limit, rows=rows, demand_class_counts=dc_counts,
+    )
 
 
 @router.get("/coverage-histogram", response_model=list[CoverageHistogramBucket])

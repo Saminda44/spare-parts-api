@@ -376,6 +376,7 @@ class ExtractionResult:
     # empty when result comes directly from the extractor without agent post-processing.
     available_colour_map: dict[str, str] = field(default_factory=dict)
     manufacture_year: str | None = None  # e.g. "2019" from ©2019 on the cover page
+    model_no: str | None = None  # Yamaha type code from cover page, e.g. "5YY8", "BP16"
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
     # column_layout: detected column names in left-to-right order for display
@@ -604,11 +605,38 @@ class YamahaCatalogueExtractor:
             if re.match(r"^\d{2}$", c.get("code", ""))
         }
         if _suffix_map:
-            rows = self._lift_suffix_colours(rows, _suffix_map)
-            _tagged = sum(1 for r in rows if r.get("colour_hint"))
-            logger.debug(
-                f"{pdf_path.name}: suffix-tagged {_tagged} rows" f" via codes {list(_suffix_map)}"
-            )
+            # Find base parts (first two hyphen-segments, e.g. "5KA-F4100")
+            # that appear in ≥2 rows with *different* suffix codes from the
+            # map.  Only those bases are genuine colour-variant parts — e.g.
+            # CRUX-S has "5KA-F4100-70-00", "5KA-F4100-80-00", "5KA-F4100-
+            # 90-00" (three colour variants of the same fender).  FAZER has
+            # "5YY-F1510-00-00" through "5YY-F1510-40-00" (fuel tank in five
+            # colours) alongside thousands of standard parts like "5YY-E1111-
+            # 00-00" where the "00" is just the Yamaha version field, NOT a
+            # colour code.  Passing only the discriminating bases to
+            # _lift_suffix_colours prevents those standard parts from being
+            # falsely tagged as "DPBM1".
+            _base_codes: dict[str, set[str]] = {}
+            for _r in rows:
+                _pn = (_r.get("part_no") or "").strip()
+                _segs = _pn.split("-")
+                if len(_segs) >= 3 and _segs[2] in _suffix_map:
+                    _b = f"{_segs[0]}-{_segs[1]}"
+                    _base_codes.setdefault(_b, set()).add(_segs[2])
+            _discriminating = {_b for _b, _v in _base_codes.items() if len(_v) >= 2}
+            if _discriminating:
+                rows = self._lift_suffix_colours(rows, _suffix_map, _discriminating)
+                _tagged = sum(1 for r in rows if r.get("colour_hint"))
+                logger.debug(
+                    f"{pdf_path.name}: suffix-tagged {_tagged} rows"
+                    f" via codes {list(_suffix_map)}"
+                    f" ({len(_discriminating)} discriminating bases)"
+                )
+            else:
+                logger.debug(
+                    f"{pdf_path.name}: suffix codes {list(_suffix_map)} present but "
+                    "no base part has ≥2 distinct codes — skipping suffix-colour tagging"
+                )
 
         # Lift colour names from description parentheses (older-format PDFs that
         # encode variants as 'DESCRIPTION (COLOUR NAME)' instead of a foreword
@@ -620,6 +648,28 @@ class YamahaCatalogueExtractor:
                 logger.info(
                     f"{pdf_path.name}: lifted {len(colour_codes)} desc-colour(s): "
                     f"{[c['abbreviation'] for c in colour_codes]}"
+                )
+        else:
+            # Foreword colour table is present.
+            # Step 1 — Remarks column (highest priority): FOR/UR/EXCEPT patterns
+            # and bare colour abbreviations in the Remarks field are the canonical
+            # way Yamaha India catalogues indicate colour membership.
+            rows = self._extract_remark_colour_hints(rows, colour_codes)
+            rem_hinted = sum(1 for r in rows if r.get("colour_hint"))
+            if rem_hinted:
+                logger.info(
+                    f"{pdf_path.name}: tagged {rem_hinted} rows via remarks colour hints"
+                )
+            # Step 2 — Description fallback: parenthetical / dash-suffix / FOR
+            # patterns in the Description column, for PDFs that embed colour in
+            # descriptions instead of (or in addition to) remarks.  Rows already
+            # hinted by Step 1 are counted for group confirmation but not overwritten.
+            rows = self._extract_foreword_colour_hints(rows, colour_codes)
+            hinted = sum(1 for r in rows if r.get("colour_hint"))
+            if hinted:
+                logger.info(
+                    f"{pdf_path.name}: tagged {hinted} rows with foreword colour hints"
+                    f" ({rem_hinted} from remarks, {hinted - rem_hinted} from descriptions)"
                 )
 
         # Extract available colour captions from the "AVAILABLE COLOUR" page
@@ -633,6 +683,11 @@ class YamahaCatalogueExtractor:
         manufacture_year = self._extract_manufacture_year(pdf_path)
         if manufacture_year:
             logger.info(f"{pdf_path.name}: manufacture year {manufacture_year}")
+
+        # Extract Yamaha type/model code from cover page (e.g. "5YY8", "BP16")
+        model_no = self._extract_model_no(pdf_path)
+        if model_no:
+            logger.info(f"{pdf_path.name}: model_no {model_no}")
 
         # Build column_layout: ordered list of detected column names (left → right)
         # for display in the catalogue viewer.
@@ -681,6 +736,36 @@ class YamahaCatalogueExtractor:
         else:
             column_display_labels = {}
 
+        # Prune phantom colour codes: after all colour_hint assignment is complete,
+        # remove from colour_codes any colour whose abbreviation never appears in
+        # even one row's colour_hint.  These "phantom" entries come from multi-year
+        # foreword tables that list all variants ever produced (e.g. SMX, YB for
+        # earlier model years) but the current PDF's body pages only contain parts
+        # for a subset of those colours.  Keeping phantoms pollutes the UI with
+        # colour chips that match 0 rows.
+        #
+        # Guard: only prune when at least one row actually has a hint (active_abbrs
+        # non-empty).  For single-colour PDFs where NO rows carry a colour_hint,
+        # the entire colour_codes list is left intact.
+        active_abbrs: set[str] = set()
+        for _row in rows:
+            _hint = _row.get("colour_hint") or ""
+            for _tok in _hint.split(","):
+                _tok = _tok.strip()
+                if _tok:
+                    active_abbrs.add(_tok.upper())
+        if active_abbrs:
+            before_count = len(colour_codes)
+            colour_codes = [
+                c for c in colour_codes if c["abbreviation"].upper() in active_abbrs
+            ]
+            pruned_count = before_count - len(colour_codes)
+            if pruned_count:
+                logger.debug(
+                    f"{pdf_path.name}: pruned {pruned_count} phantom colour code(s) "
+                    f"(0 body rows matched); kept {len(colour_codes)}"
+                )
+
         return ExtractionResult(
             pdf_path=pdf_path,
             model=model,
@@ -692,6 +777,7 @@ class YamahaCatalogueExtractor:
             colour_codes=colour_codes,
             available_colours=available_colours,
             manufacture_year=manufacture_year,
+            model_no=model_no,
             warnings=warnings,
             column_layout=column_layout,
             column_display_labels=column_display_labels,
@@ -1297,6 +1383,7 @@ class YamahaCatalogueExtractor:
     def _lift_suffix_colours(
         rows: list[dict],
         code_suffix_map: dict[str, str],
+        discriminating_bases: set[str] | None = None,
     ) -> list[dict]:
         """Tag rows with colour_hint using part-number third-segment colour codes.
 
@@ -1306,6 +1393,12 @@ class YamahaCatalogueExtractor:
         12-digit part number — e.g. '5KA-F4100-**70**-00'.  This method maps
         that segment to the official colour abbreviation so the agent and
         frontend can treat these rows identically to FOR/EXCEPT-remarks rows.
+
+        ``discriminating_bases``: when provided, only rows whose base part
+        (first two hyphen-segments, e.g. "5YY-F1510") is in this set are
+        tagged.  Parts whose base appears with only one suffix code across the
+        whole PDF (e.g. standard version-field "00" on every engine part) are
+        left untagged — they are shared parts, not colour-specific variants.
 
         Only the invisible ``colour_hint`` key is added; description, remarks,
         and nine_digit_part_no are left unchanged.
@@ -1317,6 +1410,11 @@ class YamahaCatalogueExtractor:
             code = segments[2] if len(segments) >= 3 else ""
             abbr = code_suffix_map.get(code, "")
             if abbr:
+                if discriminating_bases is not None:
+                    base = f"{segments[0]}-{segments[1]}" if len(segments) >= 2 else ""
+                    if base not in discriminating_bases:
+                        updated.append(row)
+                        continue
                 new_row = dict(row)
                 new_row["colour_hint"] = abbr
                 updated.append(new_row)
@@ -1324,24 +1422,491 @@ class YamahaCatalogueExtractor:
                 updated.append(row)
         return updated
 
+    @staticmethod
+    def _extract_remark_colour_hints(
+        rows: list[dict],
+        colour_codes: list[dict],
+    ) -> list[dict]:
+        """Tag rows using the Remarks column as the primary colour source.
+
+        Business meaning: Yamaha India catalogues use the Remarks column to
+        indicate which colour variant a part belongs to, via five forms:
+
+          • Bare abbreviation:   "YB"              → colour_hint = "YB"
+          • FOR/UR + abbr:       "FOR YB"          → colour_hint = "YB"
+          • [Part] FOR [Bike]:   "LLGS6 FOR DBNM8" → colour_hint = "DBNM8"
+                                 "YB FOR YB,RSH"   → colour_hint = "YB,RSH"
+          • EXCEPT + abbr:       "EXCEPT YB"       → colour_hint = all other colours
+          • Number suffix:       "A-2" / "14-2"    → colour_hint = foreword colour[index 2]
+                                 Used when the foreword table assigns a number to each colour
+                                 and the remark encodes the colour as the number after "-".
+                                 Only fires when none of the above patterns matched AND the
+                                 suffix number is within the foreword colour count.
+
+        "UR" (Use specified parts number) is treated identically to "FOR" when
+        the referenced token is a known foreword colour abbreviation.
+
+        Only tokens that resolve to known foreword abbreviations are accepted.
+        Remarks containing solely non-colour content (e.g. "UN", "AP") produce
+        no hint, leaving the row as Shared.  Comma-separated colour_hint is
+        used when a part belongs to multiple colours.
+
+        Called before _extract_foreword_colour_hints so that remark-based
+        hints have priority over description-based ones.
+        """
+        known_abbrs: set[str] = {
+            c["abbreviation"].upper()
+            for c in colour_codes
+            if c.get("abbreviation")
+        }
+        # Preserve foreword order for EXCEPT complement and index lookup
+        all_abbrs_ordered: list[str] = [
+            c["abbreviation"].upper()
+            for c in colour_codes
+            if c.get("abbreviation")
+        ]
+        # 1-based index → abbreviation (foreword row position = colour index)
+        index_to_abbr: dict[int, str] = {
+            i + 1: abbr for i, abbr in enumerate(all_abbrs_ordered)
+        }
+        if not known_abbrs:
+            return rows
+
+        def _norm(s: str) -> str:
+            return re.sub(r"[\s\-]", "", s)
+
+        norm_to_abbr: dict[str, str] = {_norm(a): a for a in known_abbrs}
+        name_to_abbr: dict[str, str] = {
+            c["name"].upper(): c["abbreviation"].upper()
+            for c in colour_codes
+            if c.get("name") and c.get("abbreviation")
+        }
+        norm_name_to_abbr: dict[str, str] = {
+            _norm(k): v for k, v in name_to_abbr.items()
+        }
+
+        def _resolve_one(token: str) -> str | None:
+            cu = token.strip().upper().rstrip(".!?,;:")  # strip trailing punctuation (PDF artefact)
+            if cu in known_abbrs:
+                return cu
+            n = _norm(cu)
+            if n in norm_to_abbr:
+                return norm_to_abbr[n]
+            if cu in name_to_abbr:
+                return name_to_abbr[cu]
+            if n in norm_name_to_abbr:
+                return norm_name_to_abbr[n]
+            # Fuzzy: swap digit 1 ↔ letter I — a common PDF rendering artefact
+            # where the foreword has "BWCI" but remarks say "BWC1" (or vice versa).
+            for src, dst in (("1", "I"), ("I", "1")):
+                if src in cu:
+                    alt = cu.replace(src, dst)
+                    if alt in known_abbrs:
+                        return alt
+                    alt_n = _norm(alt)
+                    if alt_n in norm_to_abbr:
+                        return norm_to_abbr[alt_n]
+            return None
+
+        def _split_tokens(text: str) -> list[str]:
+            return [t.strip() for t in re.split(r"[,/]+", text) if t.strip()]
+
+        _FOR_UR_RE = re.compile(r"^\s*(?:FOR|UR)\s+(.+)$", re.IGNORECASE)
+        # "EXCEPT FOR YB" and "EXCEPT YB" both exclude YB from the hint set.
+        _EXCEPT_RE = re.compile(r"^\s*EXCEPT\s+(?:FOR\s+)?(.+)$", re.IGNORECASE)
+        _EXCEPT_INNER_RE = re.compile(r"^EXCEPT\s+(?:FOR\s+)?(.+)$", re.IGNORECASE)
+        # Embedded FOR anywhere in remark text — catches "UR FOR YB", "UR S3 FOR YB"
+        _INNER_FOR_RE = re.compile(r"\bFOR\s+([A-Z0-9][A-Z0-9,/\s-]*?)\s*$", re.IGNORECASE)
+        # Number-suffix: remark ends with "-<digit(s)>" or IS just "<digit(s)>"
+        # e.g. "A-2" → index 2, "14-3" → index 3, "2" → index 2
+        # Only valid when the suffix number is within the foreword colour count.
+        _NUM_SUFFIX_RE = re.compile(r"(?:^|-)(\d+)\s*$")
+
+        def _parse_remark(rem: str) -> str | None:
+            rem = rem.strip()
+            if not rem:
+                return None
+            # EXCEPT: tag with every foreword colour NOT mentioned
+            m = _EXCEPT_RE.match(rem)
+            if m:
+                excluded: set[str] = set()
+                for tok in _split_tokens(m.group(1)):
+                    a = _resolve_one(tok)
+                    if a:
+                        excluded.add(a)
+                if excluded:
+                    included = [a for a in all_abbrs_ordered if a not in excluded]
+                    return ",".join(included) if included else None
+                return None
+            # FOR / UR prefix + colour(s)
+            # Handles "FOR YB", "UR YB", "FOR YB,DRMK"
+            m = _FOR_UR_RE.match(rem)
+            if m:
+                # Strip parenthetical descriptive notes like "(for blue scooter)"
+                # appended by some catalogues after the colour code:
+                # "FOR DPBML (for blue scooter)" → content = "DPBML"
+                _content = re.sub(r"\s*\([^)]*\)\s*", " ", m.group(1)).strip().rstrip(".!?,;:")
+                # "UR EXCEPT BWC1" → treat EXCEPT content as exclusion list
+                _exc_inner = _EXCEPT_INNER_RE.match(_content)
+                if _exc_inner:
+                    _excluded: set[str] = set()
+                    for tok in _split_tokens(_exc_inner.group(1)):
+                        a = _resolve_one(tok)
+                        if a:
+                            _excluded.add(a)
+                    if _excluded:
+                        _included = [a for a in all_abbrs_ordered if a not in _excluded]
+                        return ",".join(_included) if _included else None
+                    return None
+                resolved: list[str] = []
+                for tok in _split_tokens(_content):
+                    a = _resolve_one(tok)
+                    if a:
+                        resolved.append(a)
+                # Fallback: search for embedded "FOR [colour]" within the content.
+                # Handles "UR FOR YB" (outer=UR, content="FOR YB") and
+                # "UR S3 FOR YB" (outer=UR, content="S3 FOR YB").
+                if not resolved:
+                    m_inner = _INNER_FOR_RE.search(_content)
+                    if m_inner:
+                        for tok in _split_tokens(m_inner.group(1)):
+                            a = _resolve_one(tok)
+                            if a:
+                                resolved.append(a)
+                return ",".join(dict.fromkeys(resolved)) if resolved else None
+            # General "[part_colour] FOR [bike_colours]" — FOR anywhere in remark.
+            # "LLGS6 FOR DBNM8"           → colour_hint = "DBNM8"
+            # "YB FOR YB,RSH,SM12,MBM3"   → colour_hint = "YB,RSH,SM12,MBM3"
+            # "LNYM9 FOR MBL2,MDRM3"      → colour_hint = "MBL2,MDRM3"
+            # The colour(s) BEFORE FOR are the part's own paint code and are ignored
+            # for filtering; only colours AFTER FOR are the bike-variant selectors.
+            m_any_for = _INNER_FOR_RE.search(rem)
+            if m_any_for:
+                resolved_for: list[str] = []
+                for tok in _split_tokens(m_any_for.group(1)):
+                    a = _resolve_one(tok)
+                    if a:
+                        resolved_for.append(a)
+                if resolved_for:
+                    return ",".join(dict.fromkeys(resolved_for))
+            # Bare form: remark consists SOLELY of colour abbreviations/names.
+            # A bare colour code (e.g. "YB" on a cast wheel) marks the PART'S
+            # OWN paint finish, NOT which motorcycle colour variant it belongs to.
+            # Treat as universal → return None, consistent with remark_parser.py.
+            # If ANY token fails to resolve, fall through to the number-suffix
+            # path below so "A-2" can still reach number-suffix.
+            tokens = _split_tokens(rem)
+            if tokens:
+                all_resolved = True
+                for tok in tokens:
+                    if _resolve_one(tok) is None:
+                        all_resolved = False
+                        break
+                if all_resolved:
+                    return None  # bare colour code = own paint finish = universal
+            # Number-suffix fallback (last resort): "A-2", "14-2", "2" etc.
+            # The foreword assigns a sequential index to each colour; the number
+            # after the last "-" (or the whole remark if purely numeric) is that
+            # index.  Only fires when nothing above matched AND the suffix number
+            # is within the valid range [1, len(colour_codes)].
+            # Guard: reject numbers with leading zeros.
+            #   Yamaha colour indices are plain integers (1, 2, 3 …) — never "01".
+            #   Yamaha part-number cross-references in remarks end in "-01", "-02"
+            #   etc. — always with a leading zero.  This stops "4S-E1310-01"
+            #   (a part-number reference) from mapping to colour index 1 (YB).
+            # Remark "SL-3" never reaches here: bare form resolves "SL-3" first.
+            # Remark "90387-10848" never fires: 10848 > colour count.
+            m_num = _NUM_SUFFIX_RE.search(rem)
+            if m_num and index_to_abbr:
+                num_str = m_num.group(1)
+                if not num_str.startswith("0"):  # reject "01", "02", etc.
+                    idx = int(num_str)
+                    abbr = index_to_abbr.get(idx)
+                    if abbr:
+                        return abbr
+            return None
+
+        updated: list[dict] = []
+        for row in rows:
+            if row.get("colour_hint"):
+                updated.append(row)
+                continue
+            rem = (row.get("remarks") or "").strip()
+            hint = _parse_remark(rem)
+            if hint:
+                new_row = dict(row)
+                new_row["colour_hint"] = hint
+                updated.append(new_row)
+            else:
+                updated.append(row)
+        return updated
+
+    @staticmethod
+    def _extract_foreword_colour_hints(
+        rows: list[dict],
+        colour_codes: list[dict],
+    ) -> list[dict]:
+        """Tag rows whose description ends with a foreword colour abbreviation or name.
+
+        Business meaning: some Yamaha PDFs have a proper foreword colour table
+        AND embed the colour in the Description column as a trailing parenthetical.
+        Two sub-formats are handled:
+          • Abbreviation form: "FRONT FENDER COMP (YB)" — YB is a foreword abbreviation.
+          • Name form: "FRONT FENDER (YAMAHA BLACK)" — full colour name that maps to YB.
+          • Unknown-code form: "FRONT FENDER (DPBMV)" — abbreviation-shaped code not in the
+            foreword table but a sibling of confirmed colour-variant rows in the same group.
+
+        Each colour variant is a separate row with a different part number.  This method
+        sets colour_hint on these rows so that _build_rosters and _assemble_builds handle
+        them like standard FOR/EXCEPT remark rows.
+
+        Only tags rows in (section, ref_no) groups that have ≥2 different part
+        numbers with confirmed colour parentheticals — a lone parenthetical like
+        "HOLDER (INNER)" is never tagged even if it accidentally matches.
+        """
+        known_abbrs: set[str] = {
+            c["abbreviation"].upper()
+            for c in colour_codes
+            if c.get("abbreviation")
+        }
+        # Normalized lookup: strip hyphens and spaces for fuzzy matching.
+        # Handles PDF extraction artifacts like "SL 3" → "SL3" → "SL-3",
+        # or "DRM K" → "DRMK" → "DRMK".
+        def _norm(s: str) -> str:
+            return re.sub(r"[\s\-]", "", s)
+
+        norm_to_abbr: dict[str, str] = {_norm(a): a for a in known_abbrs}
+        # Name → abbreviation: "(YAMAHA BLACK)" maps to abbreviation "YB" etc.
+        name_to_abbr: dict[str, str] = {
+            c["name"].upper(): c["abbreviation"].upper()
+            for c in colour_codes
+            if c.get("name") and c.get("abbreviation")
+        }
+        if not known_abbrs:
+            return rows
+
+        # Match descriptions whose suffix is a known foreword abbreviation or name.
+        # Forms seen in Yamaha India catalogues:
+        #   "(ABBR)"      — paren form:       "FRONT FENDER COMP (YB)"
+        #   "- ABBR"      — dash-suffix form: "COVER SIDE 1 (LH)- YB", "FUEL TANK - SL-3"
+        #   "(SUB)-DRM K" — dash after paren: colour has a space ("DRM K" not just "DRMK")
+        #   "(SUB)YB"     — no separator:     colour appended directly after closing paren
+        #   "BASE SL-3"   — no paren at all:  OCR artifact or format-B PDFs
+        # _DASH allows spaces in group 2 to capture "DRM K", "SL 3", etc.
+        _PAREN = re.compile(r"^(.+?)\s*\(([^)]+)\)\s*$")
+        _DASH = re.compile(r"^(.+?)\s*[-–]\s*([A-Z0-9][A-Z0-9\s-]*)\s*$")
+        _ABBR_LIKE = re.compile(r"^[A-Z][A-Z0-9]{1,7}$")
+
+        def _resolve_abbr(content: str) -> str | None:
+            """Return the canonical abbreviation for parenthetical content, or None."""
+            cu = content.strip().upper()
+            if cu in known_abbrs:
+                return cu
+            normed = _norm(cu)
+            if normed in norm_to_abbr:
+                return norm_to_abbr[normed]
+            if cu in name_to_abbr:
+                return name_to_abbr[cu]
+            normed_name = _norm(cu)
+            if normed_name in {_norm(k): v for k, v in name_to_abbr.items()}:
+                return {_norm(k): v for k, v in name_to_abbr.items()}[normed_name]
+            return None
+
+        def _detect_known_abbr(desc: str) -> str | None:
+            """Try all extraction patterns; return a colour abbreviation or None.
+
+            Returns known foreword abbreviations (via _resolve_abbr) for patterns
+            1-3, or an unknown-but-abbreviation-shaped code for pattern 4 (FOR).
+            """
+            # Pattern 1: paren form — "(YAMAHA BLACK)", "(YB)"
+            # Pattern 1b: dash-suffix — "COVER (LH)-YB", "FUEL TANK - SL-3"
+            m = _PAREN.match(desc) or _DASH.match(desc)
+            if m:
+                a = _resolve_abbr(m.group(2))
+                if a is not None:
+                    return a
+            # Pattern 2: colour appended after closing paren with optional separator
+            # Handles "(LH)YB", "(LH)-YB", "(LH) SL-3"
+            if ")" in desc:
+                after = desc[desc.rfind(")") + 1:].strip().lstrip("-").strip()
+                if after:
+                    a = _resolve_abbr(after)
+                    if a is not None:
+                        return a
+            # Pattern 3: description ends with a known colour abbreviation (normalised)
+            # Catches "SC00P & GUIDE AIR1 SL-3" (OCR typo, no paren/dash separator)
+            norm_d = _norm(desc.upper())
+            for ka in sorted(known_abbrs, key=len, reverse=True):
+                ka_n = _norm(ka)
+                if ka_n and norm_d.endswith(ka_n) and len(norm_d) > len(ka_n):
+                    return ka
+            # Pattern 4: "FOR COLOUR" or "UR COLOUR" at end of description.
+            # "CAST WHEEL -YB FOR CMY"    → CMY (the part is FOR the CMY colour variant).
+            # "COVER SIDE -UR YB"         → YB  (UR = Use specified parts number for YB).
+            # FOR is prioritised first; UR is checked separately below.
+            # Even when CMY is not in the foreword table, extract it as a synthetic hint
+            # so rows appear under CMY colour in the viewer.
+            m_for = re.search(r"\b(?:FOR|UR)\s+([A-Z0-9][A-Z0-9\s-]*)\s*$", desc, re.IGNORECASE)
+            if m_for:
+                target = m_for.group(1).strip()
+                a = _resolve_abbr(target)
+                if a is not None:
+                    return a
+                unk = _norm(target.upper())
+                if len(unk) >= 2:
+                    # OCR prefix: unk starts with a known abbr and is only slightly longer
+                    # e.g. "LGM61" → starts with "LGM6", extra "1" is OCR noise.
+                    for ka in sorted(known_abbrs, key=len, reverse=True):
+                        ka_n = _norm(ka)
+                        if ka_n and unk.startswith(ka_n) and len(unk) <= len(ka_n) + 3:
+                            return ka
+                    # OCR truncation: a unique known abbr starts with unk
+                    # e.g. "BWC" → "BWC1" (OCR dropped the trailing digit).
+                    prefix_matches = [
+                        ka for ka in known_abbrs
+                        if _norm(ka).startswith(unk) and len(_norm(ka)) <= len(unk) + 3
+                    ]
+                    if len(prefix_matches) == 1:
+                        return prefix_matches[0]
+                    if _ABBR_LIKE.match(unk):
+                        return unk
+            return None
+
+        groups: dict[tuple[str, str], list[int]] = {}
+        parsed: dict[int, str] = {}
+
+        for idx, row in enumerate(rows):
+            key = (row.get("section", ""), row.get("ref_no", ""))
+            # Rows already hinted by remarks count toward group confirmation.
+            # Use the first listed colour for the ≥2-distinct-colours check.
+            existing = (row.get("colour_hint") or "").strip()
+            if existing:
+                primary = existing.split(",")[0].strip()
+                groups.setdefault(key, []).append(idx)
+                parsed[idx] = primary
+                continue
+            desc = (row.get("description") or "").strip()
+            abbr = _detect_known_abbr(desc)
+            if abbr is None:
+                continue
+            groups.setdefault(key, []).append(idx)
+            parsed[idx] = abbr
+
+        # Confirm groups by ≥2 distinct colour abbreviations (not part_nos).
+        # Using abbreviations handles the case where the same part_no appears for
+        # multiple colours (e.g. "TANK (YAMAHA BLACK)" and "TANK (SL-3)" sharing
+        # part_no 5TS-XF41A-40) — distinct colours are the real confirmation signal.
+        variant_idxs: set[int] = set()
+        confirmed_keys: set[tuple[str, str]] = set()
+        for key, idxs in groups.items():
+            abbrs = {parsed[i] for i in idxs}
+            if len(abbrs) >= 2:
+                variant_idxs.update(idxs)
+                confirmed_keys.add(key)
+
+        if not variant_idxs:
+            return rows
+
+        # Second pass: within confirmed colour-variant groups, tag any untagged
+        # sibling rows.  First tries to resolve the parenthetical to a known
+        # abbreviation (handles "SL 3" → "SL-3", "DRM K" → "DRMK").
+        # Falls back to using an abbreviation-shaped raw token for codes not in
+        # the foreword table (e.g. "DPBMV").
+        all_group_members: dict[tuple[str, str], list[int]] = {}
+        for idx, row in enumerate(rows):
+            key = (row.get("section", ""), row.get("ref_no", ""))
+            if key in confirmed_keys:
+                all_group_members.setdefault(key, []).append(idx)
+
+        # Applicability notes ("YB FOR CMY", "SR FOR BMC") look like colour codes after
+        # normalisation but are NOT colour names — they mean "use part X for colour Y".
+        # Reject any raw token whose source content contains FOR/EXCEPT as a word.
+        _FOR_EXCEPT_RE = re.compile(r"\bFOR\b|\bEXCEPT\b", re.IGNORECASE)
+
+        for key in confirmed_keys:
+            for idx in all_group_members.get(key, []):
+                if idx in variant_idxs:
+                    continue
+                # Skip rows already hinted by remarks — don't overwrite
+                if rows[idx].get("colour_hint"):
+                    variant_idxs.add(idx)
+                    continue
+                desc = (rows[idx].get("description") or "").strip()
+                # Try to resolve to a known abbreviation via all patterns
+                abbr: str | None = _detect_known_abbr(desc)
+                if abbr is None:
+                    # Unknown code (e.g. "DPBMV"): fall back to abbreviation-shaped
+                    # raw token from paren/dash/after-paren extraction.
+                    # Reject if the source content is an applicability note like
+                    # "YB FOR CMY" or "SR FOR BMC" — those are cross-colour references,
+                    # not colour names, and CMY/BMC may not be in this PDF's colour table.
+                    raw: str | None = None
+                    raw_src: str = ""
+                    m = _PAREN.match(desc) or _DASH.match(desc)
+                    if m:
+                        raw_src = m.group(2).strip()
+                        raw = _norm(raw_src.upper())
+                    elif ")" in desc:
+                        after = desc[desc.rfind(")") + 1:].strip().lstrip("-").strip()
+                        if after:
+                            raw_src = after
+                            raw = _norm(after.upper())
+                    if (
+                        raw
+                        and len(raw) >= 2
+                        and _ABBR_LIKE.match(raw)
+                        and not _FOR_EXCEPT_RE.search(raw_src)
+                    ):
+                        abbr = raw
+                if abbr is not None:
+                    parsed[idx] = abbr
+                    variant_idxs.add(idx)
+
+        updated: list[dict] = []
+        for idx, row in enumerate(rows):
+            if idx in variant_idxs:
+                if row.get("colour_hint"):
+                    # Preserve the remark-based hint; do not overwrite with description
+                    updated.append(row)
+                else:
+                    new_row = dict(row)
+                    new_row["colour_hint"] = parsed[idx]
+                    updated.append(new_row)
+            else:
+                updated.append(row)
+
+        return updated
+
     @classmethod
     def _lift_desc_colours(cls: type, rows: list[dict]) -> tuple[list[dict], list[dict]]:
-        """Lift colour names from description parentheses into remarks.
+        """Lift colour names and abbreviations from description parentheses.
 
         Business meaning: some older Yamaha catalogues (e.g. CRUX-S PC5KA5)
-        encode colour variants as 'DESCRIPTION (COLOUR NAME)' in the
+        encode colour variants as 'DESCRIPTION (COLOUR NAME OR ABBR)' in the
         Description column rather than via a foreword colour table plus
         FOR/EXCEPT remarks.  This method normalises those rows so the rest of
         the pipeline (roster-builder, frontend filter) can treat them
         identically to the standard FOR/EXCEPT format.
 
-        Detection rules (BOTH must hold):
-          1. The parenthetical content contains at least one word from
-             _DESC_COLOUR_WORDS (guards against size specs like "STD" /
-             "0.50MM O/S" and functional labels like "COVER").
-          2. ≥2 rows share the same (section, ref_no, base_description)
-             with *different* part numbers — the colour-variant signal.
-             A lone parenthetical e.g. 'FLAP (COVER)' is never lifted.
+        Three detection passes:
+
+        Pass 1 — colour-vocabulary match:
+          The parenthetical content contains at least one word from
+          _DESC_COLOUR_WORDS (e.g. "YAMAHA BLACK", "SILVER-3").
+          Groups with ≥2 different part_nos are confirmed colour-variant groups.
+
+        Pass 2 — sibling abbreviation tagging:
+          Within confirmed groups from Pass 1, any untagged sibling row whose
+          parenthetical looks like a Yamaha abbreviation (≥2 uppercase chars,
+          starts with a letter) is also tagged.  Catches "(DRMK)", "(DPBMV)"
+          etc. that don't contain colour vocabulary but coexist with named
+          colour siblings.
+
+        Pass 3 — cross-group frequency (fallback when Pass 1 finds nothing):
+          If zero groups were confirmed in Pass 1, look for abbreviations that
+          appear as parenthetical suffixes across ≥3 different (section, ref_no)
+          groups, each with ≥2 different part_nos.  Requires ≥3 alphanumeric
+          characters to exclude 2-char side codes like "LH", "RH".
 
         Side-effect on each affected row:
           • colour_hint → set to the colour abbreviation (e.g. 'YB').
@@ -1362,6 +1927,15 @@ class YamahaCatalogueExtractor:
         # 'COVER TAIL ASSY.(SILVER-3)' where PDF extraction omits the space.
         # Group 1 = base description, group 2 = parenthetical content.
         _PAT = re.compile(r"^(.+?)\s*\(([^)]+)\)(?:\s*[-–]\s*\S+)?$")
+        # Abbreviation-shaped content: uppercase, 2-8 alphanumeric chars (+ hyphens),
+        # starts with a letter.  Matches "DRMK", "DPBMV", "YB", "SL-3", etc.
+        _ABBR_LIKE = re.compile(r"^[A-Z][A-Z0-9-]{1,7}$")
+        # Direction/position qualifiers that appear in paren but are NOT colour codes.
+        # When paren content is one of these, look at after-paren content for colour.
+        _DIR_CODES = frozenset({
+            "LH", "RH", "L", "R", "LEFT", "RIGHT", "FRONT", "REAR",
+            "UPPER", "LOWER", "INNER", "OUTER", "TOP", "BOTTOM",
+        })
 
         def _is_colour_content(content: str) -> bool:
             # Normalise hyphens/digits around colour words before checking
@@ -1385,8 +1959,20 @@ class YamahaCatalogueExtractor:
             # (e.g. "COVER TAIL 1." and "COVER TAIL 1" group together).
             base = m.group(1).strip().rstrip(". ")
             content = m.group(2).strip()
+
             if not _is_colour_content(content):
-                continue  # size spec / functional label — skip
+                # Paren holds a direction/position qualifier (LH, RH, etc.) —
+                # check for colour vocabulary in the content after the closing paren.
+                # Handles "SCOOP (LH) YAMAHA BLACK" and "(LH)-SILVER 3" formats.
+                if ")" in desc:
+                    after = desc[desc.rfind(")") + 1:].strip().lstrip("-").strip()
+                    if after and _is_colour_content(after):
+                        content = after
+                    else:
+                        continue
+                else:
+                    continue  # size spec / functional label — skip
+
             norm = _normalise_colour(content)
             # Group by (section, ref_no) only — NOT by base description.
             # Yamaha sometimes writes descriptions inconsistently between
@@ -1397,12 +1983,100 @@ class YamahaCatalogueExtractor:
             groups[key].append(idx)
             parsed[idx] = (base, norm)
 
-        # Only groups with 2+ different part_nos are confirmed colour variants
+        # Confirmed colour-variant groups: ≥2 different part_nos
         variant_idxs: set[int] = set()
+        confirmed_keys: set[tuple] = set()
         for _key, idxs in groups.items():
             pns = {rows[i].get("part_no", "") for i in idxs}
             if len(pns) >= 2:
                 variant_idxs.update(idxs)
+                confirmed_keys.add(_key)
+
+        # Pass 2: within confirmed groups, tag any untagged sibling rows whose
+        # parenthetical looks like a Yamaha abbreviation code.  Catches colour
+        # abbreviations like "(DRMK)" or "(DPBMV)" that coexist with named
+        # colour rows ("(YAMAHA BLACK)") in the same (section, ref_no) group.
+        if confirmed_keys:
+            all_grp: dict[tuple, list[int]] = defaultdict(list)
+            for idx2, row2 in enumerate(rows):
+                key2 = (row2.get("section", ""), row2.get("ref_no", ""))
+                if key2 in confirmed_keys:
+                    all_grp[key2].append(idx2)
+
+            for key2 in confirmed_keys:
+                for idx2 in all_grp[key2]:
+                    if idx2 in variant_idxs:
+                        continue
+                    desc2 = rows[idx2].get("description", "")
+                    m2 = _PAT.match(desc2)
+                    if not m2:
+                        continue
+                    content2 = m2.group(2).strip().upper()
+                    base2 = m2.group(1).strip().rstrip(". ")
+
+                    if content2 in _DIR_CODES and ")" in desc2:
+                        # Paren holds a direction code — the colour is after the paren.
+                        # "SCOOP (LH)-DRM K" → colour token = "DRMK" (spaces stripped).
+                        after2 = desc2[desc2.rfind(")") + 1:].strip().lstrip("-").strip()
+                        if after2:
+                            # Normalise: strip spaces so "DRM K" → "DRMK" for ABBR_LIKE check
+                            tok2 = re.sub(r"\s", "", after2.upper())
+                            if tok2 and _ABBR_LIKE.match(tok2) and tok2 not in _DIR_CODES:
+                                parsed[idx2] = (base2, tok2)
+                                variant_idxs.add(idx2)
+                    elif _ABBR_LIKE.match(content2) and content2 not in _DIR_CODES:
+                        # Use the abbreviation directly as the colour norm key
+                        parsed[idx2] = (base2, content2)
+                        variant_idxs.add(idx2)
+
+        # Pass 3 (fallback): if Pass 1 found no confirmed groups, look for
+        # abbreviation-shaped parentheticals (or after-paren tokens when the paren
+        # holds a direction code) that repeat across ≥3 different (section, ref_no)
+        # groups.  Requires ≥3 alphanumeric chars to exclude 2-char side codes (LH, RH).
+        if not confirmed_keys:
+            cand_by_group: dict[tuple, list[tuple[int, str]]] = defaultdict(list)
+            for idx3, row3 in enumerate(rows):
+                desc3 = row3.get("description", "")
+                m3 = _PAT.match(desc3)
+                if not m3:
+                    continue
+                content3 = m3.group(2).strip().upper()
+                # When paren content is a direction code, try after-paren for colour
+                if content3 in _DIR_CODES and ")" in desc3:
+                    after3 = desc3[desc3.rfind(")") + 1:].strip().lstrip("-").strip()
+                    if after3:
+                        content3 = re.sub(r"\s", "", after3.upper())
+                if not _ABBR_LIKE.match(content3):
+                    continue
+                if len(re.sub(r"[^A-Z0-9]", "", content3)) < 3:
+                    continue  # too short (LH/RH = 2 alnum chars)
+                key3 = (row3.get("section", ""), row3.get("ref_no", ""))
+                cand_by_group[key3].append((idx3, content3))
+
+            # Count groups each abbreviation appears in (only multi-part groups)
+            abbr_group_sets: dict[str, set] = defaultdict(set)
+            for key3, entries in cand_by_group.items():
+                pns3 = {rows[i].get("part_no", "") for i, _ in entries}
+                if len(pns3) >= 2:
+                    for _, c3 in entries:
+                        abbr_group_sets[c3].add(key3)
+
+            multi_group = {c for c, gs in abbr_group_sets.items() if len(gs) >= 3}
+            if multi_group:
+                for key3, entries in cand_by_group.items():
+                    pns3 = {rows[i].get("part_no", "") for i, _ in entries}
+                    if len(pns3) < 2:
+                        continue
+                    if not any(c3 in multi_group for _, c3 in entries):
+                        continue
+                    for idx3, c3 in entries:
+                        if idx3 not in variant_idxs:
+                            row3 = rows[idx3]
+                            desc3 = row3.get("description", "")
+                            m3 = _PAT.match(desc3)
+                            base3 = m3.group(1).strip().rstrip(". ") if m3 else ""
+                            parsed[idx3] = (base3, c3)
+                            variant_idxs.add(idx3)
 
         if not variant_idxs:
             return rows, []
@@ -1412,7 +2086,8 @@ class YamahaCatalogueExtractor:
         for idx in sorted(variant_idxs):
             seen_colours.setdefault(parsed[idx][1], None)
 
-        # Generate short, unique abbreviations (initials of colour name words)
+        # Generate abbreviations: abbreviation-shaped norms (e.g. "DRMK", "YB")
+        # are used as-is; full colour names go through _make_abbr.
         def _make_abbr(name: str, used: set[str]) -> str:
             words = re.sub(r"[^A-Z0-9 ]", "", name).split()
             base = "".join(w[0] if w.isalpha() else w for w in words)[:6]
@@ -1428,20 +2103,37 @@ class YamahaCatalogueExtractor:
 
         used_abbrs: set[str] = set()
         colour_abbr: dict[str, str] = {}
+        # Process full-name norms first so _make_abbr can claim their abbreviations
+        # before abbreviation-shaped norms do the same (avoids collisions).
+        sorted_colours = sorted(
+            seen_colours,
+            key=lambda c: (1 if _ABBR_LIKE.match(c) else 0, c),
+        )
+        for cu in sorted_colours:
+            if _ABBR_LIKE.match(cu):
+                # Use the abbreviation directly; mark as taken
+                used_abbrs.add(cu)
+                colour_abbr[cu] = cu
+            else:
+                colour_abbr[cu] = _make_abbr(cu, used_abbrs)
+
+        # Deduplicate by abbreviation (same abbr = same colour, different norm spelling)
+        seen_abbrs: set[str] = set()
+        synthetic_colour_codes = []
         for cu in seen_colours:
-            colour_abbr[cu] = _make_abbr(cu, used_abbrs)
+            abbr = colour_abbr[cu]
+            if abbr not in seen_abbrs:
+                seen_abbrs.add(abbr)
+                synthetic_colour_codes.append(
+                    {
+                        "abbreviation": abbr,
+                        "name": cu.title(),
+                        "code": "",
+                        "is_model_colour": False,
+                    }
+                )
 
-        synthetic_colour_codes = [
-            {
-                "abbreviation": colour_abbr[cu],
-                "name": cu.title(),
-                "code": "",
-                "is_model_colour": False,
-            }
-            for cu in seen_colours
-        ]
-
-        # Pass 2: tag affected rows with a colour_hint field.
+        # Final pass: tag affected rows with a colour_hint field.
         # Description, remarks, and nine_digit_part_no are NEVER modified —
         # the user sees exactly what the PDF shows (e.g. "FRONT FENDER (YAMAHA BLACK)"
         # and "5A-WF151-70" remain unchanged).  Only the invisible colour_hint key
@@ -1495,6 +2187,100 @@ class YamahaCatalogueExtractor:
         return None
 
     @staticmethod
+    def _extract_model_no(pdf_path: Path) -> str | None:
+        """Extract the Yamaha type/model code from the PDF cover page.
+
+        Business meaning: identifies the Yamaha internal type designation
+        (e.g. "5YY8" for Gladiator 5 Speed, "BP16" for Alfa, "B65J" for
+        Aerox) that appears on the catalogue cover.  Distinct from the folder
+        model name ("GLADIATOR") and from the variant list (which may contain
+        multiple codes for multi-variant catalogues).
+
+        Tries six strategies in order, using pymupdf (handles CID-encoded
+        fonts that pdfplumber cannot decode):
+          S1  Isolated line on cover page that is itself a model code
+          S2  Parentheses pattern: ( CODE ) — may have internal spaces
+          S3  Slash pair: CODE1/CODE2 — takes first
+          S4  "MODEL CODE1, ..." prefix line
+          S5  Parentheses in the PDF filename
+          S6  First model-code token in the PDF filename (stem)
+
+        A model code is 3-8 alphanumeric chars containing both letters and
+        digits (excludes all-digit years, all-alpha words, and part numbers).
+        """
+        import fitz  # pymupdf
+
+        _PAREN = re.compile(r"\(\s*([A-Z0-9][A-Z0-9 ]{1,7}[A-Z0-9])\s*\)")
+        _SLASH = re.compile(r"\b([A-Z0-9]{3,6})\s*/\s*([A-Z0-9]{3,6})\b")
+        _MODEL = re.compile(r"\bMODEL\s+([A-Z0-9]{3,8})")
+
+        def _is_code(s: str) -> bool:
+            s = s.strip().replace(" ", "")
+            return (
+                3 <= len(s) <= 8
+                and s.isalnum()
+                and any(c.isdigit() for c in s)
+                and any(c.isalpha() for c in s)
+            )
+
+        try:
+            doc = fitz.open(str(pdf_path))
+            for pg_idx in range(min(2, len(doc))):
+                text = doc[pg_idx].get_text()
+                # S1: isolated line
+                for line in text.splitlines():
+                    if _is_code(line):
+                        return line.strip()
+                # S2: parentheses (collapse internal spaces)
+                m = _PAREN.search(text)
+                if m:
+                    code = m.group(1).replace(" ", "")
+                    if _is_code(code):
+                        return code
+                # S3: slash pair — take first
+                m = _SLASH.search(text)
+                if m and _is_code(m.group(1)) and _is_code(m.group(2)):
+                    return m.group(1)
+                # S4: "MODEL CODE1, ..." prefix
+                m = _MODEL.search(text)
+                if m and _is_code(m.group(1)):
+                    return m.group(1)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # S5: parentheses in filename
+        m = _PAREN.search(pdf_path.stem.upper())
+        if m:
+            code = m.group(1).replace(" ", "")
+            if _is_code(code):
+                return code
+
+        # S6: first model-code token in filename stem
+        for token in re.split(r"[\s_\-,]+", pdf_path.stem):
+            t = token.strip().upper()
+            if _is_code(t):
+                return t
+
+        # S7: "XXXXX series" / "XXXXX SERIES" pattern in foreword pages (pdfplumber).
+        # Older Yamaha catalogues (e.g. LIBERO G5) have scanned cover pages that
+        # pymupdf cannot read as text, but the FOREWORD page (pages 2-5) is
+        # text-layer and contains "5TSD series" or similar.
+        try:
+            import pdfplumber as _pp  # noqa: PLC0415
+
+            _SERIES_PAT = re.compile(r"\b([A-Z0-9]{3,8})\s+SERIES\b")
+            with _pp.open(str(pdf_path)) as _pdf:
+                for _pg in _pdf.pages[1:6]:
+                    _text = (_pg.extract_text() or "").upper()
+                    _m = _SERIES_PAT.search(_text)
+                    if _m and _is_code(_m.group(1)):
+                        return _m.group(1)
+        except Exception:  # noqa: BLE001
+            pass
+
+        return None
+
+    @staticmethod
     def _extract_colour_codes(pdf_path: Path) -> list[dict]:
         """Extract the colour-variant table from PDF intro pages.
 
@@ -1534,6 +2320,8 @@ class YamahaCatalogueExtractor:
         # the reverse. Allowing 2-digit in _NUMERIC_CODE_RE triggers the swap.
         _NUMERIC_CODE_RE = re.compile(r"^\d{2,5}$")
         _ALPHA_ABBR_RE = re.compile(r"^[A-Z][A-Z0-9]{1,7}$")
+        # LIBERO-style: paint code with slashes ("1X/33/P1", "OX/PO/P1")
+        _SLASH_CODE_RE = re.compile(r"^[A-Z0-9]+(?:/[A-Z0-9]+)+$")
         # Vocabulary check: real colour names always contain at least one of these.
         # Prevents TOC/section-name rows ("CYLINDER HEAD", "FIG 1") being accepted.
         _COLOUR_WORDS = frozenset(
@@ -1640,35 +2428,94 @@ class YamahaCatalogueExtractor:
                 "THEN",
                 "EACH",
                 "USED",
+                # English pronouns / determiners that are never Yamaha colour codes.
+                # "YOU" is a known false-positive: foreword prose "...When you" lands
+                # on the same Y-band as the colour-table header row; the GLADIATOR
+                # column-swap then promotes "you" into the abbreviation slot.
+                "YOU",
+                "HIM",
+                "HER",
+                "ITS",
+                "OUR",
+                "HIS",
+                "WE",
             }
         )
 
         def _parse_row(abbr_raw: str, name: str, code_raw: str) -> dict | None:
             abbr_clean = abbr_raw.replace(" ", "").upper()
             code_clean = code_raw.replace(" ", "").upper()
+            # Hyphen-stripped forms for pattern matching (handles "SL-3" → "SL3").
+            abbr_norm = abbr_clean.replace("-", "")
+            code_norm = code_clean.replace("-", "")
+
+            # Pre-swap stopword guard: if the raw left token is a common English word,
+            # reject immediately — do NOT attempt a column swap that could move a valid
+            # colour abbreviation into the code slot and the prose word into the
+            # abbreviation slot.  Root cause of the "YOU" false-positive (FZ S 21C6):
+            #   foreword row "This…you" → GLADIATOR swap → abbr="YOU", code="THIS"
+            #   then "YAMAHA" in the name body passes the colour-vocabulary check.
+            if abbr_norm in _STOP_WORDS:
+                return None
 
             # Some Yamaha forewords use "Colour Code | Colour Name | Abbreviation"
             # column order (numeric code on the left, text abbreviation on the right).
             # Detect by: left is purely numeric, right starts with a letter.
             # For 2-digit codes (e.g. CRUX-S: 70, 80, 90) the swap also applies.
             swapped = False
-            if _NUMERIC_CODE_RE.match(abbr_clean) and _ALPHA_ABBR_RE.match(code_clean):
+            if _NUMERIC_CODE_RE.match(abbr_norm) and _ALPHA_ABBR_RE.match(code_norm):
                 abbr_clean, code_clean = code_clean, abbr_clean
+                abbr_norm, code_norm = code_norm, abbr_norm
                 swapped = True
 
-            m = _ABBR_PAT.match(abbr_clean)
+            # GLADIATOR-style: left col is a short alpha paint code ("HO", "GO"),
+            # right col is the colour abbreviation ("YB", "DRMK", "SL-3").
+            # Detected when right col fails numeric paint-code pattern but both cols
+            # are alphabetic-abbreviation-like.
+            if not swapped and not _CODE_PAT.match(code_norm):
+                if _ALPHA_ABBR_RE.match(code_norm) and _ALPHA_ABBR_RE.match(abbr_norm):
+                    abbr_clean, code_clean = code_clean, abbr_clean
+                    abbr_norm, code_norm = code_norm, abbr_norm
+                    swapped = True
+
+            # LIBERO-style: paint code contains slashes ("1X/33/P1", "OX/PO/P1"),
+            # abbreviation is on the right ("YB", "DRMK").  Yamaha India forewords
+            # for older models (pre-2010) used a slash-separated paint formulation
+            # code instead of the standard 4-digit numeric code.
+            if not swapped and _SLASH_CODE_RE.match(abbr_clean) and _ALPHA_ABBR_RE.match(code_norm):
+                abbr_clean, code_clean = code_clean, abbr_clean
+                abbr_norm, code_norm = code_norm, abbr_norm
+                swapped = True
+
+            # ── Clean the abbreviation ──────────────────────────────────────────────
+            # 1. Detect (*) marker BEFORE stripping — marks the primary colour variant.
+            is_model_colour = bool(re.search(r"\(\s*\*\s*\)|\*$", abbr_clean))
+            # 2. Strip (*) or * suffix — decorative only; the real code is without it.
+            #    "YB(*)" → "YB", "CM6*" → "CM6"
+            abbr = re.sub(r"\s*\(\s*\*\s*\)\s*|\s*\*\s*$", "", abbr_clean).strip()
+            # 3. Strip colour-word suffix from compound abbreviation+colour strings
+            #    found in older Yamaha catalogues (e.g. 1GC1 2012 format):
+            #    "YB-BLACK" → "YB", "DBNM8-DARKGREY" → "DBNM8".
+            #    "SL-3" is left intact: digit suffix is not a colour vocabulary word.
+            if "-" in abbr:
+                _head, _tail = abbr.split("-", 1)
+                if (re.match(r"^[A-Z][A-Z0-9]{1,7}$", _head)
+                        and any(cw in _tail.upper() for cw in _COLOUR_WORDS)):
+                    abbr = _head
+            # 4. Re-derive norm from the cleaned abbreviation for all downstream checks.
+            abbr_norm_clean = abbr.replace("-", "")
+            m = _ABBR_PAT.match(abbr_norm_clean)
             if not m or m.group(1) in _HEADER_WORDS:
                 return None
 
-            abbr = m.group(1)
             # Reject purely-numeric abbreviations (section/page numbers, quantities)
-            if abbr.isdigit():
+            if abbr_norm_clean.isdigit():
                 return None
             # Yamaha colour abbreviations always start with a letter (YB, CM6, SMX …)
-            if not abbr[0].isalpha():
+            if not abbr_norm_clean[0].isalpha():
                 return None
             # Reject common English function words that can never be colour codes
-            if abbr in _STOP_WORDS:
+            if abbr_norm_clean in _STOP_WORDS:
                 return None
 
             # When the columns were swapped, code_clean is the original left numeric
@@ -1685,7 +2532,10 @@ class YamahaCatalogueExtractor:
 
             # Colour name must contain a recognisable colour word.
             # Eliminates TOC/section rows: "CYLINDER HEAD", "FIG 1 ASSEMBLY" etc.
-            name_words = set(name.upper().split())
+            # Split by spaces, hyphens, AND parentheses so "MBL2(MAT BLACK)" yields
+            # {"MBL2", "MAT", "BLACK"} and "BLACK" hits the vocabulary.  Without the
+            # paren split, "BLACK)" (with trailing paren) would miss the set.
+            name_words = set(re.split(r"[\s\-\(\)]+", name.upper()))
             if not name_words.intersection(_COLOUR_WORDS):
                 return None
 
@@ -1693,7 +2543,7 @@ class YamahaCatalogueExtractor:
                 "abbreviation": abbr,
                 "name": name.title(),  # "YAMAHA BLACK" → "Yamaha Black"
                 "code": code_clean,
-                "is_model_colour": bool(m.group(2)),
+                "is_model_colour": is_model_colour,
             }
 
         def _dedup(entries: list[dict]) -> list[dict]:
@@ -1778,7 +2628,20 @@ class YamahaCatalogueExtractor:
                             entries2.append(e)
 
                     if len(entries2) >= 3:
-                        return _dedup(entries2)  # Confident multi-colour result
+                        # Guard: require at least 2 entries that are NOT plain English
+                        # colour words.  Cover pages sometimes list "BLACK", "BLUE"
+                        # as model variant labels — they pass _parse_row validation but
+                        # are false positives that cause premature early-return, skipping
+                        # the real foreword table on a later page.  Single-colour
+                        # supplements (1 entry) are unaffected: they never reach this
+                        # threshold anyway and land in best_partial correctly.
+                        n_genuine = sum(
+                            1
+                            for e in entries2
+                            if e["abbreviation"].upper() not in _COLOUR_WORDS
+                        )
+                        if n_genuine >= 2:
+                            return _dedup(entries2)  # Confident multi-colour result
                     if len(entries2) > len(best_partial):
                         best_partial = entries2
 
@@ -2065,9 +2928,16 @@ class YamahaCatalogueExtractor:
         if best_single:
             return [best_single]
 
-        # Scan filename tokens for first variant code — handles covers without parens
-        # (e.g. "FZ S 21C6.pdf" → 21C6, "YBR 110 5TSK.pdf" → 5TSK)
+        # Scan filename tokens for first variant code — handles covers without parens.
+        # Check parenthesised tokens FIRST (e.g. "SZ16 (54B2).pdf" → "54B2" not "SZ16").
+        # "SZ16" is the model name; "(54B2)" is the Yamaha type code enclosed in parens.
         import re as _re
+
+        _PAREN_STEM = _re.compile(r"\(([A-Z0-9]{2,8})\)")
+        for m_ps in _PAREN_STEM.finditer(pdf_path.stem.upper()):
+            tok = m_ps.group(1)
+            if _is_vc(tok):
+                return [tok]
 
         for token in _re.split(r"[\s_\-]+", pdf_path.stem):
             if _is_vc(token.upper()):

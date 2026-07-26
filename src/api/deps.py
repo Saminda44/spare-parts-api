@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.config.paths import DATA_INTERIM, DATA_OUTPUTS, DATA_RAW
+from src.config.paths import DATA_INTERIM, DATA_OUTPUTS, DATA_PROCESSED, DATA_RAW
 
 _TARGETS_PATH = DATA_INTERIM / "sales_targets.json"
 _UPLIFT_PATH  = DATA_INTERIM / "uplift_factors.json"
@@ -48,6 +48,32 @@ def _load(path: Path) -> pd.DataFrame:
             return pd.DataFrame()  # not cached — retry on next call
         _df_cache[key] = pd.read_parquet(path)
     return _df_cache[key]
+
+
+# ── Module outputs (data/processed/m*.parquet) ───────────────────────────────
+
+
+def load_module_parquet(filename: str) -> pd.DataFrame | None:
+    """Load a module output parquet from data/processed/.
+
+    Business meaning: returns None when the file does not exist so callers
+    can return HTTP 503 with a helpful re-run message instead of crashing.
+    Always reads fresh from disk (not cached) so hot-reloading after a module
+    re-run is reflected without a server restart.
+    """
+    path = DATA_PROCESSED / filename
+    if not path.exists():
+        return None
+    return pd.read_parquet(path)
+
+
+def load_module_json(filename: str) -> dict | None:
+    """Load a module output JSON from data/processed/. Returns None if missing."""
+    path = DATA_PROCESSED / filename
+    if not path.exists():
+        return None
+    import json as _json  # noqa: PLC0415
+    return _json.loads(path.read_text(encoding="utf-8"))
 
 
 # ── Stages 1-8 ────────────────────────────────────────────────────────────────

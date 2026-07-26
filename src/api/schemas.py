@@ -48,6 +48,18 @@ class KpiResponse(BaseModel):
     avg_coverage_months: float
     sanity_flag_count: int
     rl_avg_order_reduction_pct: float  # average % order reduction vs rule-based
+    # Module 6 additions (zero when module 6 has not yet been run)
+    m6_total_skus_to_order: int = 0
+    m6_critical_count: int = 0
+    m6_high_count: int = 0
+    m6_stockout_risk_count: int = 0
+    m6_overstock_count: int = 0
+    m6_weighted_fill_rate_pct: float = 0.0
+    m6_container_utilization_pct: float = 0.0
+    # Module 3 totals (zero when module 3 has not yet been run)
+    m3_total_stock_qty: float = 0.0
+    m3_total_pipeline_qty: float = 0.0
+    m3_total_net_position: float = 0.0
 
 
 class StockStatusBreakdown(BaseModel):
@@ -1302,3 +1314,174 @@ class MarketBasketMLResponse(BaseModel):
     umap_coords: list[UmapPoint]
     clusters: list[MLCluster]
     model_info: MLModelInfo
+
+
+# ---------------------------------------------------------------------------
+# Module 1 — Vehicle Intelligence (m1_*.parquet)
+# ---------------------------------------------------------------------------
+
+
+class M1SalesForecastRow(BaseModel):
+    month: str
+    model: str
+    forecast_units: float
+    lower_ci: float
+    upper_ci: float
+
+
+class M1SalesForecastResponse(BaseModel):
+    total: int
+    rows: list[M1SalesForecastRow]
+    models: list[str]
+
+
+class M1UIOForecastRow(BaseModel):
+    month: str
+    model: str
+    uio_forecast: float
+
+
+class M1UIOForecastResponse(BaseModel):
+    total: int
+    rows: list[M1UIOForecastRow]
+    models: list[str]
+
+
+class M1AgeDistRow(BaseModel):
+    model: str
+    age_cohort: str
+    vehicle_count: int
+    pct_of_fleet: float
+
+
+class M1AgeDistResponse(BaseModel):
+    total: int
+    rows: list[M1AgeDistRow]
+
+
+# ---------------------------------------------------------------------------
+# Module 2 — Demand Intelligence (m2_*.parquet)
+# ---------------------------------------------------------------------------
+
+
+class M2FusedDemandRow(BaseModel):
+    part_no: str
+    month: str
+    demand_qty: float
+    method: str
+    cv: float
+    demand_class: str
+
+
+class M2FusedDemandResponse(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    rows: list[M2FusedDemandRow]
+    method_counts: dict[str, int]
+    demand_class_counts: dict[str, int]
+
+
+class M2OrdersForecastRow(BaseModel):
+    part_no: str
+    month: str
+    forecast_qty: float
+    source: str
+
+
+class M2OrdersForecastResponse(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    rows: list[M2OrdersForecastRow]
+    source_counts: dict[str, int]
+
+
+class M2UIODemandModuleRow(BaseModel):
+    part_no: str
+    month: str
+    uio_demand_qty: float
+    source: str
+
+
+class M2UIODemandModuleResponse(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    rows: list[M2UIODemandModuleRow]
+
+
+# ---------------------------------------------------------------------------
+# Module 3 — Inventory Intelligence (m3_inventory_position.parquet)
+# ---------------------------------------------------------------------------
+
+
+class M3InvPositionRow(BaseModel):
+    part_no: str
+    stock_qty: float
+    pipeline_qty: float
+    backorder_qty: float
+    net_position: float
+
+
+class M3InvPositionResponse(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    rows: list[M3InvPositionRow]
+    total_stock_qty: float
+    total_pipeline_qty: float
+    total_net_position: float
+
+
+# ---------------------------------------------------------------------------
+# Module 4 — Inventory Planning (m4_planning_table.parquet, m4_safety_stock.parquet)
+# ---------------------------------------------------------------------------
+
+
+class M4PlanningRow(BaseModel):
+    part_no: str
+    demand_class: str
+    mean_monthly_demand: float
+    lead_time_demand: float
+    review_demand: float
+    horizon_demand: float
+    sigma_demand: float
+    service_level: float
+    z_score: float
+    ss_method: str
+    safety_stock: float
+    rol: float
+    stock_qty: float
+    pipeline_qty: float
+    backorder_qty: float
+    net_position: float
+    signal_to_reorder: bool
+    urgency_score: float
+
+
+class M4PlanningResponse(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    rows: list[M4PlanningRow]
+    signal_count: int
+    demand_class_counts: dict[str, int]
+
+
+class M4SafetyStockRow(BaseModel):
+    part_no: str
+    safety_stock: float
+    service_level: float
+    z_score: float
+    sigma_demand: float
+    demand_class: str
+    ss_method: str
+
+
+class M4SafetyStockResponse(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    rows: list[M4SafetyStockRow]
+    demand_class_counts: dict[str, int]

@@ -91,6 +91,7 @@ _PDF_ROOT = Path("data/raw/pdf_catalogues")
 _PARQUET_OUT = Path("data/interim/catalogue_part_master.parquet")
 _XLSX_OUT = Path("data/outputs/catalogue_part_master.xlsx")
 _CATALOG_PARTS_PARQUET = Path("data/interim/catalog_parts.parquet")
+_MODEL_COMPAT_PARQUET = Path("data/outputs/model_compatibility.parquet")
 _PDF_EXTS = {".pdf", ".PDF"}
 
 
@@ -104,11 +105,37 @@ def _model_from_cache_file(cache_file: Path) -> str:
 
     Cache files are ``{folder}_{pdf_name}.pdf.json``, e.g.
     ``AEROX_1UB65460EV-AEROX.pdf.json`` → "AEROX".
+
+    NOTE: this splits only on the *first* underscore, so it is only correct
+    for single-word model folders.  Prefer ``_build_cache_stem_map`` when the
+    PDF root is available, which handles multi-word folders correctly.
     """
     stem = cache_file.stem  # remove .json
     if stem.endswith(".pdf"):
         stem = stem[:-4]  # remove .pdf
     return stem.split("_", 1)[0]
+
+
+def _build_cache_stem_map(pdf_root: Path) -> dict[str, str]:
+    """Return a mapping of cache-stem → model folder name for every PDF under pdf_root.
+
+    This is the authoritative way to recover the model folder for an agent
+    JSON cache file: it scans the real PDF paths on disk, so multi-word folder
+    names like "FZ & FZS", "MT 15", and "R 15" are preserved correctly.
+    """
+    mapping: dict[str, str] = {}
+    if not pdf_root.exists():
+        return mapping
+    for folder in pdf_root.iterdir():
+        if not folder.is_dir():
+            continue
+        for pdf in folder.rglob("*"):
+            if pdf.suffix not in _PDF_EXTS or not pdf.is_file():
+                continue
+            rel = pdf.relative_to(pdf_root).as_posix()
+            stem = _cache_key(rel)
+            mapping[stem] = folder.name
+    return mapping
 
 
 def _cache_key(rel_path: str) -> str:
@@ -299,6 +326,7 @@ def build_part_master(
     pdf_root: Path = _PDF_ROOT,
     parquet_out: Path = _PARQUET_OUT,
     xlsx_out: Path = _XLSX_OUT,
+    model_compat_parquet: Path = _MODEL_COMPAT_PARQUET,
 ) -> pd.DataFrame:
     """Aggregate all PDF catalogue extractions into a unified part master.
 
@@ -314,6 +342,9 @@ def build_part_master(
     - ``source_count``       : distinct source PDFs
     - ``source_pdfs``        : semicolon-joined PDF filenames
     - ``kind``               : "shared" if ever shared, else "colour_specific"
+    - ``model_years``        : JSON string mapping model → manufacture year
+                               (e.g. ``'{"AEROX": "2019"}'``), empty ``'{}'``
+                               when the compatibility parquet is absent.
 
     Returns:
         DataFrame sorted by part_no.  Empty when no sources found.
@@ -322,6 +353,11 @@ def build_part_master(
     # A JSON with 0 parts (agent ran but extracted nothing) is NOT considered
     # cached — those PDFs fall through to the YamahaCatalogueExtractor fallback.
     json_files = sorted(agent_builds_dir.glob("*.json"))
+
+    # Build stem→folder map from the real PDF paths so multi-word folder names
+    # (e.g. "FZ & FZS", "MT 15", "R 15") are preserved correctly.
+    stem_to_folder = _build_cache_stem_map(pdf_root)
+
     cached_stems: set[str] = set()
     for jf in json_files:
         try:
@@ -378,7 +414,7 @@ def build_part_master(
             logger.warning("Skipping %s: %s", json_file.name, exc)
             continue
 
-        model_folder = _model_from_cache_file(json_file)
+        model_folder = stem_to_folder.get(json_file.stem) or _model_from_cache_file(json_file)
         model_display = (data.get("model") or "").strip() or model_folder
         source_pdf = data.get("source_pdf", json_file.stem)
 
@@ -499,6 +535,27 @@ def build_part_master(
         )
 
     df = pd.DataFrame(output_rows)
+
+    # ── Enrich with model_years from cross-model compatibility parquet ────────
+    if model_compat_parquet.exists():
+        try:
+            compat_df = pd.read_parquet(
+                str(model_compat_parquet), columns=["part_no", "model_years"]
+            )
+            df = df.merge(compat_df, on="part_no", how="left")
+            df["model_years"] = df["model_years"].fillna("{}")
+            logger.info(
+                "Joined model_years from {} — {} / {} parts enriched",
+                model_compat_parquet.name,
+                (df["model_years"] != "{}").sum(),
+                len(df),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not join model_compat_parquet: {}", exc)
+            df["model_years"] = "{}"
+    else:
+        logger.debug("model_compatibility.parquet not found — model_years will be empty")
+        df["model_years"] = "{}"
 
     # ── Write parquet ─────────────────────────────────────────────────────────
     parquet_out.parent.mkdir(parents=True, exist_ok=True)

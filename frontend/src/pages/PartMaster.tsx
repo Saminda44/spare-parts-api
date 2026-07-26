@@ -144,7 +144,7 @@ export function PartMaster() {
 
   const load = useCallback(() => {
     setLoading(true);
-    fetchPartsFromCatalog()
+    fetchPartsFromCatalog({ limit: 50000 })
       .then(d => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);

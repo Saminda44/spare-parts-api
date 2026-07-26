@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 
 from src.api.deps import (
     get_mcsi_clean,
@@ -15,6 +15,7 @@ from src.api.deps import (
     get_uio_forecast,
     get_unit_sales_forecast,
     get_uplift_factors,
+    load_module_parquet,
     set_sales_targets,
     set_uplift_factors,
 )
@@ -30,6 +31,12 @@ from src.api.schemas import (
     GeoMatrixLevel,
     GeoMatrixRow,
     GeoModelResponse,
+    M1AgeDistResponse,
+    M1AgeDistRow,
+    M1SalesForecastResponse,
+    M1SalesForecastRow,
+    M1UIOForecastResponse,
+    M1UIOForecastRow,
     McsiAseRow,
     McsiColorRow,
     McsiDistrictRow,
@@ -1020,6 +1027,97 @@ def get_dealer_uplift_baseline() -> dict[str, float]:
         result[fwd] = round(trailing_avg_pct, 2)
 
     return result
+
+
+@router.get("/sales-forecast", response_model=M1SalesForecastResponse)
+def get_m1_sales_forecast(
+    model: str | None = Query(None, description="Filter by bike model name"),
+    limit: int = Query(500, le=10000),
+    offset: int = Query(0, ge=0),
+) -> M1SalesForecastResponse:
+    """Module 1 — per-model per-month unit sales forecast from m1_sales_forecast.parquet.
+
+    Business meaning: supplies model-level motorcycle sales forecasts produced by
+    Module 1 (vehicle intelligence). Distinct from the stage-2 aggregate forecast.
+    """
+    df = load_module_parquet("m1_sales_forecast.parquet")
+    if df is None:
+        raise HTTPException(status_code=503, detail="Run: python -m scripts.run_module 1 --save")
+
+    if model:
+        df = df[df["model"] == model]
+
+    models = sorted(df["model"].dropna().unique().tolist())
+    total = len(df)
+    page = df.iloc[offset: offset + limit]
+
+    rows = [
+        M1SalesForecastRow(
+            month=str(r["month"]),
+            model=str(r["model"]),
+            forecast_units=float(r.get("forecast_units", 0) or 0),
+            lower_ci=float(r.get("lower_ci", 0) or 0),
+            upper_ci=float(r.get("upper_ci", 0) or 0),
+        )
+        for _, r in page.iterrows()
+    ]
+    return M1SalesForecastResponse(total=total, rows=rows, models=models)
+
+
+@router.get("/uio-forecast-m1", response_model=M1UIOForecastResponse)
+def get_m1_uio_forecast(
+    model: str | None = Query(None, description="Filter by bike model name"),
+    limit: int = Query(500, le=10000),
+    offset: int = Query(0, ge=0),
+) -> M1UIOForecastResponse:
+    """Module 1 — per-model per-month UIO forecast from m1_uio_forecast.parquet.
+
+    Business meaning: Module 1 fleet-level UIO forecasts per model per month,
+    used to drive spare-parts demand projections in Module 2.
+    """
+    df = load_module_parquet("m1_uio_forecast.parquet")
+    if df is None:
+        raise HTTPException(status_code=503, detail="Run: python -m scripts.run_module 1 --save")
+
+    if model:
+        df = df[df["model"] == model]
+
+    models = sorted(df["model"].dropna().unique().tolist())
+    total = len(df)
+    page = df.iloc[offset: offset + limit]
+
+    rows = [
+        M1UIOForecastRow(
+            month=str(r["month"]),
+            model=str(r["model"]),
+            uio_forecast=float(r.get("uio_forecast", 0) or 0),
+        )
+        for _, r in page.iterrows()
+    ]
+    return M1UIOForecastResponse(total=total, rows=rows, models=models)
+
+
+@router.get("/age-distribution", response_model=M1AgeDistResponse)
+def get_m1_age_distribution() -> M1AgeDistResponse:
+    """Module 1 — fleet age distribution from m1_age_distribution.parquet.
+
+    Business meaning: shows the age profile of the UIO fleet per model.
+    Older cohorts consume replacement parts at higher rates.
+    """
+    df = load_module_parquet("m1_age_distribution.parquet")
+    if df is None:
+        raise HTTPException(status_code=503, detail="Run: python -m scripts.run_module 1 --save")
+
+    rows = [
+        M1AgeDistRow(
+            model=str(r["model"]),
+            age_cohort=str(r["age_cohort"]),
+            vehicle_count=int(r.get("vehicle_count", 0) or 0),
+            pct_of_fleet=float(r.get("pct_of_fleet", 0) or 0),
+        )
+        for _, r in df.iterrows()
+    ]
+    return M1AgeDistResponse(total=len(rows), rows=rows)
 
 
 @router.get("/uio-demand", response_model=UIODemandResponse)

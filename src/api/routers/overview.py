@@ -5,8 +5,14 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from src.api.deps import (
-    get_classification, get_policy, get_rl_policy,
-    get_stock_tracker, pipeline_status, pipeline_freshness,
+    get_classification,
+    get_policy,
+    get_rl_policy,
+    get_stock_tracker,
+    load_module_json,
+    load_module_parquet,
+    pipeline_freshness,
+    pipeline_status,
 )
 from src.api.schemas import KpiResponse, OverviewResponse, PipelineStatus, StockStatusBreakdown
 
@@ -78,6 +84,22 @@ def get_overview() -> OverviewResponse:
     tier_counts = {k: int(v) for k, v in pol["policy_tier"].value_counts().items()} if "policy_tier" in pol.columns else {}
     ss_method_counts = {k: int(v) for k, v in pol["ss_method"].value_counts().items()} if "ss_method" in pol.columns else {}
 
+    # ── Module 6 summary (optional — populated when module 6 has run) ──────────
+    m6 = load_module_json("m6_summary.json") or {}
+    m6_total_skus_to_order = int(m6.get("total_skus_to_order", 0))
+    m6_critical_count = int(m6.get("critical_count", 0))
+    m6_high_count = int(m6.get("high_count", 0))
+    m6_stockout_risk_count = int(m6.get("stockout_risk_count", 0))
+    m6_overstock_count = int(m6.get("overstock_count", 0))
+    m6_weighted_fill_rate_pct = float(m6.get("weighted_fill_rate_pct", 0.0))
+    m6_container_utilization_pct = float(m6.get("container_utilization_pct", 0.0))
+
+    # ── Module 3 inventory position totals ────────────────────────────────────
+    m3_df = load_module_parquet("m3_inventory_position.parquet")
+    m3_total_stock_qty = float(m3_df["stock_qty"].sum()) if m3_df is not None and "stock_qty" in m3_df.columns else 0.0
+    m3_total_pipeline_qty = float(m3_df["pipeline_qty"].sum()) if m3_df is not None and "pipeline_qty" in m3_df.columns else 0.0
+    m3_total_net_position = float(m3_df["net_position"].sum()) if m3_df is not None and "net_position" in m3_df.columns else 0.0
+
     return OverviewResponse(
         kpis=KpiResponse(
             total_skus=total_skus,
@@ -94,6 +116,16 @@ def get_overview() -> OverviewResponse:
             avg_coverage_months=round(avg_coverage, 2),
             sanity_flag_count=sanity_count,
             rl_avg_order_reduction_pct=round(rl_reduction, 2),
+            m6_total_skus_to_order=m6_total_skus_to_order,
+            m6_critical_count=m6_critical_count,
+            m6_high_count=m6_high_count,
+            m6_stockout_risk_count=m6_stockout_risk_count,
+            m6_overstock_count=m6_overstock_count,
+            m6_weighted_fill_rate_pct=round(m6_weighted_fill_rate_pct, 2),
+            m6_container_utilization_pct=round(m6_container_utilization_pct, 2),
+            m3_total_stock_qty=round(m3_total_stock_qty, 0),
+            m3_total_pipeline_qty=round(m3_total_pipeline_qty, 0),
+            m3_total_net_position=round(m3_total_net_position, 0),
         ),
         stock_status=StockStatusBreakdown(
             **{k: int(v) for k, v in status_counts.items() if k in StockStatusBreakdown.model_fields}

@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Cell,
+  ResponsiveContainer, Cell, LineChart, Line, Legend,
 } from "recharts";
-import { fetchUIOComparison, type UIOComparisonData } from "../api/client";
+import {
+  fetchUIOComparison, fetchM1UIOForecast,
+  type UIOComparisonData, type M1UIOForecastResponse,
+} from "../api/client";
 import { KpiCard } from "../components/KpiCard";
 
 const MODEL_COLORS = [
@@ -26,11 +29,28 @@ function SourceBadge({ label, color }: { label: string; color: string }) {
 }
 
 export function UIO() {
-  const [data, setData] = useState<UIOComparisonData | null>(null);
+  const [data,       setData]      = useState<UIOComparisonData | null>(null);
+  const [m1Forecast, setM1Forecast] = useState<M1UIOForecastResponse | null>(null);
 
-  useEffect(() => { fetchUIOComparison().then(setData); }, []);
+  useEffect(() => {
+    fetchUIOComparison().then(setData);
+    fetchM1UIOForecast({ limit: 500 }).then(setM1Forecast).catch(() => {/* module not run */});
+  }, []);
 
   if (!data) return <div className="flex-1 flex items-center justify-center text-slate-400">Loading…</div>;
+
+  // ── Module 1 UIO forecast pivot: months × models ─────────────────────────
+  const m1Months = m1Forecast
+    ? [...new Set(m1Forecast.rows.map(r => r.month))].sort()
+    : [];
+  const m1Models = m1Forecast?.models ?? [];
+  const m1ChartData = m1Months.map(month => {
+    const obj: Record<string, string | number> = { month };
+    (m1Forecast?.rows ?? []).filter(r => r.month === month).forEach(r => {
+      obj[r.model] = r.uio_forecast;
+    });
+    return obj;
+  });
 
   const totalExternal = data.external.reduce((s, r) => s + r.uio, 0);
   const totalMcsi     = data.mcsi.reduce((s, r) => s + r.uio, 0);
@@ -187,6 +207,61 @@ export function UIO() {
           </div>
         </div>
       </div>
+
+      {/* ── Module 1: Per-model UIO forecast ── */}
+      {m1Forecast && m1Forecast.total > 0 && (
+        <div className="bg-white rounded-xl shadow-sm p-5 space-y-4">
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-bold text-slate-800">UIO Forecast by Model — Module 1</h3>
+            <SourceBadge label="m1_uio_forecast.parquet" color="text-teal-700 border-teal-200 bg-teal-50"/>
+          </div>
+          <p className="text-xs text-slate-400 -mt-2">
+            Module 1 vehicle intelligence forecast · {m1Forecast.total.toLocaleString()} rows · {m1Models.length} models · {m1Months.length} months
+          </p>
+          {m1ChartData.length > 0 && m1Models.length > 0 && (
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={m1ChartData.slice(0, 24)} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                <XAxis dataKey="month" tick={{ fontSize: 9 }} interval={2}/>
+                <YAxis tick={{ fontSize: 10 }} tickFormatter={fmt} width={44}/>
+                <Tooltip formatter={(v: unknown, n: unknown) => [Number(v).toFixed(0), String(n)]}/>
+                <Legend wrapperStyle={{ fontSize: 10 }}/>
+                {m1Models.slice(0, 8).map((m, i) => (
+                  <Line key={m} type="monotone" dataKey={m} stroke={MODEL_COLORS[i % MODEL_COLORS.length]}
+                    strokeWidth={1.5} dot={false} name={m}/>
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-slate-100 text-left text-[10px] text-slate-500 uppercase">
+                  <th className="py-2 pr-3">Month</th>
+                  {m1Models.slice(0, 6).map(m => (
+                    <th key={m} className="py-2 pr-3 text-right">{m}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {m1ChartData.slice(0, 12).map(row => (
+                  <tr key={row.month as string} className="border-b border-slate-50 hover:bg-slate-50/50">
+                    <td className="py-1.5 pr-3 font-mono text-slate-600">{row.month as string}</td>
+                    {m1Models.slice(0, 6).map(m => (
+                      <td key={m} className="py-1.5 pr-3 text-right text-slate-700">
+                        {row[m] != null ? Number(row[m]).toFixed(0) : "—"}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {m1Months.length > 12 && (
+              <p className="text-xs text-slate-400 mt-2 text-center">Showing 12 of {m1Months.length} months</p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── Full historical table ── */}
       <div className="bg-white rounded-xl shadow-sm p-5">

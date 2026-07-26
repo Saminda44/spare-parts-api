@@ -7,6 +7,7 @@ import {
   fetchOrdersEda, fetchSalesEda,
   type OrdersEdaData, type SalesEdaData,
   type DealerType, type McCategoryType,
+  fetchInventoryPosition, type M3InvPositionResponse,
 } from "../api/client";
 import { KpiCard } from "../components/KpiCard";
 import { TimePicker, filterByRange, type TimeRange, YearPicker, filterByYear, getYears, monthLabel } from "../components/TimePicker";
@@ -44,7 +45,7 @@ function ValueBar({ pct }: { pct: number }) {
   );
 }
 
-type Tab = "orders" | "sales";
+type Tab = "orders" | "sales" | "inv-pos";
 type OrdersView = "overview" | "parts" | "dealers" | "geography";
 type OrdersAnalysisSeg = "parts" | "geography";
 
@@ -67,6 +68,10 @@ export function EDA() {
   const [salesView,   setSalesView]   = useState<"kpi" | "parts" | "dealers" | "hierarchy">("kpi");
   const [salesPartSearch,   setSalesPartSearch]   = useState("");
   const [salesDealerSearch, setSalesDealerSearch] = useState("");
+
+  // ── Module 3 inventory position ───────────────────────────────────────────
+  const [invPosData,   setInvPosData]   = useState<M3InvPositionResponse | null>(null);
+  const [invPosSearch, setInvPosSearch] = useState("");
 
   useEffect(() => {
     fetchOrdersEda(ordersDt, ordersMcCat, ordersApiYear).then(d => {
@@ -99,9 +104,16 @@ export function EDA() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [salesDt, salesMcCat, salesYear]);
 
+  useEffect(() => {
+    fetchInventoryPosition({ limit: 500 })
+      .then(setInvPosData)
+      .catch(() => setInvPosData(null));
+  }, []);
+
   const TABS = [
-    { key: "orders" as Tab, label: "Orders EDA (Stage 4)" },
-    { key: "sales"  as Tab, label: "Sales EDA (Stage 5)"  },
+    { key: "orders"  as Tab, label: "Orders EDA (Stage 4)"         },
+    { key: "sales"   as Tab, label: "Sales EDA (Stage 5)"           },
+    { key: "inv-pos" as Tab, label: "Inventory Position (Module 3)" },
   ];
 
   return (
@@ -1532,6 +1544,121 @@ export function EDA() {
                 )}
               </>
             ) : <p className="text-slate-400 text-sm py-6">Loading sales data…</p>}
+          </div>
+        )}
+
+        {/* ── Inventory Position (Module 3) ── */}
+        {tab === "inv-pos" && (
+          <div className="space-y-5">
+            {!invPosData ? (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center">
+                <p className="text-sm font-semibold text-amber-700 mb-1">Module 3 output not found</p>
+                <code className="text-xs text-amber-600 bg-amber-100 px-2 py-1 rounded">
+                  python -m scripts.run_module 3 --save
+                </code>
+              </div>
+            ) : (
+              <>
+                {/* KPIs */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <KpiCard label="Total SKUs"     value={invPosData.total.toLocaleString()} color="blue"/>
+                  <KpiCard label="Total Stock"    value={invPosData.total_stock_qty.toLocaleString(undefined, { maximumFractionDigits: 0 })} sub="units on hand" color="green"/>
+                  <KpiCard label="Pipeline"       value={invPosData.total_pipeline_qty.toLocaleString(undefined, { maximumFractionDigits: 0 })} sub="in-transit / on order" color="teal"/>
+                  <KpiCard label="Net Position"   value={invPosData.total_net_position.toLocaleString(undefined, { maximumFractionDigits: 0 })} sub="stock + pipeline − backorder" color={invPosData.total_net_position < 0 ? "red" : "purple"}/>
+                </div>
+
+                {/* Net position distribution bar */}
+                <div className="bg-white rounded-xl shadow-sm p-5">
+                  <h3 className="text-sm font-semibold text-slate-700 mb-1">Net Position Distribution</h3>
+                  <p className="text-xs text-slate-400 mb-3">
+                    Stock + pipeline − backorder per SKU · {invPosData.total.toLocaleString()} parts ·
+                    source: <code className="bg-slate-100 px-1 rounded">m3_inventory_position.parquet</code>
+                  </p>
+                  {(() => {
+                    const rows = invPosData.rows;
+                    const negative   = rows.filter(r => r.net_position < 0).length;
+                    const zero       = rows.filter(r => r.net_position === 0).length;
+                    const lowPos     = rows.filter(r => r.net_position > 0 && r.net_position < 10).length;
+                    const medPos     = rows.filter(r => r.net_position >= 10 && r.net_position < 100).length;
+                    const highPos    = rows.filter(r => r.net_position >= 100).length;
+                    const bands = [
+                      { label: "Negative (backorder)", count: negative, fill: "#EF4444" },
+                      { label: "Zero",                 count: zero,     fill: "#94A3B8" },
+                      { label: "Low (1–9)",            count: lowPos,   fill: "#FFC107" },
+                      { label: "Medium (10–99)",       count: medPos,   fill: "#4361EE" },
+                      { label: "High (≥100)",          count: highPos,  fill: "#2CC56F" },
+                    ];
+                    return (
+                      <>
+                        <ResponsiveContainer width="100%" height={140}>
+                          <BarChart data={bands} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false}/>
+                            <XAxis dataKey="label" tick={{ fontSize: 9 }}/>
+                            <YAxis tick={{ fontSize: 10 }} tickFormatter={(v: number) => v >= 1000 ? `${(v/1000).toFixed(0)}K` : String(v)} width={36}/>
+                            <Tooltip formatter={(v: unknown) => Number(v).toLocaleString()}/>
+                            <Bar dataKey="count" name="SKUs" radius={[4,4,0,0]}>
+                              {bands.map(b => <Cell key={b.label} fill={b.fill}/>)}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                        <div className="flex flex-wrap gap-3 mt-2">
+                          {bands.map(b => (
+                            <span key={b.label} className="flex items-center gap-1 text-xs text-slate-500">
+                              <span className="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: b.fill }}/>
+                              {b.label}: <strong className="text-slate-700">{b.count.toLocaleString()}</strong>
+                            </span>
+                          ))}
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+
+                {/* Filter + table */}
+                <div className="bg-white rounded-xl shadow-sm p-5">
+                  <div className="flex gap-3 mb-4 flex-wrap">
+                    <input
+                      className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm flex-1 min-w-[160px] focus:outline-none focus:ring-2 focus:ring-brand-blue/30"
+                      placeholder="Filter by part no…"
+                      value={invPosSearch} onChange={e => setInvPosSearch(e.target.value)}
+                    />
+                    <span className="text-xs text-slate-400 self-center">
+                      {invPosData.total.toLocaleString()} total rows (showing up to 500)
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase">
+                          <th className="py-2 pr-4">Part No</th>
+                          <th className="py-2 pr-4 text-right">Stock Qty</th>
+                          <th className="py-2 pr-4 text-right">Pipeline Qty</th>
+                          <th className="py-2 pr-4 text-right">Backorder Qty</th>
+                          <th className="py-2 text-right">Net Position</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {invPosData.rows
+                          .filter(r => !invPosSearch || r.part_no.toLowerCase().includes(invPosSearch.toLowerCase()))
+                          .slice(0, 200)
+                          .map((r, i) => (
+                            <tr key={`${r.part_no}-${i}`} className={`border-b border-slate-50 hover:bg-slate-50/50 ${r.net_position < 0 ? "bg-red-50/20" : ""}`}>
+                              <td className="py-1.5 pr-4 font-mono text-xs text-slate-700">{r.part_no}</td>
+                              <td className="py-1.5 pr-4 text-right text-xs text-slate-600">{r.stock_qty.toFixed(0)}</td>
+                              <td className="py-1.5 pr-4 text-right text-xs text-teal-600">{r.pipeline_qty.toFixed(0)}</td>
+                              <td className="py-1.5 pr-4 text-right text-xs text-amber-600">{r.backorder_qty.toFixed(0)}</td>
+                              <td className="py-1.5 text-right font-semibold text-xs"
+                                style={{ color: r.net_position < 0 ? "#EF4444" : r.net_position === 0 ? "#94A3B8" : "#2CC56F" }}>
+                                {r.net_position.toFixed(0)}
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         )}
 

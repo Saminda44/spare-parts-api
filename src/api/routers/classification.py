@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import pandas as pd
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
-from src.api.deps import get_classification
-from src.api.schemas import ClassificationResponse, ClassificationRow
+from src.api.deps import get_classification, load_module_parquet
+from src.api.schemas import (
+    ClassificationResponse,
+    ClassificationRow,
+    M4PlanningResponse,
+    M4PlanningRow,
+)
 
 router = APIRouter(prefix="/classification", tags=["Classification"])
 
@@ -91,4 +96,67 @@ def list_classification(
         segment_counts=_vc("demand_segment"),
         demand_category_counts=_vc("demand_category"),
         tier_counts=_vc("policy_tier"),
+    )
+
+
+@router.get("/planning-table", response_model=M4PlanningResponse)
+def get_planning_table(
+    demand_class: str | None = Query(None, description="Filter by demand class (e.g. AXF)"),
+    signal_to_reorder: bool | None = Query(None, description="True = only SKUs below ROL"),
+    part_no: str | None = Query(None, description="Filter by part number"),
+    limit: int = Query(500, le=50000),
+    offset: int = Query(0, ge=0),
+) -> M4PlanningResponse:
+    """Module 4 — planning table from m4_planning_table.parquet.
+
+    Business meaning: comprehensive per-SKU planning parameters including ROL,
+    safety stock, reorder signal (True when net_position ≤ ROL), and urgency
+    score. Use signal_to_reorder=true to show only SKUs that need ordering now.
+    """
+    df = load_module_parquet("m4_planning_table.parquet")
+    if df is None:
+        raise HTTPException(status_code=503, detail="Run: python -m scripts.run_module 4 --save")
+
+    if part_no:
+        df = df[df["part_no"] == part_no]
+    if demand_class and "demand_class" in df.columns:
+        df = df[df["demand_class"] == demand_class]
+    if signal_to_reorder is not None and "signal_to_reorder" in df.columns:
+        df = df[df["signal_to_reorder"].astype(bool) == signal_to_reorder]
+
+    signal_count = int(df["signal_to_reorder"].astype(bool).sum()) if "signal_to_reorder" in df.columns else 0
+    dc_counts: dict[str, int] = (
+        {k: int(v) for k, v in df["demand_class"].value_counts().items()}
+        if "demand_class" in df.columns else {}
+    )
+
+    total = len(df)
+    page = df.iloc[offset: offset + limit]
+
+    rows = [
+        M4PlanningRow(
+            part_no=str(r["part_no"]),
+            demand_class=str(r.get("demand_class", "")),
+            mean_monthly_demand=float(r.get("mean_monthly_demand", 0) or 0),
+            lead_time_demand=float(r.get("lead_time_demand", 0) or 0),
+            review_demand=float(r.get("review_demand", 0) or 0),
+            horizon_demand=float(r.get("horizon_demand", 0) or 0),
+            sigma_demand=float(r.get("sigma_demand", 0) or 0),
+            service_level=float(r.get("service_level", 0) or 0),
+            z_score=float(r.get("z_score", 0) or 0),
+            ss_method=str(r.get("ss_method", "")),
+            safety_stock=float(r.get("safety_stock", 0) or 0),
+            rol=float(r.get("rol", 0) or 0),
+            stock_qty=float(r.get("stock_qty", 0) or 0),
+            pipeline_qty=float(r.get("pipeline_qty", 0) or 0),
+            backorder_qty=float(r.get("backorder_qty", 0) or 0),
+            net_position=float(r.get("net_position", 0) or 0),
+            signal_to_reorder=bool(r.get("signal_to_reorder", False)),
+            urgency_score=float(r.get("urgency_score", 0) or 0),
+        )
+        for _, r in page.iterrows()
+    ]
+    return M4PlanningResponse(
+        total=total, offset=offset, limit=limit,
+        rows=rows, signal_count=signal_count, demand_class_counts=dc_counts,
     )

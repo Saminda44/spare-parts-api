@@ -175,6 +175,24 @@ export function Overview() {
               { label: "Total Order Value", value: `LKR ${fmt(inv.kpis.total_order_value_lkr)}`, sub: "imm + soon + planned" },
             ]}/>
 
+            {/* Module 6 + Module 3 row — only shown when those modules have run */}
+            {((inv.kpis.m6_total_skus_to_order ?? 0) > 0 || (inv.kpis.m3_total_stock_qty ?? 0) > 0) && (
+              <>
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 pt-1">
+                  Intelligence Modules
+                  <span className="ml-2 font-normal text-slate-300 normal-case">Module 3 + Module 6 outputs</span>
+                </p>
+                <KpiRow items={[
+                  { label: "M6 SKUs to Order",      value: fmt(inv.kpis.m6_total_skus_to_order ?? 0),      sub: `${inv.kpis.m6_critical_count ?? 0} critical · ${inv.kpis.m6_high_count ?? 0} high`, badge: (inv.kpis.m6_critical_count ?? 0) > 0 ? "danger" : "ok" },
+                  { label: "M6 Stockout Risk",       value: fmt(inv.kpis.m6_stockout_risk_count ?? 0),      sub: "net position below ROL" },
+                  { label: "M6 Overstock",           value: fmt(inv.kpis.m6_overstock_count ?? 0),          sub: "excess inventory" },
+                  { label: "M6 Fill Rate (Wtd)",     value: `${(inv.kpis.m6_weighted_fill_rate_pct ?? 0).toFixed(1)}%`, sub: "weighted by demand", badge: (inv.kpis.m6_weighted_fill_rate_pct ?? 0) < 70 ? "warn" : "ok" },
+                  { label: "M3 Stock on Hand",       value: fmt(inv.kpis.m3_total_stock_qty ?? 0),          sub: "units (all SKUs)" },
+                  { label: "M3 Net Position",        value: fmt(inv.kpis.m3_total_net_position ?? 0),       sub: "stock + pipeline − backorder", badge: (inv.kpis.m3_total_net_position ?? 0) < 0 ? "danger" : "ok" },
+                ]}/>
+              </>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* Status breakdown */}
               <div>

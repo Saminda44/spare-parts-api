@@ -36,6 +36,18 @@ export interface KpiData {
   avg_coverage_months: number;
   sanity_flag_count: number;
   rl_avg_order_reduction_pct: number;
+  // Module 6 additions (present when module 6 has run)
+  m6_total_skus_to_order?: number;
+  m6_critical_count?: number;
+  m6_high_count?: number;
+  m6_stockout_risk_count?: number;
+  m6_overstock_count?: number;
+  m6_weighted_fill_rate_pct?: number;
+  m6_container_utilization_pct?: number;
+  // Module 3 totals
+  m3_total_stock_qty?: number;
+  m3_total_pipeline_qty?: number;
+  m3_total_net_position?: number;
 }
 
 export interface OverviewData {
@@ -837,6 +849,7 @@ export interface PdfTableResult {
   colour_codes: ColourCode[];
   available_colours?: string[];
   manufacture_year?: string;
+  model_no?: string;
   pages_scanned: number; sections_found: number; ocr_flagged: number; warnings: string[];
   column_layout?: string[];  // detected column names in left-to-right order
   column_display_labels?: Record<string, string>; // logical key → PDF's actual header text
@@ -898,6 +911,7 @@ export interface AgentResult {
   source_pdf: string;
   extracted_at: string;
   model: string;
+  model_no?: string;
   manufacture_year?: string;
   variants: string[];
   colour_legend: Record<string, AgentColourEntry>;
@@ -1093,3 +1107,262 @@ export const fetchMarketBasketML = () =>
   api
     .get<MarketBasketMLData>("/eda/market-basket/ml", { timeout: 120_000 })
     .then(r => r.data);
+
+// ── Module 6: Purchase Recommendation ────────────────────────────────────────
+
+export interface PurchaseRecommendationSummary {
+  total_skus_to_order: number;
+  critical_count: number;
+  high_count: number;
+  stockout_risk_count: number;
+  overstock_count: number;
+  weighted_fill_rate_pct: number;
+  container_utilization_pct: number;
+}
+
+export interface PurchaseRecommendationRow {
+  part_no: string;
+  order_qty: number;
+  priority: number;
+  urgency_score: number;
+  demand_class: string;
+  abc: string;
+  mean_monthly_demand: number;
+  binding_constraint: string;
+  risk_level: string;
+  action: string;
+  fill_rate_pct: number;
+}
+
+export interface PurchaseRecommendationResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  rows: PurchaseRecommendationRow[];
+}
+
+export interface StockoutRiskRow {
+  part_no: string;
+  risk_pct: number;
+  days_until_stockout: number;
+  urgency_score: number;
+}
+
+export interface OverstockRow {
+  part_no: string;
+  excess_qty: number;
+  months_cover: number;
+  demand_class: string;
+}
+
+export interface FillRateRow {
+  part_no: string;
+  fill_rate_pct: number;
+  stock_qty: number;
+  monthly_demand: number;
+}
+
+export const fetchPurchaseRecommendationSummary = () =>
+  api
+    .get<PurchaseRecommendationSummary>("/purchase-recommendation/summary")
+    .then(r => r.data);
+
+export const fetchPurchaseRecommendations = (params?: Record<string, unknown>) =>
+  api
+    .get<PurchaseRecommendationResponse>("/purchase-recommendation/recommendations", { params })
+    .then(r => r.data);
+
+export const fetchStockoutRisk = (params?: Record<string, unknown>) =>
+  api
+    .get<{ total: number; rows: StockoutRiskRow[] }>(
+      "/purchase-recommendation/stockout-risk",
+      { params },
+    )
+    .then(r => r.data);
+
+export const fetchOverstockRisk = (params?: Record<string, unknown>) =>
+  api
+    .get<{ total: number; rows: OverstockRow[] }>(
+      "/purchase-recommendation/overstock",
+      { params },
+    )
+    .then(r => r.data);
+
+export const fetchFillRate = (params?: Record<string, unknown>) =>
+  api
+    .get<{ total: number; rows: FillRateRow[] }>(
+      "/purchase-recommendation/fill-rate",
+      { params },
+    )
+    .then(r => r.data);
+
+// ── Module 1 — Vehicle Intelligence ──────────────────────────────────────────
+
+export interface M1SalesForecastRow {
+  month: string;
+  model: string;
+  forecast_units: number;
+  lower_ci: number;
+  upper_ci: number;
+}
+export interface M1SalesForecastResponse {
+  total: number;
+  rows: M1SalesForecastRow[];
+  models: string[];
+}
+export const fetchM1SalesForecast = (params?: Record<string, unknown>) =>
+  api.get<M1SalesForecastResponse>("/bikes/sales-forecast", { params }).then(r => r.data);
+
+export interface M1UIOForecastRow {
+  month: string;
+  model: string;
+  uio_forecast: number;
+}
+export interface M1UIOForecastResponse {
+  total: number;
+  rows: M1UIOForecastRow[];
+  models: string[];
+}
+export const fetchM1UIOForecast = (params?: Record<string, unknown>) =>
+  api.get<M1UIOForecastResponse>("/bikes/uio-forecast-m1", { params }).then(r => r.data);
+
+export interface M1AgeDistRow {
+  model: string;
+  age_cohort: string;
+  vehicle_count: number;
+  pct_of_fleet: number;
+}
+export interface M1AgeDistResponse {
+  total: number;
+  rows: M1AgeDistRow[];
+}
+export const fetchM1AgeDist = () =>
+  api.get<M1AgeDistResponse>("/bikes/age-distribution").then(r => r.data);
+
+// ── Module 2 — Demand Intelligence ───────────────────────────────────────────
+
+export interface M2FusedDemandRow {
+  part_no: string;
+  month: string;
+  demand_qty: number;
+  method: string;
+  cv: number | null;
+  demand_class: string;
+}
+export interface M2FusedDemandResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  rows: M2FusedDemandRow[];
+  method_counts: Record<string, number>;
+  demand_class_counts: Record<string, number>;
+}
+export const fetchFusedDemand = (params?: Record<string, unknown>) =>
+  api.get<M2FusedDemandResponse>("/forecast/fused-demand", { params }).then(r => r.data);
+
+export interface M2OrdersForecastRow {
+  part_no: string;
+  month: string;
+  forecast_qty: number;
+  source: string;
+}
+export interface M2OrdersForecastResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  rows: M2OrdersForecastRow[];
+  source_counts: Record<string, number>;
+}
+export const fetchOrdersForecast = (params?: Record<string, unknown>) =>
+  api.get<M2OrdersForecastResponse>("/forecast/orders-forecast", { params }).then(r => r.data);
+
+export interface M2UIODemandModuleRow {
+  part_no: string;
+  month: string;
+  uio_demand_qty: number;
+  source: string;
+}
+export interface M2UIODemandModuleResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  rows: M2UIODemandModuleRow[];
+}
+export const fetchM2UIODemand = (params?: Record<string, unknown>) =>
+  api.get<M2UIODemandModuleResponse>("/forecast/uio-demand", { params }).then(r => r.data);
+
+// ── Module 3 — Inventory Intelligence ────────────────────────────────────────
+
+export interface M3InvPositionRow {
+  part_no: string;
+  stock_qty: number;
+  pipeline_qty: number;
+  backorder_qty: number;
+  net_position: number;
+}
+export interface M3InvPositionResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  rows: M3InvPositionRow[];
+  total_stock_qty: number;
+  total_pipeline_qty: number;
+  total_net_position: number;
+}
+export const fetchInventoryPosition = (params?: Record<string, unknown>) =>
+  api.get<M3InvPositionResponse>("/inventory/position", { params }).then(r => r.data);
+
+// ── Module 4 — Inventory Planning ────────────────────────────────────────────
+
+export interface M4PlanningRow {
+  part_no: string;
+  demand_class: string;
+  mean_monthly_demand: number;
+  lead_time_demand: number;
+  review_demand: number;
+  horizon_demand: number;
+  sigma_demand: number;
+  service_level: number;
+  z_score: number;
+  ss_method: string;
+  safety_stock: number;
+  rol: number;
+  stock_qty: number;
+  pipeline_qty: number;
+  backorder_qty: number;
+  net_position: number;
+  signal_to_reorder: boolean;
+  urgency_score: number;
+}
+export interface M4PlanningResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  rows: M4PlanningRow[];
+  signal_count: number;
+  demand_class_counts: Record<string, number>;
+}
+export const fetchPlanningTable = (params?: Record<string, unknown>) =>
+  api.get<M4PlanningResponse>("/classification/planning-table", { params }).then(r => r.data);
+
+export const fetchInventoryPlanning = (params?: Record<string, unknown>) =>
+  api.get<M4PlanningResponse>("/inventory/planning", { params }).then(r => r.data);
+
+export interface M4SafetyStockRow {
+  part_no: string;
+  safety_stock: number;
+  service_level: number;
+  z_score: number;
+  sigma_demand: number;
+  demand_class: string;
+  ss_method: string;
+}
+export interface M4SafetyStockResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  rows: M4SafetyStockRow[];
+  demand_class_counts: Record<string, number>;
+}
+export const fetchSafetyStock = (params?: Record<string, unknown>) =>
+  api.get<M4SafetyStockResponse>("/inventory/safety-stock", { params }).then(r => r.data);

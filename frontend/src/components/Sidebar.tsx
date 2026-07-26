@@ -2,7 +2,7 @@ import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard, TrendingUp, Package, ShoppingCart,
   Zap, BookOpen, BarChart2, FileText,
-  Activity, Search, GitMerge,
+  Activity, Search, GitMerge, ClipboardList,
 } from "lucide-react";
 // ── Overview ──────────────────────────────────────────────────────────────
 const NAV_OVERVIEW = [
@@ -18,10 +18,11 @@ const NAV_MOTO = [
 
 // ── Spare Parts ───────────────────────────────────────────────────────────
 const NAV_PARTS_ANALYSIS = [
-  { to: "/classification", label: "Inventory Analysis",         Icon: Package      },
-  { to: "/forecast",       label: "Demand Forecast",            Icon: TrendingUp   },
-  { to: "/orders",         label: "Order Plan",                  Icon: ShoppingCart },
-  { to: "/rl",             label: "RL Policy",                   Icon: Zap          },
+  { to: "/classification",          label: "Inventory Analysis",       Icon: Package       },
+  { to: "/forecast",                label: "Demand Forecast",          Icon: TrendingUp    },
+  { to: "/orders",                  label: "Order Plan",               Icon: ShoppingCart  },
+  { to: "/purchase-recommendation", label: "Purchase Recommendation",  Icon: ClipboardList },
+  { to: "/rl",                      label: "RL Policy",                Icon: Zap           },
 ];
 
 const NAV_PARTS_DATA = [
